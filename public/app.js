@@ -754,12 +754,18 @@ async function viewDispatch(main) {
 async function viewLocations(main) {
   main.innerHTML = '<h1>Locations</h1><p class="muted">Live locations of signed-in drivers. Refreshes every 10 seconds.</p>' +
     '<div id="map"></div><div id="locList" class="mt"></div>';
+  const compass = (h) => {
+    if (typeof h !== 'number') return '—';
+    const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return dirs[Math.round(h / 45) % 8] + ' (' + Math.round(h) + '°)';
+  };
+  const speedText = (l) => (typeof l.speedMph === 'number' ? Math.round(l.speedMph) + ' mph' : '—');
   const renderList = (locs) => {
     const el = document.getElementById('locList');
     if (!el) return;
     el.innerHTML = locs.length
-      ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Driver</th><th>Latitude</th><th>Longitude</th><th>Last update</th></tr></thead><tbody>' +
-        locs.map(l => '<tr><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
+      ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Driver</th><th>Speed</th><th>Latitude</th><th>Longitude</th><th>Last update</th></tr></thead><tbody>' +
+        locs.map(l => '<tr><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + speedText(l) + '</td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
         '</tbody></table></div>'
       : '<p class="empty">No drivers are sharing a live location right now.</p>';
   };
@@ -774,14 +780,14 @@ async function viewLocations(main) {
         if (mapEl) {
           if (!state.map) {
             state.map = L.map('map').setView([39.7684, -86.1581], 5); // Indianapolis default
-            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(state.map);
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community' }).addTo(state.map);
           }
           state.mapMarkers.forEach(m => m.remove());
           state.mapMarkers = [];
           list.forEach(l => {
             if (l.lat === undefined || l.lng === undefined) return;
             const marker = L.marker([l.lat, l.lng]).addTo(state.map)
-              .bindPopup('<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Last update: ' + esc(fmtDate(l.updatedAt)));
+              .bindPopup('<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)));
             state.mapMarkers.push(marker);
           });
           if (state.mapMarkers.length) {

@@ -603,11 +603,13 @@ driver.post('/photo', upload.single('photo'), (req, res) => {
 });
 
 driver.post('/location', (req, res) => {
-  const { lat, lng } = req.body || {};
+  const { lat, lng, speedMph, heading } = req.body || {};
   if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng))
     return err(res, 400, 'lat and lng are required numbers');
-  db.prepare('INSERT INTO locations (driverId, lat, lng, updatedAt) VALUES (?, ?, ?, ?) ON CONFLICT(driverId) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, updatedAt = excluded.updatedAt')
-    .run(req.user.id, lat, lng, now());
+  const speed = typeof speedMph === 'number' && Number.isFinite(speedMph) && speedMph >= 0 ? speedMph : null;
+  const head = typeof heading === 'number' && Number.isFinite(heading) && heading >= 0 && heading < 360 ? heading : null;
+  db.prepare('INSERT INTO locations (driverId, lat, lng, speedMph, heading, updatedAt) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(driverId) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, speedMph = excluded.speedMph, heading = excluded.heading, updatedAt = excluded.updatedAt')
+    .run(req.user.id, lat, lng, speed, head, now());
   res.json({ ok: true });
 });
 
@@ -1087,7 +1089,7 @@ admin.get('/locations', (_req, res) => {
     )
     .all();
   res.json(
-    rows.map((r) => ({ driverId: r.driverId, driverName: r.driverName, lat: r.lat, lng: r.lng, updatedAt: r.updatedAt })),
+    rows.map((r) => ({ driverId: r.driverId, driverName: r.driverName, lat: r.lat, lng: r.lng, speedMph: r.speedMph, heading: r.heading, updatedAt: r.updatedAt })),
   );
 });
 

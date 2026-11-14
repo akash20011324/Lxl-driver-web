@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS locations (
   driverId INTEGER PRIMARY KEY REFERENCES users(id),
   lat REAL NOT NULL,
   lng REAL NOT NULL,
+  speedMph REAL,
+  heading REAL,
   updatedAt TEXT NOT NULL
 );
 
@@ -203,6 +205,16 @@ export function openDb(dataDir) {
     if (normalized) {
       db.prepare('UPDATE users SET phoneNormalized = ? WHERE id = ?').run(normalized, u.id);
     }
+  }
+  // Migrate databases created before live speed: add speed (mph) and
+  // heading (degrees) to the stored driver location (fresh databases get
+  // them from the schema above).
+  const locColumns = db.prepare('PRAGMA table_info(locations)').all();
+  if (!locColumns.some((c) => c.name === 'speedMph')) {
+    db.exec('ALTER TABLE locations ADD COLUMN speedMph REAL');
+  }
+  if (!locColumns.some((c) => c.name === 'heading')) {
+    db.exec('ALTER TABLE locations ADD COLUMN heading REAL');
   }
   db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('demo_active', '0')").run();
   return db;
