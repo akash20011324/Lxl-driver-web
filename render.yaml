@@ -16,20 +16,21 @@ services:
     name: lxl-driver-web
     env: docker
     dockerfilePath: ./Dockerfile
-    plan: free
+    plan: starter
     healthCheckPath: /api/setup/status
     envVars:
       - key: SEED_REAL_FLEET
         value: 1
-      # - key: DATA_DIR
-      #   value: /var/data   # only together with the persistent disk below
-    # --- Paid upgrade (optional): keep data permanently ---
-    # The free service has no persistent disk: the SQLite database and
-    # uploaded files reset on every redeploy/restart. To keep data, change
-    # `plan:` to `starter` ($7/month) and uncomment the disk block below
-    # (disk is $0.25/GB/month; 1 GB is plenty for this app):
+      - key: DATA_DIR
+        value: /var/data
+    # --- Persistent disk: attached 2026-11-14 in the Render dashboard ---
+    # (Starter $7/mo + 1 GB disk $0.25/mo = $7.25/mo). The disk is managed
+    # in the dashboard — Render's Add Disk form has no name field, so the
+    # disk is identified by its mount path /var/data, not by a name.
+    # The database and uploads live on it now (DATA_DIR=/var/data), so
+    # restarts and redeploys no longer wipe the accounts. Do NOT remove
+    # the disk or change DATA_DIR back — the live database is on it.
     # disk:
-    #   name: lxl-data
     #   mountPath: /var/data
     #   sizeGB: 1
     # PORT is set automatically by Render — do not hard-code a port.
