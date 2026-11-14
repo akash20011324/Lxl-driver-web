@@ -376,6 +376,7 @@ async function viewDrivers(main) {
       '<td>' + (d.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</td>' +
       '<td><button class="btn btn-ghost btn-sm" data-toggle-driver="' + d.id + '" data-active="' + (d.active === false) + '">' +
       (d.active === false ? 'Activate' : 'Deactivate') + '</button> ' +
+      '<button class="btn btn-ghost btn-sm" data-reset-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Reset password</button> ' +
       '<button class="btn btn-danger btn-sm" data-delete-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Delete</button></td></tr>'; }).join('') +
     '</tbody></table></div>' +
     (state.driversCache.length ? '' : '<p class="empty">No drivers yet.</p>') + '</div>';
@@ -413,6 +414,20 @@ async function viewDrivers(main) {
       await api('/api/admin/drivers/' + id, { method: 'DELETE' });
       toast('Driver deleted.', 'ok');
       renderAdminView('drivers');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-reset-driver]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.resetDriver;
+    const name = btn.dataset.driverName || 'this driver';
+    const pw = prompt('New password for ' + name + ' (at least 8 characters):');
+    if (pw === null) return;
+    if (pw.length < 8) { toast('Password must be at least 8 characters.', 'error'); return; }
+    const pw2 = prompt('Type the new password again to confirm:');
+    if (pw2 === null) return;
+    if (pw2 !== pw) { toast('Passwords do not match.', 'error'); return; }
+    try {
+      await api('/api/admin/drivers/' + id + '/password', { method: 'POST', body: JSON.stringify({ password: pw }) });
+      toast('Password reset. ' + name + ' will need to sign in again with the new password.', 'ok');
     } catch (err) { showError(err); }
   }));
 }

@@ -794,6 +794,23 @@ admin.delete('/drivers/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// Reset a driver's password (admin only). The admin types the new password;
+// the driver's sessions are ended, so they must sign in again with it.
+// The demo driver's password cannot be reset.
+admin.post('/drivers/:id/password', (req, res) => {
+  const { password } = req.body || {};
+  if (typeof password !== 'string' || password.length < 8)
+    return err(res, 400, 'New password must be at least 8 characters');
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.id);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  if (driverUser.isDemo) return err(res, 400, 'The demo driver password cannot be reset');
+  withTransaction(db, () => {
+    db.prepare('UPDATE users SET passwordHash = ? WHERE id = ?').run(bcrypt.hashSync(password, 10), driverUser.id);
+    db.prepare('DELETE FROM sessions WHERE userId = ?').run(driverUser.id);
+  });
+  res.json({ ok: true });
+});
+
 admin.get('/trucks', (_req, res) => {
   res.json(db.prepare('SELECT * FROM trucks ORDER BY unitNumber').all().map(serializeTruck));
 });
