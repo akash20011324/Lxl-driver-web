@@ -1,0 +1,35 @@
+# Render Blueprint for the LXL Driver web app (backend + static frontend
+# served from the same process). Free tier.
+#
+# Custom domain: app.lubanaxpress.com. The owner already owns
+# lubanaxpress.com on GoDaddy for his website, and the standalone site
+# will live at app.lubanaxpress.com, leaving his main website untouched.
+# No new domain purchase is needed. After the first deploy, add
+# app.lubanaxpress.com as a custom domain in the Render dashboard
+# (service → Settings → Custom Domain → Add Custom Domain); the owner
+# then adds the DNS record Render shows at GoDaddy himself. Render
+# provisions the TLS certificate automatically. The domain name is NOT
+# hard-coded anywhere in the app or in this config — the site works on
+# whatever host it is deployed under (same-origin API, no hard-coded host).
+services:
+  - type: web
+    name: lxl-driver-web
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/setup/status
+    envVars:
+      - key: SEED_REAL_FLEET
+        value: 1
+      # - key: DATA_DIR
+      #   value: /var/data   # only together with the persistent disk below
+    # --- Paid upgrade (optional): keep data permanently ---
+    # The free service has no persistent disk: the SQLite database and
+    # uploaded files reset on every redeploy/restart. To keep data, change
+    # `plan:` to `starter` ($7/month) and uncomment the disk block below
+    # (disk is $0.25/GB/month; 1 GB is plenty for this app):
+    # disk:
+    #   name: lxl-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # PORT is set automatically by Render — do not hard-code a port.
