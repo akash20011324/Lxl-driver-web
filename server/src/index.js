@@ -336,7 +336,9 @@ app.get('/api/me', auth, (req, res) => {
   res.json(publicUser(req.user));
 });
 
-app.post('/api/auth/change-password', auth, (req, res) => {
+// Change password — admin only. Drivers cannot change their own password;
+// only an admin can set a driver's password (POST /api/admin/drivers/:id/password).
+app.post('/api/auth/change-password', auth, requireAdmin, (req, res) => {
   const { currentPassword, newPassword } = req.body || {};
   if (!currentPassword || !newPassword) return err(res, 400, 'currentPassword and newPassword are required');
   if (typeof newPassword !== 'string' || newPassword.length < 8)

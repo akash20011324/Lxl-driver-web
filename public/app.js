@@ -1189,10 +1189,6 @@ async function viewDriverSettings(main) {
     '<div class="field"><label>Phone</label><input id="pf-phone" type="tel" value="' + esc(state.user.phone || '') + '"></div>' +
     '<div class="field"><label>Emergency contact</label><input id="pf-emergency" value="' + esc(state.user.emergencyContact || '') + '"></div>' +
     '</div><div class="form-actions"><button class="btn" type="submit">Save</button></div></form></div>' +
-    '<div class="card"><h2>Change password</h2><form id="pwForm"><div class="form-row">' +
-    '<div class="field"><label>Current password</label><input id="pw-current" type="password" required autocomplete="current-password"></div>' +
-    '<div class="field"><label>New password (min 8 characters)</label><input id="pw-new" type="password" required minlength="8" autocomplete="new-password"></div>' +
-    '</div><div class="form-actions"><button class="btn" type="submit">Change password</button></div></form></div>' +
     '<div class="card"><h2>My Requests</h2>' +
     '<form id="newReqForm"><div class="form-row">' +
     '<div class="field"><label>Type *</label><select id="nr-type">' +
@@ -1228,17 +1224,6 @@ async function viewDriverSettings(main) {
       state.user.phone = document.getElementById('pf-phone').value.trim();
       state.user.emergencyContact = document.getElementById('pf-emergency').value.trim();
       toast('Contact info saved.', 'ok');
-    } catch (err) { showError(err); }
-  });
-  document.getElementById('pwForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      await api('/api/auth/change-password', { method: 'POST', body: JSON.stringify({
-        currentPassword: document.getElementById('pw-current').value,
-        newPassword: document.getElementById('pw-new').value,
-      }) });
-      toast('Password changed.', 'ok');
-      e.target.reset();
     } catch (err) { showError(err); }
   });
   document.getElementById('newReqForm').addEventListener('submit', async (e) => {
