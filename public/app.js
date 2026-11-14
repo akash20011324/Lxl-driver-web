@@ -375,7 +375,8 @@ async function viewDrivers(main) {
       '<td>' + esc(dTrailer ? (dTrailer.unitNumber || dTrailer) : (d.trailerUnitNumber || '—')) + '</td>' +
       '<td>' + (d.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</td>' +
       '<td><button class="btn btn-ghost btn-sm" data-toggle-driver="' + d.id + '" data-active="' + (d.active === false) + '">' +
-      (d.active === false ? 'Activate' : 'Deactivate') + '</button></td></tr>'; }).join('') +
+      (d.active === false ? 'Activate' : 'Deactivate') + '</button> ' +
+      '<button class="btn btn-danger btn-sm" data-delete-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Delete</button></td></tr>'; }).join('') +
     '</tbody></table></div>' +
     (state.driversCache.length ? '' : '<p class="empty">No drivers yet.</p>') + '</div>';
 
@@ -401,6 +402,16 @@ async function viewDrivers(main) {
     try {
       await api('/api/admin/drivers/' + id + '/active', { method: 'POST', body: JSON.stringify({ active }) });
       toast('Driver ' + (active ? 'activated' : 'deactivated') + '.', 'ok');
+      renderAdminView('drivers');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-delete-driver]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.deleteDriver;
+    const name = btn.dataset.driverName || 'this driver';
+    if (!confirm('Delete ' + name + '? This removes the driver profile and unassigns their truck and trailer. It cannot be undone.')) return;
+    try {
+      await api('/api/admin/drivers/' + id, { method: 'DELETE' });
+      toast('Driver deleted.', 'ok');
       renderAdminView('drivers');
     } catch (err) { showError(err); }
   }));

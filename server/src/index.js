@@ -733,8 +733,65 @@ admin.post('/drivers/:id/active', (req, res) => {
   if (typeof active !== 'boolean') return err(res, 400, 'active must be a boolean');
   const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.id);
   if (!driverUser) return err(res, 404, 'Driver not found');
-  db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, driverUser.id);
+  withTransaction(db, () => {
+    db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, driverUser.id);
+    if (!active) {
+      // Deactivating a driver frees their truck and trailer — otherwise
+      // the unit stays assigned to someone who can no longer use it and
+      // no other driver's request for it can ever be approved.
+      db.prepare('UPDATE trucks SET driverId = NULL WHERE driverId = ?').run(driverUser.id);
+      db.prepare('UPDATE trailers SET driverId = NULL WHERE driverId = ?').run(driverUser.id);
+    }
+  });
   res.json(publicUser(getUserById(driverUser.id)));
+});
+
+// Delete a driver profile. Blocked when the driver has loads on record —
+// a load (and its BOLs/receipts) is company history and must not be
+// destroyed with the profile; deactivate the driver instead. The demo
+// driver cannot be deleted. Anything else belonging only to the driver
+// (truck/trailer assignment, messages, notifications, requests, location,
+// driver documents) is removed with the profile, in one transaction.
+admin.delete('/drivers/:id', (req, res) => {
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.id);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  if (driverUser.isDemo) return err(res, 400, 'The demo driver cannot be deleted');
+  const loadCount = db.prepare('SELECT COUNT(*) AS n FROM loads WHERE driverId = ?').get(driverUser.id).n;
+  if (loadCount > 0)
+    return err(
+      res,
+      400,
+      'This driver has loads on record and cannot be deleted. Deactivate the driver instead to keep the load history.',
+    );
+  withTransaction(db, () => {
+    db.prepare('UPDATE trucks SET driverId = NULL WHERE driverId = ?').run(driverUser.id);
+    db.prepare('UPDATE trailers SET driverId = NULL WHERE driverId = ?').run(driverUser.id);
+    db.prepare('DELETE FROM locations WHERE driverId = ?').run(driverUser.id);
+    db.prepare('DELETE FROM messages WHERE driverId = ?').run(driverUser.id);
+    db.prepare('DELETE FROM notifications WHERE driverId = ?').run(driverUser.id);
+    db.prepare('DELETE FROM requests WHERE driverId = ?').run(driverUser.id);
+    // Driver documents (e.g. licence copies) belong to the driver alone —
+    // remove them and their stored files. Load documents cannot exist
+    // here: every load document belongs to a load, and loads block deletion.
+    const docs = db
+      .prepare("SELECT * FROM documents WHERE driverId = ? AND kind = 'driver_doc'")
+      .all(driverUser.id);
+    for (const doc of docs) {
+      const f = getFileRow(doc.fileId);
+      db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+      db.prepare('DELETE FROM files WHERE id = ?').run(doc.fileId);
+      if (f) {
+        try {
+          fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename));
+        } catch {
+          // file already gone — ignore
+        }
+      }
+    }
+    db.prepare('UPDATE files SET driverId = NULL WHERE driverId = ?').run(driverUser.id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(driverUser.id);
+  });
+  res.json({ ok: true });
 });
 
 admin.get('/trucks', (_req, res) => {
@@ -958,8 +1015,15 @@ admin.post('/requests/:id/decide', (req, res) => {
       if (decision === 'approved' && request.type === 'unit_change' && request.truckId) {
         const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(request.truckId);
         if (!truck) return { status: 404, error: 'Requested truck not found' };
-        if (truck.driverId && truck.driverId !== request.driverId)
-          return { status: 409, error: 'Requested truck is no longer available' };
+        if (truck.driverId && truck.driverId !== request.driverId) {
+          const holder = db.prepare('SELECT name FROM users WHERE id = ?').get(truck.driverId);
+          return {
+            status: 409,
+            error: holder
+              ? `Requested truck is assigned to ${holder.name}`
+              : 'Requested truck is no longer available',
+          };
+        }
         // Release the driver's current truck, then assign the requested one.
         db.prepare('UPDATE trucks SET driverId = NULL WHERE driverId = ?').run(request.driverId);
         db.prepare('UPDATE trucks SET driverId = ? WHERE id = ?').run(request.driverId, truck.id);
