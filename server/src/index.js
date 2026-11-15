@@ -1352,6 +1352,26 @@ admin.get('/documents', (_req, res) => {
   res.json(rows.map(serializeDocument));
 });
 
+// Each admin's own sidebar order (view keys, in the order they arranged
+// them with the sidebar's Organize mode). NULL / empty = default order.
+admin.get('/sidebar-order', (req, res) => {
+  const user = getUserById(req.user.id);
+  let order = null;
+  try {
+    order = user && user.sidebarOrder ? JSON.parse(user.sidebarOrder) : null;
+  } catch {
+    order = null;
+  }
+  res.json({ order: Array.isArray(order) && order.length ? order : null });
+});
+
+admin.post('/sidebar-order', (req, res) => {
+  if (!Array.isArray(req.body?.order)) return err(res, 400, 'order must be an array');
+  const order = [...new Set(req.body.order.filter((k) => typeof k === 'string' && /^[a-z]+$/.test(k)))].slice(0, 20);
+  db.prepare('UPDATE users SET sidebarOrder = ? WHERE id = ?').run(order.length ? JSON.stringify(order) : null, req.user.id);
+  res.json({ ok: true, order: order.length ? order : null });
+});
+
 admin.get('/locations', (_req, res) => {
   const rows = db
     .prepare(

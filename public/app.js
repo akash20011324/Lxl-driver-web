@@ -295,23 +295,105 @@ function renderAdminShell() {
     '<main class="admin-main" id="adminMain"></main>' +
     '</div>';
   renderAdminSidebar();
+  loadSidebarOrder();
   renderAdminView(state.adminView);
+}
+
+// Sidebar order: ADMIN_VIEWS is the default. An admin can rearrange
+// the menu with Organize (bottom of the sidebar); the order is stored
+// on their account and follows them across devices. Keys missing from
+// a saved order (e.g. a newer page) keep their default relative order
+// at the end.
+function orderedAdminViews() {
+  const visible = ADMIN_VIEWS.filter(([key]) => key !== 'admins' || (state.user && state.user.isMainAdmin));
+  const saved = state.organizing && Array.isArray(state.organizeOrder)
+    ? state.organizeOrder
+    : (Array.isArray(state.sidebarOrder) ? state.sidebarOrder : []);
+  const rank = new Map(saved.map((k, i) => [k, i]));
+  return [...visible].sort((a, b) => {
+    const ra = rank.has(a[0]) ? rank.get(a[0]) : 100 + ADMIN_VIEWS.findIndex(v => v[0] === a[0]);
+    const rb = rank.has(b[0]) ? rank.get(b[0]) : 100 + ADMIN_VIEWS.findIndex(v => v[0] === b[0]);
+    return ra - rb;
+  });
+}
+
+let sidebarOrderRequested = false;
+async function loadSidebarOrder() {
+  if (sidebarOrderRequested) return;
+  sidebarOrderRequested = true;
+  try {
+    const res = await api('/api/admin/sidebar-order');
+    if (res && Array.isArray(res.order)) {
+      state.sidebarOrder = res.order;
+      renderAdminSidebar();
+    }
+  } catch { /* keep the default order */ }
 }
 
 function renderAdminSidebar(pendingRequests) {
   const nav = document.getElementById('adminSidebar');
   if (!nav) return;
-  nav.innerHTML = ADMIN_VIEWS.filter(([key]) => key !== 'admins' || (state.user && state.user.isMainAdmin)).map(([key, label]) => {
-    const badge = (key === 'requests' && pendingRequests > 0)
-      ? '<span class="badge">' + pendingRequests + '</span>' : '';
-    return '<button data-view="' + key + '" class="' + (state.adminView === key ? 'active' : '') + '">' +
-      esc(label) + badge + '</button>';
-  }).join('');
-  nav.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+  const views = orderedAdminViews();
+  const badge = (key) => (key === 'requests' && pendingRequests > 0)
+    ? '<span class="badge">' + pendingRequests + '</span>' : '';
+  if (state.organizing) {
+    nav.innerHTML = views.map(([key, label], i) =>
+      '<div class="sidebar-org-row"><span>' + esc(label) + badge(key) + '</span>' +
+      '<span class="sidebar-org-btns">' +
+      '<button data-move="-1" data-key="' + key + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+      '<button data-move="1" data-key="' + key + '"' + (i === views.length - 1 ? ' disabled' : '') + '>↓</button>' +
+      '</span></div>').join('') +
+      '<div class="sidebar-org-foot">' +
+      '<button class="btn btn-sm" data-org-done="1">Done</button>' +
+      '<button class="btn btn-ghost btn-sm" data-org-reset="1">Reset</button>' +
+      '<button class="btn btn-ghost btn-sm" data-org-cancel="1">Cancel</button></div>';
+    nav.querySelectorAll('[data-move]').forEach(b => b.addEventListener('click', () => {
+      const keys = [...state.organizeOrder];
+      const idx = keys.indexOf(b.dataset.key);
+      const j = idx + Number(b.dataset.move);
+      if (idx < 0 || j < 0 || j >= keys.length) return;
+      [keys[idx], keys[j]] = [keys[j], keys[idx]];
+      state.organizeOrder = keys;
+      renderAdminSidebar(pendingRequests);
+    }));
+    nav.querySelector('[data-org-done]').addEventListener('click', async () => {
+      try {
+        await api('/api/admin/sidebar-order', { method: 'POST', body: JSON.stringify({ order: state.organizeOrder || [] }) });
+        state.sidebarOrder = state.organizeOrder;
+        toast('Sidebar order saved.', 'ok');
+      } catch (err) { showError(err); }
+      state.organizing = false;
+      renderAdminSidebar(pendingRequests);
+    });
+    nav.querySelector('[data-org-reset]').addEventListener('click', async () => {
+      try {
+        await api('/api/admin/sidebar-order', { method: 'POST', body: JSON.stringify({ order: [] }) });
+        state.sidebarOrder = null;
+        toast('Sidebar back to the default order.', 'ok');
+      } catch (err) { showError(err); }
+      state.organizing = false;
+      renderAdminSidebar(pendingRequests);
+    });
+    nav.querySelector('[data-org-cancel]').addEventListener('click', () => {
+      state.organizing = false;
+      renderAdminSidebar(pendingRequests);
+    });
+    return;
+  }
+  nav.innerHTML = views.map(([key, label]) =>
+    '<button data-view="' + key + '" class="' + (state.adminView === key ? 'active' : '') + '">' +
+    esc(label) + badge(key) + '</button>').join('') +
+    '<div class="sidebar-org"><button class="sidebar-org-open" data-organize="1">⇅ Organize</button></div>';
+  nav.querySelectorAll('button[data-view]').forEach(b => b.addEventListener('click', () => {
     state.adminView = b.dataset.view;
     renderAdminSidebar(pendingRequests);
     renderAdminView(state.adminView);
   }));
+  nav.querySelector('[data-organize]').addEventListener('click', () => {
+    state.organizeOrder = views.map(([k]) => k);
+    state.organizing = true;
+    renderAdminSidebar(pendingRequests);
+  });
 }
 
 async function renderAdminView(view) {

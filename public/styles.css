@@ -364,6 +364,23 @@ body.docs-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .thread-msg.mine { background: rgba(30, 64, 175, 0.35); }
 .thread-text { white-space: pre-wrap; margin-top: 4px; font-size: 14px; }
 
+/* Sidebar organize mode: an admin rearranges their own menu with the
+   up/down arrows; the order is saved on their account. */
+.sidebar-org { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.sidebar-org-open { opacity: 0.75; font-size: 13px !important; }
+.sidebar-org-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 6px 8px 12px; border-radius: 8px; font-size: 15px; color: var(--text);
+}
+.sidebar-org-row:hover { background: rgba(127, 127, 127, 0.12); }
+.sidebar-org-btns { display: flex; gap: 4px; }
+.sidebar-org-btns button {
+  width: 30px !important; padding: 4px 0 !important; text-align: center !important;
+  background: rgba(127, 127, 127, 0.15); border-radius: 6px; font-size: 13px;
+}
+.sidebar-org-btns button:disabled { opacity: 0.3; }
+.sidebar-org-foot { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+
 /* ---------- dashboard (Design 3 "Floating Glass") ---------- */
 /* The truck-at-sunset photo covers the whole viewport behind everything,
    on a real fixed layer (#dashBgLayer, created by viewDashboard) — the

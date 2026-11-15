@@ -232,6 +232,11 @@ export function openDb(dataDir) {
       "UPDATE users SET isMainAdmin = 1 WHERE role = 'admin' AND id = (SELECT id FROM users WHERE role = 'admin' ORDER BY createdAt ASC, id ASC LIMIT 1)",
     ).run();
   }
+  // Migrate databases created before sidebar organizing: each admin's
+  // preferred sidebar order (JSON array of view keys, NULL = default).
+  if (!columns.some((c) => c.name === 'sidebarOrder')) {
+    db.exec('ALTER TABLE users ADD COLUMN sidebarOrder TEXT');
+  }
   // Migrate databases created before live speed: add speed (mph) and
   // heading (degrees) to the stored driver location (fresh databases get
   // them from the schema above).
