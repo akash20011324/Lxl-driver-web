@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE TABLE IF NOT EXISTS documents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL CHECK (kind IN ('pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc')),
+  kind TEXT NOT NULL CHECK (kind IN ('pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture')),
   loadId INTEGER REFERENCES loads(id),
   category TEXT,
   label TEXT,
@@ -279,6 +279,45 @@ export function openDb(dataDir) {
   }
   if (!columns.some((c) => c.name === 'outlookConnectedAt')) {
     db.exec('ALTER TABLE users ADD COLUMN outlookConnectedAt TEXT');
+  }
+  // Migrate databases created before unit / seal pictures: widen the
+  // documents kind CHECK to allow 'unit_picture' and 'seal_picture'.
+  // SQLite cannot alter a CHECK in place, so rebuild the table (fresh
+  // databases get the new list from the schema above).
+  const docTable = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'")
+    .get();
+  if (docTable && !docTable.sql.includes('unit_picture')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.exec(`CREATE TABLE documents_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK (kind IN ('pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture')),
+  loadId INTEGER REFERENCES loads(id),
+  category TEXT,
+  label TEXT,
+  amountCents INTEGER,
+  fileId INTEGER NOT NULL REFERENCES files(id),
+  driverId INTEGER NOT NULL REFERENCES users(id),
+  createdAt TEXT NOT NULL
+)`);
+      db.exec(
+        'INSERT INTO documents_new (id, kind, loadId, category, label, amountCents, fileId, driverId, createdAt) SELECT id, kind, loadId, category, label, amountCents, fileId, driverId, createdAt FROM documents',
+      );
+      db.exec('DROP TABLE documents');
+      db.exec('ALTER TABLE documents_new RENAME TO documents');
+      db.exec('COMMIT');
+    } catch (e) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // already rolled back
+      }
+      throw e;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
   }
   db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('demo_active', '0')").run();
   return db;

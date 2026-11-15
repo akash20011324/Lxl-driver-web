@@ -645,7 +645,7 @@ driver.get('/documents', (req, res) => {
   res.json(rows.map(serializeDocument));
 });
 
-const DOC_KINDS = ['pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc'];
+const DOC_KINDS = ['pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture'];
 
 // Read the total off a receipt before it is uploaded: PDFs via pdf.js
 // text, images via on-device-style OCR (tesseract.js). The file is
