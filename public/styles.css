@@ -80,8 +80,39 @@ p { margin: 0 0 10px; }
 @media (max-width: 480px) { .grid2 { grid-template-columns: 1fr 1fr; } }
 
 /* ---------- auth ---------- */
-.auth-wrap { max-width: 420px; margin: 60px auto 0; padding: 0 16px; }
-.auth-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 28px 24px; }
+/* ---------- sign-in (Design 1: Highway Night) ---------- */
+/* Full-screen night-highway photo behind a floating card. The dark overlay
+   keeps the form readable; if the photo ever fails to load, the deep navy
+   background still looks intentional. */
+.auth-wrap {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  margin: 0;
+  max-width: none;
+  background-color: #05070d;
+  background-image:
+    linear-gradient(rgba(3, 6, 14, 0.62), rgba(3, 6, 14, 0.62)),
+    url('https://images.pexels.com/photos/11053643/pexels-photo-11053643.jpeg?auto=compress&cs=tinysrgb&w=1920');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  background: rgba(13, 15, 20, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: 3px solid var(--gold);
+  border-radius: 16px;
+  padding: 28px 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
 .auth-card .logo-row { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
 .auth-card .logo-row img { height: 44px; width: auto; }
 .auth-card .logo-row .brand { font-weight: 700; font-size: 18px; }
