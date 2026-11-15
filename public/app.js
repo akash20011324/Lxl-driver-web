@@ -974,8 +974,11 @@ async function viewRateCons(main) {
   });
   const outlookDisconnect = document.getElementById('outlookDisconnect');
   if (outlookDisconnect) outlookDisconnect.addEventListener('click', async () => {
-    if (!confirm('Disconnect your Outlook mailbox?')) return;
-    try { await api('/api/admin/outlook/disconnect', { method: 'POST', body: JSON.stringify({}) }); renderAdminView('ratecons'); }
+    try {
+      await api('/api/admin/outlook/disconnect', { method: 'POST', body: JSON.stringify({}) });
+      toast('Outlook disconnected.', 'ok');
+      renderAdminView('ratecons');
+    }
     catch (err) { showError(err); }
   });
   const outlookPick = document.getElementById('outlookPick');

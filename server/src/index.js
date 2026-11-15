@@ -1531,7 +1531,7 @@ admin.post('/rate-confirmations/from-outlook', async (req, res) => {
     const accessToken = await outlookAccessToken(user);
     const att = await outlookGraph(
       accessToken,
-      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}?$select=id,name,contentType,contentBytes`,
+      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
     );
     if (!att.contentBytes)
       return err(res, 400, 'That attachment has no file to download — pick a file attachment (PDF).');
