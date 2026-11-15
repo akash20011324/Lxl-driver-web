@@ -262,7 +262,7 @@ body.dash-bg { background-color: #05070d; }
   position: fixed; inset: 0; z-index: 0;
   background-image:
     linear-gradient(rgba(3, 6, 14, 0.35), rgba(3, 6, 14, 0.5)),
-    url('assets/dashboard-bg-blue.jpg');
+    url('assets/dashboard-bg-sky.jpg');
   background-size: cover;
   background-position: center 30%;
   background-repeat: no-repeat;
