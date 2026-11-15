@@ -676,6 +676,37 @@ driver.post('/documents', upload.single('file'), (req, res) => {
   res.status(201).json(serializeDocument(row));
 });
 
+// A driver can delete his own uploads (e.g. a wrong BOL page). The file
+// row and the stored file go with it. If the last BOL page for a load is
+// gone, the BOL result no longer stands — clear it so the load cannot be
+// completed without a BOL on file.
+driver.delete('/documents/:id', (req, res) => {
+  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
+  if (!doc) return err(res, 404, 'Document not found');
+  if (doc.driverId !== req.user.id) return err(res, 403, 'Forbidden');
+  const file = getFileRow(doc.fileId);
+  withTransaction(db, () => {
+    db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+    db.prepare('DELETE FROM files WHERE id = ?').run(doc.fileId);
+    if ((doc.kind === 'pickup_bol' || doc.kind === 'delivery_bol') && doc.loadId) {
+      const remaining = db
+        .prepare("SELECT COUNT(*) AS n FROM documents WHERE loadId = ? AND kind IN ('pickup_bol', 'delivery_bol')")
+        .get(doc.loadId).n;
+      if (remaining === 0) {
+        db.prepare('UPDATE loads SET bolStatus = NULL WHERE id = ?').run(doc.loadId);
+      }
+    }
+  });
+  if (file) {
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, file.storedFilename));
+    } catch {
+      // file already gone — ignore
+    }
+  }
+  res.json({ ok: true });
+});
+
 driver.post('/photo', upload.single('photo'), (req, res) => {
   if (!req.file) return err(res, 400, 'photo is required');
   const fileId = insertFileRow(req.file, 'photo', null, req.user.id);
