@@ -658,7 +658,8 @@ driver.post('/receipt-amount', upload.single('file'), async (req, res) => {
   try {
     const buf = fs.readFileSync(tmp);
     let text = '';
-    if (buf.length >= 4 && buf.subarray(0, 4).toString('ascii') === '%PDF') {
+    const isPdf = buf.length >= 4 && buf.subarray(0, 4).toString('ascii') === '%PDF';
+    if (isPdf) {
       text = cleanRateText(await pdfTextFromBuffer(buf));
     } else {
       const worker = await createWorker('eng');
@@ -670,6 +671,10 @@ driver.post('/receipt-amount', upload.single('file'), async (req, res) => {
       }
     }
     const cents = detectReceiptTotalCents(text);
+    // Log the outcome (never the file) so a missed total on a real
+    // receipt can be diagnosed from the Render logs: textLen 0 on a
+    // PDF means it has no text layer (image-only scan).
+    console.log('receipt-amount', { bytes: buf.length, isPdf, textLen: text.length, amount: cents == null ? null : cents / 100 });
     res.json({ amount: cents == null ? null : cents / 100 });
   } catch (e) {
     console.error('receipt-amount failed', e);
@@ -1651,6 +1656,8 @@ function detectReceiptTotalCents(text) {
     /AMOUNT\s+DUE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
     /BALANCE\s+DUE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s+CHARGE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+SALE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /AMOUNT\s+PAID\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
     /\bTOTAL\b\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
   ];
   for (const re of patterns) {
