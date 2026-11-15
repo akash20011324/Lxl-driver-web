@@ -143,6 +143,7 @@ function saveSession(user, token) {
 
 async function boot() {
   clearTimers();
+  document.body.classList.remove('rc-bg');
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page"><p class="muted">Loading…</p></div>';
   // If we already have a token, try to resume the session.
@@ -310,6 +311,7 @@ function renderAdminSidebar(pendingRequests) {
 
 async function renderAdminView(view) {
   clearTimers();
+  document.body.classList.remove('rc-bg');
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -894,6 +896,7 @@ async function viewLocations(main) {
 /* ---------- Rate Cons ---------- */
 async function viewRateCons(main) {
   state.rcOutlook = null;
+  document.body.classList.add('rc-bg'); // full-page money background + glass (removed on view switch)
   const [rcs, loads, outlook] = await Promise.all([
     api('/api/admin/rate-confirmations'),
     api('/api/admin/loads').catch(() => []),
@@ -909,7 +912,7 @@ async function viewRateCons(main) {
   };
   const previewName = (l, ext) => l ? l.reference + '_' + stateOf(l.pickupLocation) + '-' + stateOf(l.deliveryLocation) + '_' + dateOf(l.pickupAt, l.pickupTimezone) + '_to_' + dateOf(l.deliveryAt, l.deliveryTimezone) + '.' + (ext || 'pdf') : '';
   const loadOptions = loadList.map(l => '<option value="' + l.id + '">' + esc(l.reference) + ' · ' + esc(shortPlace(l.pickupLocation)) + ' → ' + esc(shortPlace(l.deliveryLocation)) + '</option>').join('');
-  main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>Rate Confirmations</h1><button class="btn btn-gold" id="rcAddBtn" aria-expanded="false">+ Add RC</button></div><div id="rcAddWrap" style="display:none">' +
+  main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>Rate Confirmations</h1><button class="btn" id="rcAddBtn" aria-expanded="false">+ Add RC</button></div><div id="rcAddWrap" style="display:none">' +
     '<div class="card"><h2>Upload rate confirmation</h2>' +
     (loadList.length ? '<form id="rcForm">' +
     '<div class="form-row">' +
