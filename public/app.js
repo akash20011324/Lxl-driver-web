@@ -345,6 +345,7 @@ async function viewDashboard(main) {
   // old container is discarded with innerHTML on every view switch.
   state.dashMap = null;
   state.dashMapMarkers = [];
+  state.dashMapFitted = false;
   document.body.classList.add('dash-bg'); // truck-sunset background + glass (removed on view switch)
   ensureDashBgLayer();
   const [data, trucks, trailers, loads, rcs, locs] = await Promise.all([
@@ -397,12 +398,13 @@ async function viewDashboard(main) {
     return dirs[Math.round(h / 45) % 8] + ' (' + Math.round(h) + '°)';
   };
   const speedText = (l) => (typeof l.speedMph === 'number' ? Math.round(l.speedMph) + ' mph' : '—');
-  const renderFleet = (locList) => {
+  const renderFleet = (locList, driverList) => {
     const el = document.getElementById('dashFleet');
     if (!el) return;
+    const drivers = driverList || list;
     const byId = {};
     locList.forEach(l => { byId[l.driverId] = l; });
-    el.innerHTML = '<h2 style="margin-top:0">Fleet</h2>' + (list.length ? list.map(d => {
+    el.innerHTML = '<h2 style="margin-top:0">Fleet</h2>' + (drivers.length ? drivers.map(d => {
       const l = byId[d.id] || d.location;
       const on = d.active !== false && locFresh(l);
       const right = on
@@ -415,10 +417,11 @@ async function viewDashboard(main) {
     }).join('') : '<p class="empty">No drivers yet.</p>');
     fillCitySlots();
   };
-  const refreshPills = (locList) => {
+  const refreshPills = (locList, driverList) => {
     const byId = {};
     locList.forEach(l => { byId[l.driverId] = l; });
-    list.forEach(d => {
+    const drivers = driverList || list;
+    drivers.forEach(d => {
       const pill = document.querySelector('[data-dash-status="' + d.id + '"]');
       if (!pill) return;
       const l = byId[d.id] || d.location;
@@ -453,16 +456,49 @@ async function viewDashboard(main) {
       state.dashMapMarkers.push(marker);
       bounds.extend(pos);
     });
-    if (state.dashMapMarkers.length === 1) { state.dashMap.setCenter(state.dashMapMarkers[0].getPosition()); state.dashMap.setZoom(12); }
-    else if (state.dashMapMarkers.length > 1) { state.dashMap.fitBounds(bounds); }
+    if (state.dashMapMarkers.length === 1 && !state.dashMapFitted) { state.dashMap.setCenter(state.dashMapMarkers[0].getPosition()); state.dashMap.setZoom(12); state.dashMapFitted = true; }
+    else if (state.dashMapMarkers.length > 1 && !state.dashMapFitted) { state.dashMap.fitBounds(bounds); state.dashMapFitted = true; }
   };
-  const loadDashLocs = async () => {
+  const refreshDashboard = async () => {
     if (state.adminView !== 'dashboard') return;
     try {
-      const fresh = await api('/api/admin/locations');
-      const locList = Array.isArray(fresh) ? fresh : [];
-      renderFleet(locList);
-      refreshPills(locList);
+      const [d2, trucks2, trailers2, loads2, rcs2, locs2] = await Promise.all([
+        api('/api/admin/overview'),
+        api('/api/admin/trucks').catch(() => []),
+        api('/api/admin/trailers').catch(() => []),
+        api('/api/admin/loads').catch(() => []),
+        api('/api/admin/rate-confirmations').catch(() => []),
+        api('/api/admin/locations').catch(() => []),
+      ]);
+      const drivers2 = d2.drivers || d2 || [];
+      const list2 = Array.isArray(drivers2) ? drivers2 : [];
+      const counts2 = d2.counts || {};
+      const count2 = (key, fallback) => (counts2[key] !== undefined ? counts2[key] : fallback);
+      const loadList2 = Array.isArray(loads2) ? loads2 : [];
+      const activeLoadByDriver2 = {};
+      loadList2.forEach(l => { if (l.status === 'active' && l.driverId != null) activeLoadByDriver2[l.driverId] = l; });
+      const rcByLoad2 = {};
+      (Array.isArray(rcs2) ? rcs2 : []).forEach(r => { if (r.loadId != null && r.rateCents != null) rcByLoad2[r.loadId] = r; });
+      const locByDriver2 = {};
+      (Array.isArray(locs2) ? locs2 : []).forEach(l => { locByDriver2[l.driverId] = l; });
+      const locList = Array.isArray(locs2) ? locs2 : [];
+      const statsEl = document.querySelector('.dash-stats');
+      if (statsEl) {
+        statsEl.innerHTML =
+          '<div class="glass-panel dash-stat"><div class="stat-num">' + count2('drivers', list2.length) + '</div><div class="stat-label">Drivers</div></div>' +
+          '<div class="glass-panel dash-stat"><div class="stat-num">' + count2('trucks', Array.isArray(trucks2) ? trucks2.length : '—') + '</div><div class="stat-label">Trucks</div></div>' +
+          '<div class="glass-panel dash-stat"><div class="stat-num">' + count2('trailers', Array.isArray(trailers2) ? trailers2.length : '—') + '</div><div class="stat-label">Trailers</div></div>' +
+          '<div class="glass-panel dash-stat"><div class="stat-num">' + count2('activeLoads', loadList2.filter(l => l.status === 'active').length) + '</div><div class="stat-label">Active loads</div></div>' +
+          '<div class="glass-panel dash-stat"><div class="stat-num">' + count2('pendingRequests', list2.reduce((n, d) => n + (Number(d.pendingRequests) || 0), 0)) + '</div><div class="stat-label">Pending requests</div></div>';
+      }
+      const driversEl = document.querySelector('.dash-drivers');
+      if (driversEl) {
+        driversEl.innerHTML = '<h2>Drivers</h2>' +
+          (list2.length ? list2.map(d => dashDriverCard(d, activeLoadByDriver2[d.id], rcByLoad2, locByDriver2[d.id] || d.location, d.active !== false && locFresh(locByDriver2[d.id] || d.location))).join('') : '<p class="empty">No drivers yet. Add one from the Drivers page.</p>');
+        fillCitySlots();
+      }
+      renderFleet(locList, list2);
+      refreshPills(locList, list2);
       if (!state.dashMap) {
         const g = await ensureGoogleMaps();
         const mapEl = document.getElementById('dashMap');
@@ -475,11 +511,13 @@ async function viewDashboard(main) {
         state.dashMap = new g.Map(mapEl, { center: { lat: 39.7684, lng: -86.1581 }, zoom: 5, mapTypeId: 'hybrid', streetViewControl: false });
       }
       drawMarkers(locList);
-    } catch (e) { /* keep the last good map and fleet on refresh errors */ }
+    } catch (e) { /* keep the last good dashboard on refresh errors */ }
   };
   renderFleet(Array.isArray(locs) ? locs : []);
-  await loadDashLocs();
-  addTimer(loadDashLocs, 10000);
+  await refreshDashboard();
+  // The whole dashboard refreshes itself every 23 seconds — stats, driver
+  // cards, fleet list and map markers — so changes pop up on their own.
+  addTimer(refreshDashboard, 23000);
 }
 function dashDriverCard(d, load, rcByLoad, loc, live) {
   const truck = d.truck ? (d.truck.unitNumber || d.truck) : (d.truckUnitNumber || '—');
