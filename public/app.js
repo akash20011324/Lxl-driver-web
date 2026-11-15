@@ -902,7 +902,7 @@ async function viewRateCons(main) {
   };
   const previewName = (l, ext) => l ? l.reference + '_' + stateOf(l.pickupLocation) + '-' + stateOf(l.deliveryLocation) + '_' + dateOf(l.pickupAt, l.pickupTimezone) + '_to_' + dateOf(l.deliveryAt, l.deliveryTimezone) + '.' + (ext || 'pdf') : '';
   const loadOptions = loadList.map(l => '<option value="' + l.id + '">' + esc(l.reference) + ' · ' + esc(shortPlace(l.pickupLocation)) + ' → ' + esc(shortPlace(l.deliveryLocation)) + '</option>').join('');
-  main.innerHTML = '<div class="rc-page"><h1>Rate Confirmations</h1>' +
+  main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>Rate Confirmations</h1><button class="btn btn-gold" id="rcAddBtn" aria-expanded="false">+ Add RC</button></div><div id="rcAddWrap" style="display:none">' +
     '<div class="card"><h2>Upload rate confirmation</h2>' +
     (loadList.length ? '<form id="rcForm">' +
     '<div class="form-row">' +
@@ -922,7 +922,7 @@ async function viewRateCons(main) {
           '<div class="form-actions"><button class="btn btn-sm" id="outlookConnect">Connect Outlook</button></div>')
       : '<p class="small muted">Outlook email is not set up on the server yet.</p>') +
     '<div id="outlookPicker" style="display:none" class="mt"></div>' +
-    '<p id="outlookChosen" class="small mt"></p></div>' +
+    '<p id="outlookChosen" class="small mt"></p></div></div>' +
     '<div class="card"><div class="rc-search"><input id="rcSearch" type="search" placeholder="Search rate confirmations — reference, broker, route…"></div><div class="table-wrap"><table><thead><tr>' +
     '<th>Reference</th><th>Broker</th><th>Route</th><th>Dates</th><th>Rate</th><th>File</th><th></th>' +
     '</tr></thead><tbody>' +
@@ -1054,6 +1054,15 @@ async function viewRateCons(main) {
     try { await api('/api/admin/rate-confirmations/' + b.dataset.rcDel, { method: 'DELETE' }); toast('Rate confirmation deleted.', 'ok'); renderAdminView('ratecons'); }
     catch (err) { showError(err); }
   }));
+  // + Add RC: the upload + Outlook boxes live behind this button.
+  const rcAddBtn = document.getElementById('rcAddBtn');
+  const rcAddWrap = document.getElementById('rcAddWrap');
+  if (rcAddBtn && rcAddWrap) rcAddBtn.addEventListener('click', () => {
+    const open = rcAddWrap.style.display === 'none';
+    rcAddWrap.style.display = open ? '' : 'none';
+    rcAddBtn.textContent = open ? '× Close' : '+ Add RC';
+    rcAddBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
   // Search the table: reference, broker, route, dates, rate, filename.
   // Normalizes both sides so "dandl" finds "D & L" (the & reads as "and").
   const norm = s => s.toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]/g, '');
