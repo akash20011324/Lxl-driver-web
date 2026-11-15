@@ -81,11 +81,11 @@ p { margin: 0 0 10px; }
 
 /* ---------- auth ---------- */
 /* ---------- sign-in (Design 1: Highway Night) ---------- */
-/* Full-screen photo of the owner's own green Kenworth T680 (truck 1301)
-   behind a floating card. The dark overlay keeps the form readable; if the
-   photo ever fails to load, the deep navy background still looks intentional.
-   Overlay is lighter than a night shot needs because this is a bright
-   daytime photo. */
+/* Full-screen photo of the owner's own green Kenworth T680 (truck 1301),
+   graded to a night look, behind a floating card. The dark overlay keeps
+   the form readable; if the photo ever fails to load, the deep navy
+   background still looks intentional. Overlay is light because the photo
+   itself is already dark. */
 .auth-wrap {
   min-height: 100vh;
   min-height: 100dvh;
@@ -97,7 +97,7 @@ p { margin: 0 0 10px; }
   max-width: none;
   background-color: #05070d;
   background-image:
-    linear-gradient(rgba(3, 6, 14, 0.45), rgba(3, 6, 14, 0.45)),
+    linear-gradient(rgba(3, 6, 14, 0.35), rgba(3, 6, 14, 0.35)),
     url('assets/signin-bg.jpg');
   background-size: cover;
   background-position: center 30%;
