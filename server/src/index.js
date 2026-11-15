@@ -1319,7 +1319,7 @@ const OUTLOOK_CLIENT_SECRET = process.env.OUTLOOK_CLIENT_SECRET || '';
 const OUTLOOK_REDIRECT_URI =
   process.env.OUTLOOK_REDIRECT_URI || 'https://app.lubanaxpress.com/api/outlook/callback';
 const OUTLOOK_TENANT = process.env.OUTLOOK_TENANT || 'common';
-const OUTLOOK_SCOPES = 'Mail.Read offline_access';
+const OUTLOOK_SCOPES = 'Mail.Read offline_access User.Read'; // User.Read is needed for the /me call that reads the connected mailbox address
 const OUTLOOK_STATE_TTL_MS = 30 * 60 * 1000; // Outlook sign-in states live in SQLite so a restart cannot wipe them
 
 function outlookConfigured() {
