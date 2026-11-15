@@ -873,22 +873,31 @@ async function viewLocations(main) {
 
 /* ---------- Rate Cons ---------- */
 async function viewRateCons(main) {
-  const rcs = await api('/api/admin/rate-confirmations');
+  const [rcs, loads] = await Promise.all([
+    api('/api/admin/rate-confirmations'),
+    api('/api/admin/loads').catch(() => []),
+  ]);
   const list = Array.isArray(rcs) ? rcs : [];
+  const loadList = (Array.isArray(loads) ? loads : []).filter(l => l && l.reference);
+  const shortPlace = (a) => (a || '').split(',').pop().replace(/\s*\d{5}(-\d{4})?\s*$/, '').trim();
+  const stateOf = (a) => { const m = (a || '').match(/\b([A-Z]{2})\s+\d{5}/); return m ? m[1] : ''; };
+  const dateOf = (iso, tz) => {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'America/Indiana/Indianapolis', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso)); }
+    catch { return (iso || '').slice(0, 10); }
+  };
+  const previewName = (l, ext) => l ? l.reference + '_' + stateOf(l.pickupLocation) + '-' + stateOf(l.deliveryLocation) + '_' + dateOf(l.pickupAt, l.pickupTimezone) + '_to_' + dateOf(l.deliveryAt, l.deliveryTimezone) + '.' + (ext || 'pdf') : '';
+  const loadOptions = loadList.map(l => '<option value="' + l.id + '">' + esc(l.reference) + ' · ' + esc(shortPlace(l.pickupLocation)) + ' → ' + esc(shortPlace(l.deliveryLocation)) + '</option>').join('');
   main.innerHTML = '<h1>Rate Confirmations</h1>' +
-    '<div class="card"><h2>Upload rate confirmation</h2><form id="rcForm">' +
+    '<div class="card"><h2>Upload rate confirmation</h2>' +
+    (loadList.length ? '<form id="rcForm">' +
     '<div class="form-row">' +
-    '<div class="field"><label>File *</label><input type="file" name="file" required></div>' +
-    '<div class="field"><label>Reference *</label><input name="reference" required placeholder="e.g. LXL-2481"></div>' +
-    '<div class="field"><label>Pickup state *</label><input name="pickupState" required placeholder="IN" maxlength="2"></div>' +
-    '<div class="field"><label>Delivery state *</label><input name="deliveryState" required placeholder="TX" maxlength="2"></div>' +
-    '<div class="field"><label>Pickup date *</label><input type="date" name="pickupDate" required></div>' +
-    '<div class="field"><label>Delivery date *</label><input type="date" name="deliveryDate" required></div>' +
-    '<div class="field"><label>Broker</label><input name="broker"></div>' +
-    '<div class="field"><label>Rate ($)</label><input name="rate" type="number" step="0.01" min="0"></div>' +
-    '</div><p class="small muted">The server auto-renames the file to <code>reference_pickupState-deliveryState_pickupDate_to_deliveryDate.ext</code>.</p>' +
+    '<div class="field"><label>File *</label><input type="file" name="file" id="rcFile" required></div>' +
+    '<div class="field"><label>Load *</label><select name="loadId" id="rcLoad" required>' + loadOptions + '</select></div>' +
+    '</div><p class="small muted">Pick the load — the file is automatically renamed to <code id="rcPreview"></code>.</p>' +
     '<div class="form-actions"><button class="btn" type="submit">Upload</button></div>' +
-    '<p id="rcResult" class="small mt"></p></form></div>' +
+    '<p id="rcResult" class="small mt"></p></form>'
+    : '<p class="empty">No loads yet — assign a load first, then upload its rate confirmation here.</p>') +
+    '</div>' +
     '<div class="card"><div class="table-wrap"><table><thead><tr>' +
     '<th>Reference</th><th>Broker</th><th>Route</th><th>Dates</th><th>Rate</th><th>File</th><th></th>' +
     '</tr></thead><tbody>' +
@@ -903,21 +912,31 @@ async function viewRateCons(main) {
       '<button class="btn btn-danger btn-sm" data-rc-del="' + r.id + '">Delete</button></td></tr>').join('') +
     '</tbody></table></div>' + (list.length ? '' : '<p class="empty">No rate confirmations yet.</p>') + '</div>';
 
-  document.getElementById('rcForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const rate = fd.get('rate');
-    fd.delete('rate');
-    const cents = dollarsToCents(rate);
-    if (cents !== null) fd.append('rateCents', String(cents));
-    try {
-      const res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
-      const saved = (res && (res.filename || (res.rateConfirmation && res.rateConfirmation.filename))) || '';
-      document.getElementById('rcResult').textContent = saved ? 'Saved as: ' + saved : 'Uploaded.';
-      toast('Rate confirmation uploaded' + (saved ? ' as ' + saved : '') + '.', 'ok');
-      renderAdminView('ratecons');
-    } catch (err) { showError(err); }
-  });
+  const rcForm = document.getElementById('rcForm');
+  if (rcForm) {
+    const updatePreview = () => {
+      const sel = document.getElementById('rcLoad');
+      const f = document.getElementById('rcFile');
+      const l = loadList.find(x => String(x.id) === (sel && sel.value));
+      const ext = f && f.files && f.files[0] ? (f.files[0].name.split('.').pop() || 'pdf') : 'pdf';
+      const pv = document.getElementById('rcPreview');
+      if (pv) pv.textContent = previewName(l, ext);
+    };
+    document.getElementById('rcLoad').addEventListener('change', updatePreview);
+    document.getElementById('rcFile').addEventListener('change', updatePreview);
+    updatePreview();
+    rcForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(rcForm);
+      try {
+        const res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
+        const saved = (res && (res.filename || (res.rateConfirmation && res.rateConfirmation.filename))) || '';
+        document.getElementById('rcResult').textContent = saved ? 'Saved as: ' + saved : 'Uploaded.';
+        toast('Rate confirmation uploaded' + (saved ? ' as ' + saved : '') + '.', 'ok');
+        renderAdminView('ratecons');
+      } catch (err) { showError(err); }
+    });
+  }
   main.querySelectorAll('[data-rc-view]').forEach(b => b.addEventListener('click', () => {
     const r = list.find(x => String(x.id) === b.dataset.rcView);
     if (r && r.url) downloadFile(r.url, r.filename, true);

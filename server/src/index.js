@@ -1165,6 +1165,33 @@ admin.post('/messages/:driverId', (req, res) => {
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
 });
 
+// Two-letter state code from a load address like "904 Edwards Dr, Lebanon IN 46052".
+function stateFromAddress(address) {
+  if (!address) return null;
+  const m = String(address).match(/\b([A-Z]{2})\s+\d{5}(?:-\d{4})?\s*$/);
+  if (m) return m[1];
+  const tail = String(address).split(',').pop() || '';
+  const m2 = tail.match(/\b([A-Z]{2})\b/);
+  return m2 ? m2[1] : null;
+}
+
+// Local calendar date (YYYY-MM-DD) of an ISO timestamp in the load's zone.
+function dateInZone(iso, tz) {
+  if (!iso) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz || 'America/Indiana/Indianapolis',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date(iso));
+    const get = (t) => parts.find((p) => p.type === t).value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
+  } catch {
+    return String(iso).slice(0, 10);
+  }
+}
+
 admin.get('/rate-confirmations', (_req, res) => {
   const rows = db
     .prepare(
@@ -1176,10 +1203,22 @@ admin.get('/rate-confirmations', (_req, res) => {
 
 admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
   const { loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents } = req.body || {};
-  if (!reference || !pickupState || !deliveryState || !pickupDate || !deliveryDate)
-    return err(res, 400, 'reference, pickupState, deliveryState, pickupDate and deliveryDate are required');
+  // Pick a load and the file is named from the load — no typing. Typed
+  // fields still win when given (older clients send them).
+  let load = null;
+  if (loadId) {
+    load = db.prepare('SELECT * FROM loads WHERE id = ?').get(Number(loadId));
+    if (!load) return err(res, 404, 'Load not found');
+  }
+  const ref = reference || (load && load.reference);
+  const pState = pickupState || (load && stateFromAddress(load.pickupLocation));
+  const dState = deliveryState || (load && stateFromAddress(load.deliveryLocation));
+  const pDate = pickupDate || (load && dateInZone(load.pickupAt, load.pickupTimezone));
+  const dDate = deliveryDate || (load && dateInZone(load.deliveryAt, load.deliveryTimezone));
+  if (!ref || !pState || !dState || !pDate || !dDate)
+    return err(res, 400, 'Pick a load, or fill in reference, pickup/delivery state and dates');
   const ext = req.file ? path.extname(req.file.originalname || '') : '';
-  const autoName = `${reference}_${pickupState}-${deliveryState}_${pickupDate}_to_${deliveryDate}${ext}`;
+  const autoName = `${ref}_${pState}-${dState}_${pDate}_to_${dDate}${ext}`;
   let fileId = null;
   if (req.file) {
     const target = path.join(UPLOADS_DIR, autoName);
@@ -1187,7 +1226,7 @@ admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
     let finalName = autoName;
     let n = 1;
     while (fs.existsSync(path.join(UPLOADS_DIR, finalName))) {
-      finalName = `${reference}_${pickupState}-${deliveryState}_${pickupDate}_to_${deliveryDate}-${n}${ext}`;
+      finalName = `${ref}_${pState}-${dState}_${pDate}_to_${dDate}-${n}${ext}`;
       n += 1;
     }
     fs.renameSync(req.file.path, path.join(UPLOADS_DIR, finalName));
@@ -1202,13 +1241,13 @@ admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
       'INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     .run(
-      reference,
+      ref,
       loadId ? Number(loadId) : null,
       broker ?? null,
-      pickupState,
-      deliveryState,
-      pickupDate,
-      deliveryDate,
+      pState,
+      dState,
+      pDate,
+      dDate,
       rateCents != null ? Number(rateCents) : null,
       fileId,
       now(),
