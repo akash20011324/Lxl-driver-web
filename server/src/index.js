@@ -713,6 +713,39 @@ admin.get('/drivers', (_req, res) => {
   res.json(db.prepare("SELECT * FROM users WHERE role = 'driver' ORDER BY name").all().map(publicUser));
 });
 
+// Admins & dispatchers — any admin can add another Admin Portal login.
+// Dispatchers sign in with email + password, same as the owner.
+admin.get('/admins', (_req, res) => {
+  res.json(db.prepare("SELECT * FROM users WHERE role = 'admin' ORDER BY name").all().map(publicUser));
+});
+
+admin.post('/admins', (req, res) => {
+  const { name, email, password } = req.body || {};
+  if (!name || !email || !password) return err(res, 400, 'name, email and password are required');
+  if (typeof password !== 'string' || password.length < 8)
+    return err(res, 400, 'Password must be at least 8 characters');
+  if (db.prepare('SELECT 1 FROM users WHERE email = ? COLLATE NOCASE').get(email))
+    return err(res, 409, 'Email is already in use');
+  const ts = now();
+  const id = db
+    .prepare("INSERT INTO users (role, name, email, passwordHash, active, createdAt) VALUES ('admin', ?, ?, ?, 1, ?)")
+    .run(name, email, bcrypt.hashSync(password, 10), ts).lastInsertRowid;
+  res.status(201).json(publicUser(getUserById(id)));
+});
+
+// Remove an admin / dispatcher login. You cannot delete your own account,
+// and the last active admin cannot be deleted.
+admin.delete('/admins/:id', (req, res) => {
+  const adminUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'admin'").get(req.params.id);
+  if (!adminUser) return err(res, 404, 'Admin not found');
+  if (adminUser.id === req.user.id) return err(res, 400, 'You cannot delete your own admin account');
+  const count = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").get().n;
+  if (count <= 1) return err(res, 400, 'The last admin account cannot be deleted');
+  db.prepare('DELETE FROM sessions WHERE userId = ?').run(adminUser.id);
+  db.prepare('DELETE FROM users WHERE id = ?').run(adminUser.id);
+  res.json({ ok: true });
+});
+
 admin.post('/drivers', (req, res) => {
   const { name, email, password, phone } = req.body || {};
   if (!name || !password) return err(res, 400, 'name and password are required');

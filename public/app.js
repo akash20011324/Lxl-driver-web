@@ -258,6 +258,7 @@ window.signOut = signOut;
 const ADMIN_VIEWS = [
   ['dashboard', 'Dashboard'],
   ['drivers', 'Drivers'],
+  ['admins', 'Admins'],
   ['equipment', 'Trucks & Trailers'],
   ['loads', 'Loads'],
   ['documents', 'Documents'],
@@ -302,6 +303,7 @@ async function renderAdminView(view) {
   try {
     if (view === 'dashboard') await viewDashboard(main);
     else if (view === 'drivers') await viewDrivers(main);
+    else if (view === 'admins') await viewAdmins(main);
     else if (view === 'equipment') await viewEquipment(main);
     else if (view === 'loads') await viewLoads(main);
     else if (view === 'documents') await viewDocuments(main);
@@ -439,6 +441,54 @@ async function viewDrivers(main) {
     try {
       await api('/api/admin/drivers/' + id + '/password', { method: 'POST', body: JSON.stringify({ password: pw }) });
       toast('Password reset. ' + name + ' will need to sign in again with the new password.', 'ok');
+    } catch (err) { showError(err); }
+  }));
+}
+
+/* ---------- Admins & Dispatchers ---------- */
+async function viewAdmins(main) {
+  const admins = await api('/api/admin/admins');
+  const list = Array.isArray(admins) ? admins : [];
+  main.innerHTML = '<h1>Admins & Dispatchers</h1>' +
+    '<div class="card"><h2>Add admin / dispatcher</h2><form id="addAdminForm">' +
+    '<div class="form-row">' +
+    '<div class="field"><label for="aa-name">Name *</label><input id="aa-name" required></div>' +
+    '<div class="field"><label for="aa-email">Email *</label><input id="aa-email" type="email" required autocomplete="email"></div>' +
+    '<div class="field"><label for="aa-pass">Password *</label><input id="aa-pass" type="password" required minlength="8" autocomplete="new-password"></div>' +
+    '</div><p class="small muted">Admins sign in to the Admin Portal with their email and password.</p>' +
+    '<div class="form-actions"><button class="btn" type="submit">Add admin</button></div>' +
+    '</form></div>' +
+    '<div class="card"><div class="table-wrap"><table><thead><tr>' +
+    '<th>Name</th><th>Email</th><th>Status</th><th></th>' +
+    '</tr></thead><tbody>' +
+    list.map(a => '<tr>' +
+      '<td><strong>' + esc(a.name) + '</strong>' + (state.user && a.id === state.user.id ? ' <span class="pill">You</span>' : '') + '</td>' +
+      '<td>' + esc(a.email || '—') + '</td>' +
+      '<td>' + (a.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</td>' +
+      '<td>' + (state.user && a.id === state.user.id ? '' : '<button class="btn btn-danger btn-sm" data-delete-admin="' + a.id + '" data-admin-name="' + esc(a.name) + '">Delete</button>') + '</td></tr>').join('') +
+    '</tbody></table></div>' +
+    (list.length ? '' : '<p class="empty">No admins yet.</p>') + '</div>';
+
+  document.getElementById('addAdminForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/admin/admins', { method: 'POST', body: JSON.stringify({
+        name: document.getElementById('aa-name').value.trim(),
+        email: document.getElementById('aa-email').value.trim(),
+        password: document.getElementById('aa-pass').value,
+      }) });
+      toast('Admin added.', 'ok');
+      renderAdminView('admins');
+    } catch (err) { showError(err); }
+  });
+  main.querySelectorAll('[data-delete-admin]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.deleteAdmin;
+    const name = btn.dataset.adminName || 'this admin';
+    if (!confirm('Delete ' + name + '? They will no longer be able to sign in to the Admin Portal.')) return;
+    try {
+      await api('/api/admin/admins/' + id, { method: 'DELETE' });
+      toast('Admin deleted.', 'ok');
+      renderAdminView('admins');
     } catch (err) { showError(err); }
   }));
 }
