@@ -1220,13 +1220,19 @@ admin.get('/locations', (_req, res) => {
     .prepare(
       `SELECT l.*, u.name AS driverName FROM locations l
        JOIN users u ON u.id = l.driverId
-       WHERE u.role = 'driver' AND EXISTS (SELECT 1 FROM sessions s WHERE s.userId = l.driverId)
+       WHERE u.role = 'driver'
        ORDER BY l.updatedAt DESC`,
     )
     .all();
   res.json(
     rows.map((r) => ({ driverId: r.driverId, driverName: r.driverName, lat: r.lat, lng: r.lng, speedMph: r.speedMph, heading: r.heading, updatedAt: r.updatedAt })),
   );
+});
+
+// Google Maps browser key for the admin portal maps (Dashboard + Locations).
+// Admin-only; the key itself is referrer-restricted to the portal domains.
+admin.get('/maps-config', (_req, res) => {
+  res.json({ googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || null });
 });
 
 admin.get('/messages/:driverId', (req, res) => {

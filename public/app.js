@@ -145,6 +145,8 @@ async function boot() {
   clearTimers();
   document.body.classList.remove('rc-bg');
   removeRcBgLayer();
+  document.body.classList.remove('dash-bg');
+  removeDashBgLayer();
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page"><p class="muted">Loading…</p></div>';
   // If we already have a token, try to resume the session.
@@ -314,6 +316,8 @@ async function renderAdminView(view) {
   clearTimers();
   document.body.classList.remove('rc-bg');
   removeRcBgLayer();
+  document.body.classList.remove('dash-bg');
+  removeDashBgLayer();
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -337,11 +341,19 @@ async function renderAdminView(view) {
 
 /* ---------- Dashboard ---------- */
 async function viewDashboard(main) {
-  const [data, trucks, trailers, loads] = await Promise.all([
+  // Google Maps has no .remove(); dropping the reference is enough — the
+  // old container is discarded with innerHTML on every view switch.
+  state.dashMap = null;
+  state.dashMapMarkers = [];
+  document.body.classList.add('dash-bg'); // truck-sunset background + glass (removed on view switch)
+  ensureDashBgLayer();
+  const [data, trucks, trailers, loads, rcs, locs] = await Promise.all([
     api('/api/admin/overview'),
     api('/api/admin/trucks').catch(() => []),
     api('/api/admin/trailers').catch(() => []),
     api('/api/admin/loads').catch(() => []),
+    api('/api/admin/rate-confirmations').catch(() => []),
+    api('/api/admin/locations').catch(() => []),
   ]);
   const drivers = data.drivers || data || [];
   const list = Array.isArray(drivers) ? drivers : [];
@@ -349,32 +361,215 @@ async function viewDashboard(main) {
   const count = (key, fallback) => (counts[key] !== undefined ? counts[key] : fallback);
   const truckCount = count('trucks', Array.isArray(trucks) ? trucks.length : '—');
   const trailerCount = count('trailers', Array.isArray(trailers) ? trailers.length : '—');
-  const activeLoads = count('activeLoads', Array.isArray(loads) ? loads.filter(l => l.status === 'active').length : list.filter(d => d.activeLoad).length);
+  const loadList = Array.isArray(loads) ? loads : [];
+  const activeLoads = count('activeLoads', loadList.filter(l => l.status === 'active').length);
   const pendingReq = count('pendingRequests', list.reduce((n, d) => n + (Number(d.pendingRequests) || 0), 0));
-  main.innerHTML = '<h1>Dashboard</h1>' +
-    '<div class="grid4">' +
-    '<div class="card"><div class="stat-num">' + count('drivers', list.length) + '</div><div class="stat-label">Drivers</div></div>' +
-    '<div class="card"><div class="stat-num">' + truckCount + '</div><div class="stat-label">Trucks</div></div>' +
-    '<div class="card"><div class="stat-num">' + trailerCount + '</div><div class="stat-label">Trailers</div></div>' +
-    '<div class="card"><div class="stat-num">' + activeLoads + '</div><div class="stat-label">Active loads</div></div>' +
-    '<div class="card"><div class="stat-num">' + pendingReq + '</div><div class="stat-label">Pending requests</div></div>' +
+  const activeLoadByDriver = {};
+  loadList.forEach(l => { if (l.status === 'active' && l.driverId != null) activeLoadByDriver[l.driverId] = l; });
+  const rcByLoad = {};
+  (Array.isArray(rcs) ? rcs : []).forEach(r => { if (r.loadId != null && r.rateCents != null) rcByLoad[r.loadId] = r; });
+  const locByDriver = {};
+  (Array.isArray(locs) ? locs : []).forEach(l => { locByDriver[l.driverId] = l; });
+  const LIVE_MS = 15 * 60 * 1000;
+  const locFresh = (loc) => !!(loc && loc.updatedAt && (Date.now() - Date.parse(loc.updatedAt) < LIVE_MS));
+  const isLive = (d) => d.active !== false && locFresh(locByDriver[d.id] || d.location);
+  main.innerHTML = '<div class="dash-head"><h1 style="margin:0">Dashboard</h1><span class="status-pill live"><span class="dot"></span>Live</span></div>' +
+    '<div class="dash-stats">' +
+    '<div class="glass-panel dash-stat"><div class="stat-num">' + count('drivers', list.length) + '</div><div class="stat-label">Drivers</div></div>' +
+    '<div class="glass-panel dash-stat"><div class="stat-num">' + truckCount + '</div><div class="stat-label">Trucks</div></div>' +
+    '<div class="glass-panel dash-stat"><div class="stat-num">' + trailerCount + '</div><div class="stat-label">Trailers</div></div>' +
+    '<div class="glass-panel dash-stat"><div class="stat-num">' + activeLoads + '</div><div class="stat-label">Active loads</div></div>' +
+    '<div class="glass-panel dash-stat"><div class="stat-num">' + pendingReq + '</div><div class="stat-label">Pending requests</div></div>' +
     '</div>' +
-    '<h2>Drivers</h2>' +
-    (list.length ? '<div class="grid2">' + list.map(driverCard).join('') + '</div>' : '<p class="empty">No drivers yet. Add one from the Drivers page.</p>');
+    '<div class="dash-main">' +
+    '<div class="dash-drivers"><h2>Drivers</h2>' +
+    (list.length ? list.map(d => dashDriverCard(d, activeLoadByDriver[d.id], rcByLoad, locByDriver[d.id] || d.location, isLive(d))).join('') : '<p class="empty">No drivers yet. Add one from the Drivers page.</p>') +
+    '</div>' +
+    '<div class="dash-track">' +
+    '<div class="glass-panel"><h2 style="margin-top:0">Live tracking</h2><div id="dashMap" class="dash-map"></div><p class="small muted" id="dashMapNote" style="display:none"></p></div>' +
+    '<div class="glass-panel mt" id="dashFleet"></div>' +
+    '</div></div>';
   renderAdminSidebar(pendingReq);
+  const compass = (h) => {
+    if (typeof h !== 'number') return '—';
+    const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return dirs[Math.round(h / 45) % 8] + ' (' + Math.round(h) + '°)';
+  };
+  const speedText = (l) => (typeof l.speedMph === 'number' ? Math.round(l.speedMph) + ' mph' : '—');
+  const renderFleet = (locList) => {
+    const el = document.getElementById('dashFleet');
+    if (!el) return;
+    const byId = {};
+    locList.forEach(l => { byId[l.driverId] = l; });
+    el.innerHTML = '<h2 style="margin-top:0">Fleet</h2>' + (list.length ? list.map(d => {
+      const l = byId[d.id] || d.location;
+      const on = d.active !== false && locFresh(l);
+      const right = on
+        ? (typeof l.speedMph === 'number' ? Math.round(l.speedMph) + ' mph' : 'Live')
+        : (l && l.updatedAt ? 'Last seen ' + esc(fmtDate(l.updatedAt)) : 'No location yet');
+      const truckNo = d.truck ? (d.truck.unitNumber || '') : (d.truckUnitNumber || '');
+      const trailerNo = d.trailer ? (d.trailer.unitNumber || '') : (d.trailerUnitNumber || '');
+      return '<div class="fleet-row"><span class="fleet-dot' + (on ? '' : ' off') + '"></span><div style="flex:1;min-width:0"><strong>' + esc(d.name) + '</strong><div class="small muted">' + esc(truckNo) + (truckNo && trailerNo ? ' · ' : '') + esc(trailerNo) + '</div></div><span class="small muted">' + right + '</span></div>';
+    }).join('') : '<p class="empty">No drivers yet.</p>');
+  };
+  const refreshPills = (locList) => {
+    const byId = {};
+    locList.forEach(l => { byId[l.driverId] = l; });
+    list.forEach(d => {
+      const pill = document.querySelector('[data-dash-status="' + d.id + '"]');
+      if (!pill) return;
+      const l = byId[d.id] || d.location;
+      const on = d.active !== false && locFresh(l);
+      pill.className = 'status-pill ' + (on ? 'live' : 'off');
+      pill.innerHTML = '<span class="dot"></span>' + (d.active === false ? 'Inactive' : (on ? 'On the road' : 'Offline'));
+    });
+  };
+  const drawMarkers = (locList) => {
+    if (!state.dashMap || !window.google || !google.maps) return;
+    (state.dashMapMarkers || []).forEach(m => m.setMap(null));
+    state.dashMapMarkers = [];
+    const bounds = new google.maps.LatLngBounds();
+    locList.forEach(l => {
+      if (l.lat === undefined || l.lng === undefined) return;
+      const pos = { lat: Number(l.lat), lng: Number(l.lng) };
+      const marker = new google.maps.Marker({
+        position: pos, map: state.dashMap, title: l.driverName || ('Driver ' + l.driverId),
+        icon: driverPinIcon(l.driverName || ''),
+      });
+      marker.addListener('click', () => {
+        if (state.dashInfo) state.dashInfo.close();
+        state.dashInfo = new google.maps.InfoWindow({
+          content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
+        });
+        state.dashInfo.open(state.dashMap, marker);
+      });
+      state.dashMapMarkers.push(marker);
+      bounds.extend(pos);
+    });
+    if (state.dashMapMarkers.length === 1) { state.dashMap.setCenter(state.dashMapMarkers[0].getPosition()); state.dashMap.setZoom(12); }
+    else if (state.dashMapMarkers.length > 1) { state.dashMap.fitBounds(bounds); }
+  };
+  const loadDashLocs = async () => {
+    if (state.adminView !== 'dashboard') return;
+    try {
+      const fresh = await api('/api/admin/locations');
+      const locList = Array.isArray(fresh) ? fresh : [];
+      renderFleet(locList);
+      refreshPills(locList);
+      if (!state.dashMap) {
+        const g = await ensureGoogleMaps();
+        const mapEl = document.getElementById('dashMap');
+        if (!mapEl) return;
+        if (!g) {
+          const note = document.getElementById('dashMapNote');
+          if (note) { note.style.display = 'block'; note.textContent = 'Google Maps is not set up yet — the map key is missing. Driver locations are listed below.'; }
+          return;
+        }
+        state.dashMap = new g.Map(mapEl, { center: { lat: 39.7684, lng: -86.1581 }, zoom: 5, mapTypeId: 'hybrid', streetViewControl: false });
+      }
+      drawMarkers(locList);
+    } catch (e) { /* keep the last good map and fleet on refresh errors */ }
+  };
+  renderFleet(Array.isArray(locs) ? locs : []);
+  await loadDashLocs();
+  addTimer(loadDashLocs, 10000);
 }
-function driverCard(d) {
+function dashDriverCard(d, load, rcByLoad, loc, live) {
   const truck = d.truck ? (d.truck.unitNumber || d.truck) : (d.truckUnitNumber || '—');
   const trailer = d.trailer ? (d.trailer.unitNumber || d.trailer) : (d.trailerUnitNumber || '—');
-  const load = d.activeLoad ? (d.activeLoad.reference || '') : null;
-  return '<div class="card"><div class="flex-between"><h3 style="margin:0">' + esc(d.name) + '</h3>' +
-    (d.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</div>' +
-    '<p class="muted small">' + esc(d.phone || '') + (d.phone && d.email ? ' · ' : '') + esc(d.email || '') + '</p>' +
-    '<div class="grid2 small"><div><span class="muted">Truck</span><br><strong>' + esc(truck) + '</strong></div>' +
-    '<div><span class="muted">Trailer</span><br><strong>' + esc(trailer) + '</strong></div></div>' +
-    (load ? '<p class="small mt">Active load: <strong>' + esc(load) + '</strong></p>' : '<p class="small muted mt">No active load</p>') +
-    '<p class="small">Pending requests: <strong>' + (Number(d.pendingRequests) || 0) + '</strong> · Unread messages: <strong>' + (Number(d.unreadMessages) || 0) + '</strong></p>' +
+  const initial = String(d.name || '?').trim().charAt(0).toUpperCase();
+  const status = d.active === false
+    ? '<span class="status-pill off" data-dash-status="' + d.id + '"><span class="dot"></span>Inactive</span>'
+    : (live
+      ? '<span class="status-pill live" data-dash-status="' + d.id + '"><span class="dot"></span>On the road</span>'
+      : '<span class="status-pill off" data-dash-status="' + d.id + '"><span class="dot"></span>Offline</span>');
+  const chips = '<span class="chip">Truck ' + esc(truck) + '</span><span class="chip">Trailer ' + esc(trailer) + '</span>' +
+    (load ? '<span class="chip">' + esc(load.reference || '') + '</span>' : '') +
+    (load && rcByLoad[load.id] ? '<span class="chip gold">' + fmtMoney(rcByLoad[load.id].rateCents) + '</span>' : '');
+  let route = '';
+  if (load) {
+    const prog = routeProgress(load);
+    route = '<div class="dw-route">' +
+      '<div class="dw-route-places">' + esc(shortPlace(load.pickupLocation)) + ' &rarr; ' + esc(shortPlace(load.deliveryLocation)) + '</div>' +
+      (prog == null ? '' :
+        '<div class="dw-route-bar"><div class="dw-route-fill" style="width:' + Math.round(prog * 100) + '%"></div></div>' +
+        '<div class="dw-route-meta small muted">' + Math.round(prog * 100) + '% &middot; Pickup ' + esc(fmtShortTime(load.pickupAt, load.pickupTimezone)) + ' &rarr; Delivery ' + esc(fmtShortTime(load.deliveryAt, load.deliveryTimezone)) + '</div>') +
+      '</div>';
+  } else {
+    route = '<p class="small muted mt">No active load</p>';
+  }
+  const speed = (live && loc && typeof loc.speedMph === 'number') ? ' &middot; ' + Math.round(loc.speedMph) + ' mph' : '';
+  return '<div class="glass-panel dw">' +
+    '<div class="dw-head"><div class="dw-avatar' + (d.active === false ? ' off' : '') + '">' + esc(initial) + '</div>' +
+    '<div class="dw-id"><h3>' + esc(d.name) + '</h3><div class="small muted">' + esc(d.phone || '') + (d.phone && d.email ? ' · ' : '') + esc(d.email || '') + '</div></div>' +
+    status + '</div>' +
+    '<div class="dw-chips">' + chips + '</div>' +
+    route +
+    '<p class="small muted dw-foot">Pending requests: <strong>' + (Number(d.pendingRequests) || 0) + '</strong> &middot; Unread messages: <strong>' + (Number(d.unreadMessages) || 0) + '</strong>' + speed + '</p>' +
     '</div>';
+}
+/* Route progress from a load's pickup/delivery times: 0 before pickup,
+   1 after delivery, null when the times are missing or invalid. */
+function routeProgress(load) {
+  if (!load || !load.pickupAt || !load.deliveryAt) return null;
+  const p = Date.parse(load.pickupAt), q = Date.parse(load.deliveryAt);
+  if (isNaN(p) || isNaN(q) || q <= p) return null;
+  return Math.max(0, Math.min(1, (Date.now() - p) / (q - p)));
+}
+/* "904 Edwards Dr, Lebanon IN 46052" -> "Lebanon, IN". */
+function shortPlace(addr) {
+  if (!addr) return '—';
+  const m = String(addr).match(/,\s*([^,]+?)\s+([A-Z]{2})\s+\d{5}/);
+  return m ? (m[1] + ', ' + m[2]) : String(addr).split(',').slice(-2).join(',').trim();
+}
+function fmtShortTime(iso, tz) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz || 'America/Indiana/Indianapolis' }); } catch (e) { return '—'; }
+}
+/* Google Maps loader: fetches the browser key from the server (admin-only)
+   and loads the Maps JavaScript API once. Returns google.maps, or null when
+   no key is configured or the script fails — callers show a fallback note. */
+let googleMapsPromise = null;
+async function ensureGoogleMaps() {
+  if (window.google && google.maps) return google.maps;
+  if (googleMapsPromise) return googleMapsPromise;
+  googleMapsPromise = (async () => {
+    try {
+      const cfg = await api('/api/admin/maps-config').catch(() => ({}));
+      const key = cfg && cfg.googleMapsApiKey;
+      if (!key) return null;
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key);
+        s.async = true; s.defer = true;
+        s.onload = resolve; s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      return (window.google && google.maps) ? google.maps : null;
+    } catch (e) { return null; }
+  })();
+  return googleMapsPromise;
+}
+/* Gold circle pin with the driver's initial — on-brand marker for the map. */
+function driverPinIcon(name) {
+  const initial = String(name || '?').trim().charAt(0).toUpperCase();
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><circle cx="18" cy="18" r="16" fill="#F2B705" stroke="#111111" stroke-width="2"/><text x="18" y="24" font-size="16" font-weight="bold" text-anchor="middle" fill="#111111" font-family="Arial">' + initial + '</text></svg>';
+  return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg), scaledSize: new google.maps.Size(36, 36), anchor: new google.maps.Point(18, 18) };
+}
+/* The dashboard background is a real fixed layer (not a body background):
+   body backgrounds are unreliable for glass — backdrop filters don't
+   always see them, and iOS Safari ignores background-attachment: fixed.
+   Same pattern as the Rate Cons layer. */
+function ensureDashBgLayer() {
+  if (!document.getElementById('dashBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'dashBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeDashBgLayer() {
+  const layer = document.getElementById('dashBgLayer');
+  if (layer) layer.remove();
 }
 
 /* ---------- Drivers ---------- */
@@ -841,8 +1036,10 @@ async function viewDispatch(main) {
 
 /* ---------- Locations (live map) ---------- */
 async function viewLocations(main) {
-  main.innerHTML = '<h1>Locations</h1><p class="muted">Live locations of signed-in drivers. Refreshes every 10 seconds.</p>' +
+  main.innerHTML = '<h1>Locations</h1><p class="muted">Live locations of your drivers — last known position shows even after a driver signs out. Refreshes every 10 seconds.</p>' +
     '<div id="map"></div><div id="locList" class="mt"></div>';
+  state.locMap = null;
+  state.locMapMarkers = [];
   const compass = (h) => {
     if (typeof h !== 'number') return '—';
     const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -856,7 +1053,7 @@ async function viewLocations(main) {
       ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Driver</th><th>Speed</th><th>Latitude</th><th>Longitude</th><th>Last update</th></tr></thead><tbody>' +
         locs.map(l => '<tr><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + speedText(l) + '</td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
         '</tbody></table></div>'
-      : '<p class="empty">No drivers are sharing a live location right now.</p>';
+      : '<p class="empty">No driver locations yet — a location appears once a driver signs in and shares theirs.</p>';
   };
   const loadLocs = async () => {
     if (state.adminView !== 'locations') return;
@@ -864,30 +1061,38 @@ async function viewLocations(main) {
       const locs = await api('/api/admin/locations');
       const list = Array.isArray(locs) ? locs : [];
       renderList(list);
-      if (typeof L !== 'undefined') {
-        const mapEl = document.getElementById('map');
-        if (mapEl) {
-          if (!state.map) {
-            state.map = L.map('map').setView([39.7684, -86.1581], 5); // Indianapolis default
-            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community' }).addTo(state.map);
-          }
-          state.mapMarkers.forEach(m => m.remove());
-          state.mapMarkers = [];
-          list.forEach(l => {
-            if (l.lat === undefined || l.lng === undefined) return;
-            const marker = L.marker([l.lat, l.lng]).addTo(state.map)
-              .bindPopup('<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)));
-            state.mapMarkers.push(marker);
-          });
-          if (state.mapMarkers.length) {
-            const group = L.featureGroup(state.mapMarkers);
-            state.map.fitBounds(group.getBounds().pad(0.2));
-          }
-          state.map.invalidateSize();
+      const mapEl = document.getElementById('map');
+      if (mapEl && !state.locMap) {
+        const g = await ensureGoogleMaps();
+        if (!g) {
+          mapEl.outerHTML = '<div class="card"><p><strong>Map unavailable</strong> — Google Maps is not set up yet (the map key is missing). Driver locations are listed below.</p></div>';
+        } else {
+          state.locMap = new g.Map(mapEl, { center: { lat: 39.7684, lng: -86.1581 }, zoom: 5, mapTypeId: 'hybrid', streetViewControl: false });
         }
-      } else {
-        const mapEl = document.getElementById('map');
-        if (mapEl) mapEl.outerHTML = '<div class="card"><p><strong>Map unavailable</strong> — the map library (Leaflet CDN) could not be loaded. Driver locations are listed below.</p></div>';
+      }
+      if (state.locMap && window.google && google.maps) {
+        (state.locMapMarkers || []).forEach(m => m.setMap(null));
+        state.locMapMarkers = [];
+        const bounds = new google.maps.LatLngBounds();
+        list.forEach(l => {
+          if (l.lat === undefined || l.lng === undefined) return;
+          const pos = { lat: Number(l.lat), lng: Number(l.lng) };
+          const marker = new google.maps.Marker({
+            position: pos, map: state.locMap, title: l.driverName || ('Driver ' + l.driverId),
+            icon: driverPinIcon(l.driverName || ''),
+          });
+          marker.addListener('click', () => {
+            if (state.locInfo) state.locInfo.close();
+            state.locInfo = new google.maps.InfoWindow({
+              content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
+            });
+            state.locInfo.open(state.locMap, marker);
+          });
+          state.locMapMarkers.push(marker);
+          bounds.extend(pos);
+        });
+        if (state.locMapMarkers.length === 1) { state.locMap.setCenter(state.locMapMarkers[0].getPosition()); state.locMap.setZoom(12); }
+        else if (state.locMapMarkers.length > 1) { state.locMap.fitBounds(bounds); }
       }
     } catch (e) { showError(e); }
   };

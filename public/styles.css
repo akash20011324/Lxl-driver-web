@@ -249,6 +249,105 @@ body.rc-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
 }
+
+/* ---------- dashboard (Design 3 "Floating Glass") ---------- */
+/* The truck-at-sunset photo covers the whole viewport behind everything,
+   on a real fixed layer (#dashBgLayer, created by viewDashboard) — the
+   same pattern as the Rate Cons layer, for the same reasons. The sidebar
+   has no right border on this page so the whole dashboard reads as one
+   sheet. Separate glass panels float over the photo; the map panel is
+   taller, on the right. */
+body.dash-bg { background-color: #05070d; }
+#dashBgLayer {
+  position: fixed; inset: 0; z-index: 0;
+  background-image:
+    linear-gradient(rgba(3, 6, 14, 0.35), rgba(3, 6, 14, 0.5)),
+    url('assets/dashboard-bg.jpg');
+  background-size: cover;
+  background-position: center 30%;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+body.dash-bg .topbar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+body.dash-bg .sidebar {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015) 45%, rgba(255, 255, 255, 0.04));
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border-right: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+body.dash-bg .sidebar button { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7); }
+body.dash-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
+.glass-panel {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01) 50%, rgba(255, 255, 255, 0.02));
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  padding: 16px;
+}
+.dash-head { display: flex; align-items: center; gap: 10px; }
+.dash-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 14px 0; }
+.dash-stat { padding: 14px 16px; }
+.dash-main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 12px; align-items: start; }
+.dash-drivers h2 { margin-top: 0; }
+.dash-map { height: 460px; width: 100%; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.1); background: #111; }
+.dw { margin-bottom: 12px; }
+.dw-head { display: flex; align-items: center; gap: 12px; }
+.dw-avatar {
+  width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0;
+  background: linear-gradient(135deg, #F2B705, #b8860b);
+  color: #111; font-weight: 800; font-size: 20px;
+  display: flex; align-items: center; justify-content: center;
+  text-shadow: none;
+}
+.dw-avatar.off { background: #374151; color: #9ca3af; }
+.dw-id { flex: 1; min-width: 0; }
+.dw-id h3 { margin: 0; }
+.status-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: 999px; padding: 3px 10px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+  background: #14532d; color: #bbf7d0;
+}
+.status-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; animation: pulse-dot 1.6s infinite; }
+.status-pill.off { background: #374151; color: #d1d5db; }
+.status-pill.off .dot { background: #9ca3af; animation: none; }
+@keyframes pulse-dot {
+  0% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(74, 222, 128, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0); }
+}
+.dw-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.chip {
+  display: inline-block; border-radius: 999px; padding: 3px 10px;
+  font-size: 12px; font-weight: 600;
+  background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.chip.gold { background: rgba(242, 183, 5, 0.18); border-color: rgba(242, 183, 5, 0.45); color: var(--gold); }
+.dw-route { margin-top: 12px; }
+.dw-route-places { font-weight: 700; font-size: 15px; }
+.dw-route-bar { height: 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.15); overflow: hidden; margin-top: 8px; }
+.dw-route-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #F2B705, #ffd34d); }
+.dw-route-meta { margin-top: 6px; }
+.dw-foot { margin-top: 12px; margin-bottom: 0; }
+.fleet-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.fleet-row:last-child { border-bottom: none; }
+.fleet-dot { width: 10px; height: 10px; border-radius: 50%; background: #4ade80; flex-shrink: 0; }
+.fleet-dot.off { background: #6b7280; }
+@media (max-width: 900px) {
+  .dash-main { grid-template-columns: 1fr; }
+  .dash-track { order: -1; }
+  .dash-stats { grid-template-columns: repeat(2, 1fr); }
+}
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
