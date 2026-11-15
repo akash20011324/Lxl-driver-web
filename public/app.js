@@ -330,6 +330,48 @@ async function loadSidebarOrder() {
   } catch { /* keep the default order */ }
 }
 
+// Press-and-drag reordering in Organize mode (pointer events, so it
+// works with touch on the iPad as well as a mouse): hold a row, slide
+// it where it belongs, let go. state.organizeOrder follows the rows'
+// DOM order; the arrows stay as a precise alternative.
+function attachOrgDrag(row, nav, pendingRequests) {
+  row.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    if (e.button !== undefined && e.button > 0) return;
+    e.preventDefault();
+    row.setPointerCapture(e.pointerId);
+    row.classList.add('org-dragging');
+    const startY = e.clientY;
+    let shift = 0;
+    const onMove = (ev) => {
+      const dy = ev.clientY - startY;
+      const siblings = Array.from(nav.querySelectorAll('.sidebar-org-row')).filter(r => r !== row);
+      let before = null;
+      for (const sib of siblings) {
+        const rect = sib.getBoundingClientRect();
+        if (ev.clientY < rect.top + rect.height / 2) { before = sib; break; }
+      }
+      const oldTop = row.offsetTop;
+      if (before) nav.insertBefore(row, before);
+      else nav.insertBefore(row, nav.querySelector('.sidebar-org-foot'));
+      shift += row.offsetTop - oldTop;
+      row.style.transform = 'translateY(' + (dy - shift) + 'px)';
+    };
+    const onUp = () => {
+      row.classList.remove('org-dragging');
+      row.style.transform = '';
+      row.removeEventListener('pointermove', onMove);
+      row.removeEventListener('pointerup', onUp);
+      row.removeEventListener('pointercancel', onUp);
+      state.organizeOrder = Array.from(nav.querySelectorAll('.sidebar-org-row')).map(r => r.dataset.key);
+      renderAdminSidebar(pendingRequests);
+    };
+    row.addEventListener('pointermove', onMove);
+    row.addEventListener('pointerup', onUp);
+    row.addEventListener('pointercancel', onUp);
+  });
+}
+
 function renderAdminSidebar(pendingRequests) {
   const nav = document.getElementById('adminSidebar');
   if (!nav) return;
@@ -338,7 +380,7 @@ function renderAdminSidebar(pendingRequests) {
     ? '<span class="badge">' + pendingRequests + '</span>' : '';
   if (state.organizing) {
     nav.innerHTML = views.map(([key, label], i) =>
-      '<div class="sidebar-org-row"><span>' + esc(label) + badge(key) + '</span>' +
+      '<div class="sidebar-org-row" data-key="' + key + '"><span><span class="org-grip">⠿</span>' + esc(label) + badge(key) + '</span>' +
       '<span class="sidebar-org-btns">' +
       '<button data-move="-1" data-key="' + key + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
       '<button data-move="1" data-key="' + key + '"' + (i === views.length - 1 ? ' disabled' : '') + '>↓</button>' +
@@ -356,22 +398,32 @@ function renderAdminSidebar(pendingRequests) {
       state.organizeOrder = keys;
       renderAdminSidebar(pendingRequests);
     }));
+    nav.querySelectorAll('.sidebar-org-row').forEach(row => attachOrgDrag(row, nav, pendingRequests));
     nav.querySelector('[data-org-done]').addEventListener('click', async () => {
+      const order = (state.organizeOrder || []).slice();
       try {
-        await api('/api/admin/sidebar-order', { method: 'POST', body: JSON.stringify({ order: state.organizeOrder || [] }) });
-        state.sidebarOrder = state.organizeOrder;
-        toast('Sidebar order saved.', 'ok');
-      } catch (err) { showError(err); }
+        await api('/api/admin/sidebar-order', { method: 'POST', body: JSON.stringify({ order }) });
+      } catch (firstErr) {
+        // A server restart (deploy) can drop one request — retry once
+        // before giving up, and stay in Organize mode either way so a
+        // failed save never throws the arrangement away.
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+          await api('/api/admin/sidebar-order', { method: 'POST', body: JSON.stringify({ order }) });
+        } catch (err) { showError(err); return; }
+      }
+      state.sidebarOrder = order;
       state.organizing = false;
+      toast('Sidebar order saved.', 'ok');
       renderAdminSidebar(pendingRequests);
     });
     nav.querySelector('[data-org-reset]').addEventListener('click', async () => {
       try {
         await api('/api/admin/sidebar-order', { method: 'POST', body: JSON.stringify({ order: [] }) });
-        state.sidebarOrder = null;
-        toast('Sidebar back to the default order.', 'ok');
-      } catch (err) { showError(err); }
+      } catch (err) { showError(err); return; }
+      state.sidebarOrder = null;
       state.organizing = false;
+      toast('Sidebar back to the default order.', 'ok');
       renderAdminSidebar(pendingRequests);
     });
     nav.querySelector('[data-org-cancel]').addEventListener('click', () => {
@@ -1317,7 +1369,7 @@ async function viewDocuments(main) {
         ? '<span class="doc-status done"><span class="dot"></span>Completed</span>'
         : (load.status ? '<span class="doc-status done"><span class="dot"></span>' + esc(String(load.status)) + '</span>' : '');
     const equip = [load.truckUnit ? 'Truck ' + load.truckUnit : null, load.trailerUnit ? 'Trailer ' + load.trailerUnit : null].filter(Boolean).join(' / ');
-    return '<div class="card doc-load"><div class="doc-load-head"><div>' +
+    return '<div class="card doc-load" data-ref="' + esc(load.reference) + '"><div class="doc-load-head"><div>' +
       '<div class="doc-load-ref">' + esc(load.reference) + '</div>' +
       '<div class="muted">' + esc(shortPlace(load.pickupLocation)) + ' → ' + esc(shortPlace(load.deliveryLocation)) +
       (load.driverName ? ' · ' + esc(load.driverName) : '') + (equip ? ' · ' + esc(equip) : '') + '</div>' +
@@ -1330,12 +1382,28 @@ async function viewDocuments(main) {
   };
 
   main.innerHTML = '<div class="docs-page" id="docsPage">' +
-    '<div class="rc-head"><h1>Documents</h1></div>' +
+    '<div class="rc-head"><h1>Documents</h1>' +
+    '<input id="docsSearch" class="docs-search" type="search" placeholder="Search load # — e.g. 2038499" autocomplete="off"></div>' +
     '<p class="docs-quote">“Every mile counts. Every paper proves it.”</p>' +
     (shown.length ? shown.map(sectionHtml).join('') : '<div class="card"><p class="empty">No documents yet.</p></div>') +
+    '<p class="docs-nomatch" id="docsNoMatch" hidden>No load matches that number.</p>' +
     '<div class="docs-sendbar" id="docsSendBar" hidden><span id="docsSendCount"></span>' +
     '<button class="btn" id="docsSendOpen">Send to broker</button>' +
     '<button class="btn btn-ghost" id="docsSendClear">Clear</button></div></div>';
+
+  const docsSearch = document.getElementById('docsSearch');
+  if (docsSearch) docsSearch.addEventListener('input', () => {
+    const q = docsSearch.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    let visible = 0;
+    main.querySelectorAll('.doc-load').forEach((card) => {
+      const ref = (card.dataset.ref || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const show = !q || ref.indexOf(q) !== -1;
+      card.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    const none = document.getElementById('docsNoMatch');
+    if (none) none.hidden = !(q && visible === 0);
+  });
 
   const updateSendBar = () => {
     const bar = document.getElementById('docsSendBar');
@@ -1377,7 +1445,7 @@ async function viewDocuments(main) {
     const page = document.getElementById('docsPage');
     if (!page) return;
     if (document.getElementById('docsModal')) return;
-    if (e.target.closest('[data-doc-btn]') || e.target.closest('.doc-panel') || e.target.closest('#docsSendBar')) return;
+    if (e.target.closest('[data-doc-btn]') || e.target.closest('.doc-panel') || e.target.closest('#docsSendBar') || e.target.closest('#docsSearch')) return;
     page.querySelectorAll('[data-doc-panel]').forEach(p => { p.hidden = true; });
     page.querySelectorAll('[data-doc-btn]').forEach(x => x.classList.remove('active'));
   });

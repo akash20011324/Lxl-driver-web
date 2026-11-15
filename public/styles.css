@@ -306,6 +306,22 @@ body.docs-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .doc-status .dot { width: 9px; height: 9px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 8px #22c55e; flex: none; }
 .doc-status.done { color: #d1d5db; }
 .doc-status.done .dot { background: #9ca3af; box-shadow: none; }
+.sidebar-org-row { touch-action: none; cursor: grab; }
+.sidebar-org-row.org-dragging {
+  position: relative; z-index: 6; cursor: grabbing;
+  background: rgba(30, 64, 175, 0.4);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); border-radius: 10px;
+}
+.org-grip { color: var(--muted); margin-right: 8px; font-size: 13px; }
+.docs-search {
+  margin-left: auto; width: 230px; max-width: 55vw;
+  padding: 8px 14px; border-radius: 999px;
+  background: rgba(7, 14, 32, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #fff; font-size: 14px;
+}
+.docs-search::placeholder { color: #c3ccd9; }
+.docs-nomatch { text-align: center; color: #fff; padding: 18px 0; font-weight: 600; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }
 .docs-quote {
   color: var(--gold);
   text-align: center;

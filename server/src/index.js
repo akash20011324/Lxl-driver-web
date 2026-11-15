@@ -1576,7 +1576,10 @@ async function outlookTokenRequest(body) {
 async function outlookAccessToken(user) {
   if (!user.outlookRefreshToken) {
     const e = new Error('Outlook is not connected for this account — connect it first.');
-    e.status = 401;
+    // 409, not 401: the web app treats any 401 as an expired app
+    // session and signs the admin out — an Outlook problem must
+    // never do that.
+    e.status = 409;
     throw e;
   }
   try {
@@ -1596,7 +1599,7 @@ async function outlookAccessToken(user) {
     if (e.code === 'invalid_grant') {
       db.prepare('UPDATE users SET outlookRefreshToken = NULL, outlookEmail = NULL, outlookConnectedAt = NULL WHERE id = ?').run(user.id);
       const gone = new Error('Outlook needs to be connected again — the permission was revoked or expired.');
-      gone.status = 401;
+      gone.status = 409;
       throw gone;
     }
     throw e;
@@ -1691,11 +1694,11 @@ async function attachFileToDraft(accessToken, draftId, doc) {
 // Access token that may SEND mail (Documents → Send to broker). The
 // stored refresh token only carries Mail.Send after the admin has
 // reconnected once since that scope was added; before that Microsoft
-// rejects the refresh and we surface a reconnect prompt (401).
+// rejects the refresh and we surface a reconnect prompt (409).
 async function outlookSendAccessToken(user) {
   if (!user.outlookRefreshToken) {
     const e = new Error('Outlook is not connected for this account — connect it first.');
-    e.status = 401;
+    e.status = 409;
     throw e;
   }
   try {
@@ -1712,7 +1715,7 @@ async function outlookSendAccessToken(user) {
     return data.access_token;
   } catch (e) {
     const gone = new Error('Sending needs one extra Outlook permission — reconnect Outlook once, then send again.');
-    gone.status = 401;
+    gone.status = 409;
     gone.code = 'needs_reconnect';
     throw gone;
   }
