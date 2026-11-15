@@ -659,16 +659,36 @@ driver.post('/receipt-amount', upload.single('file'), async (req, res) => {
     const buf = fs.readFileSync(tmp);
     let text = '';
     const isPdf = buf.length >= 4 && buf.subarray(0, 4).toString('ascii') === '%PDF';
+    // JPEG FF D8 FF, PNG 89 50 4E 47 — anything else (empty, truncated
+    // or an unknown format) never reaches tesseract: a bad image makes
+    // its worker reject, and without an errorHandler that rejection is
+    // re-thrown outside any promise chain and kills the whole Node
+    // process (Render logs 2026-11-15: "Error attempting to read
+    // image" + "truncated file", process exited, sign-ins 502'd).
+    const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    const isPng = buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
     if (isPdf) {
       text = cleanRateText(await pdfTextFromBuffer(buf));
-    } else {
-      const worker = await createWorker('eng');
+    } else if ((isJpeg || isPng) && buf.length > 1024) {
+      // errorHandler is REQUIRED: without it, a rejected OCR job makes
+      // tesseract's worker throw outside the promise chain and the
+      // uncaught exception kills the server process.
+      const worker = await createWorker('eng', undefined, {
+        errorHandler: (e) => console.error('receipt-amount tesseract worker error', e),
+      });
       try {
         const { data } = await worker.recognize(buf);
         text = cleanRateText(data.text || '');
       } finally {
-        await worker.terminate();
+        try {
+          await worker.terminate();
+        } catch {
+          // already gone — ignore
+        }
       }
+    } else {
+      console.log('receipt-amount', { bytes: buf.length, isPdf, textLen: 0, amount: null, skipped: 'unreadable-file' });
+      return res.json({ amount: null });
     }
     const cents = detectReceiptTotalCents(text);
     // Log the outcome (never the file) so a missed total on a real
