@@ -562,11 +562,26 @@ function routeProgress(load) {
   if (isNaN(p) || isNaN(q) || q <= p) return null;
   return Math.max(0, Math.min(1, (Date.now() - p) / (q - p)));
 }
-/* "904 Edwards Dr, Lebanon IN 46052" -> "Lebanon, IN". */
+/* "904 Edwards Dr, Lebanon IN 46052" -> "Lebanon, IN". Tolerant of
+   missing commas / missing spaces / ALL-CAPS addresses, which is how
+   the saved LXL-2038499 addresses came out ("...Lebno,IN 46052",
+   "1513 N BROAD ST LANSDALE, PA 19446"). */
+function titleCase(w) {
+  const s = String(w || '');
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
 function shortPlace(addr) {
   if (!addr) return '—';
-  const m = String(addr).match(/,\s*([^,]+?)\s+([A-Z]{2})\s+\d{5}/);
-  return m ? (m[1] + ', ' + m[2]) : String(addr).split(',').slice(-2).join(',').trim();
+  const s = String(addr).replace(/,/g, ', ').replace(/\s+/g, ' ').trim();
+  const m = s.match(/,\s*([^,]+?)[,\s]+([A-Z]{2})\s+\d{5}/);
+  if (m) return m[1].trim() + ', ' + m[2];
+  // No comma between street and city: the city is the last word before "ST ZIP".
+  const m2 = s.match(/^(.*?)[,\s]+([A-Z]{2})\s+\d{5}\s*$/);
+  if (m2) {
+    const words = m2[1].trim().split(/\s+/);
+    return titleCase(words[words.length - 1] || '') + ', ' + m2[2];
+  }
+  return s;
 }
 function fmtShortTime(iso, tz) {
   if (!iso) return '—';
@@ -576,6 +591,7 @@ function fmtShortTime(iso, tz) {
    and loads the Maps JavaScript API once. Returns google.maps, or null when
    no key is configured or the script fails — callers show a fallback note. */
 let googleMapsPromise = null;
+let googleMapsKey = null; // kept for the REST geocode fallback below
 async function ensureGoogleMaps() {
   if (window.google && google.maps) return google.maps;
   if (googleMapsPromise) return googleMapsPromise;
@@ -584,6 +600,7 @@ async function ensureGoogleMaps() {
       const cfg = await api('/api/admin/maps-config').catch(() => ({}));
       const key = cfg && cfg.googleMapsApiKey;
       if (!key) return null;
+      googleMapsKey = key;
       await new Promise((resolve, reject) => {
         const s = document.createElement('script');
         s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key);
@@ -614,27 +631,45 @@ function driverPinIcon(name, driverId) {
    through Google (Geocoding API, same key as the maps). Results are cached
    by rounded coordinates so the 10-second refresh doesn't re-geocode the
    same spot over and over. Returns e.g. "Lebanon, IN", or null. */
+function placeFromComponents(comps) {
+  if (!comps) return null;
+  const find = (type) => { const c = comps.find(c => (c.types || []).includes(type)); return c ? c.short_name : null; };
+  const city = find('locality') || find('sublocality') || find('postal_town') || find('administrative_area_level_2');
+  const state = find('administrative_area_level_1');
+  return (city && state) ? (city + ', ' + state) : (city || state || null);
+}
 const geoCache = new Map();
 async function getCityState(lat, lng) {
   const key = Number(lat).toFixed(3) + ',' + Number(lng).toFixed(3);
   if (geoCache.has(key)) return geoCache.get(key);
   const pr = (async () => {
+    // 1) Google Maps JS Geocoder (modular "geocoding" library).
     try {
       const g = await ensureGoogleMaps();
-      if (!g || !google.maps.importLibrary) return null;
-      // Geocoder lives in the modular "geocoding" library — the classic
-      // google.maps.Geocoder is not reliably present, which made lookups
-      // silently return nothing (city/state showed "—").
-      const { Geocoder } = await google.maps.importLibrary('geocoding');
-      const geocoder = new Geocoder();
-      const out = await new Promise((resolve) => geocoder.geocode({ location: { lat: Number(lat), lng: Number(lng) } }, (results, status) => resolve({ results, status })));
-      if (out.status !== 'OK' || !out.results || !out.results.length) return null;
-      const comps = out.results[0].address_components || [];
-      const find = (type) => { const c = comps.find(c => (c.types || []).includes(type)); return c ? c.short_name : null; };
-      const city = find('locality') || find('sublocality') || find('postal_town') || find('administrative_area_level_2');
-      const state = find('administrative_area_level_1');
-      return (city && state) ? (city + ', ' + state) : (city || state || null);
-    } catch (e) { return null; }
+      if (g && google.maps.importLibrary) {
+        const { Geocoder } = await google.maps.importLibrary('geocoding');
+        const geocoder = new Geocoder();
+        const out = await new Promise((resolve) => geocoder.geocode({ location: { lat: Number(lat), lng: Number(lng) } }, (results, status) => resolve({ results, status })));
+        const place = placeFromComponents(out.status === 'OK' && out.results && out.results[0] ? out.results[0].address_components : null);
+        if (place) return place;
+        console.warn('city/state: JS Geocoder returned', out.status);
+      } else {
+        console.warn('city/state: Maps API or importLibrary unavailable');
+      }
+    } catch (e) { console.warn('city/state: JS Geocoder failed', e && e.message); }
+    // 2) Fallback: Geocoding API over plain HTTPS with the same key.
+    // (The JS path stayed silent before, so a second route + a console
+    // note means the next check can say WHY it failed instead of "—".)
+    try {
+      if (!googleMapsKey) await ensureGoogleMaps();
+      if (!googleMapsKey) return null;
+      const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + Number(lat) + ',' + Number(lng) + '&key=' + encodeURIComponent(googleMapsKey));
+      const j = await r.json();
+      const place = placeFromComponents(j.status === 'OK' && j.results && j.results[0] ? j.results[0].address_components : null);
+      if (place) return place;
+      console.warn('city/state: REST geocode returned', j.status, j.error_message || '');
+    } catch (e) { console.warn('city/state: REST geocode failed', e && e.message); }
+    return null;
   })();
   geoCache.set(key, pr);
   return pr;
@@ -960,7 +995,16 @@ function bindUnitCards(main, type) {
 }
 
 /* ---------- Loads ---------- */
+/* ISO -> "YYYY-MM-DDTHH:mm" in local time, for datetime-local inputs. */
+function toLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
 async function viewLoads(main) {
+  state.editingLoadId = null;
   const [loads, drivers] = await Promise.all([api('/api/admin/loads'), api('/api/admin/drivers')]);
   state.driversCache = Array.isArray(drivers) ? drivers : [];
   const list = Array.isArray(loads) ? loads : [];
@@ -989,7 +1033,7 @@ async function viewLoads(main) {
       '<td>' + fmtDate(l.pickupAt) + '<br>' + fmtDate(l.deliveryAt) + '</td>' +
       '<td><span class="pill ' + (l.status === 'active' ? 'blue' : l.status === 'completed' ? 'green' : 'red') + '">' + esc(l.status) + '</span></td>' +
       '<td>' + esc(l.bolStatus || '—') + '</td>' +
-      '<td>' + (l.status === 'active'
+      '<td><button class="btn btn-ghost btn-sm" data-edit-load="' + l.id + '">Edit</button> ' + (l.status === 'active'
         ? '<button class="btn btn-danger btn-sm" data-cancel-load="' + l.id + '">Cancel</button>'
         : l.status === 'completed'
           ? '<button class="btn btn-ghost btn-sm" data-reopen-load="' + l.id + '">Reopen</button>'
@@ -1000,6 +1044,20 @@ async function viewLoads(main) {
   document.getElementById('addLoadForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const v = id => document.getElementById(id).value.trim();
+    if (state.editingLoadId) {
+      const body = {
+        pickupLocation: v('al-pickup'),
+        pickupWarehouse: v('al-pickup-wh') || null,
+        pickupNumber: v('al-pickup-no') || null,
+        deliveryLocation: v('al-delivery'),
+        deliveryWarehouse: v('al-delivery-wh') || null,
+        deliveryNumber: v('al-delivery-no') || null,
+        notes: v('al-notes') || null,
+      };
+      try { await api('/api/admin/loads/' + state.editingLoadId + '/edit', { method: 'POST', body: JSON.stringify(body) }); toast('Load updated.', 'ok'); renderAdminView('loads'); }
+      catch (err) { showError(err); }
+      return;
+    }
     const body = {
       driverId: parseInt(v('al-driver'), 10),
       reference: v('al-ref'),
@@ -1016,6 +1074,34 @@ async function viewLoads(main) {
     try { await api('/api/admin/loads', { method: 'POST', body: JSON.stringify(body) }); toast('Load assigned.', 'ok'); renderAdminView('loads'); }
     catch (err) { showError(err); }
   });
+  main.querySelectorAll('[data-edit-load]').forEach(b => b.addEventListener('click', () => {
+    const l = list.find(x => String(x.id) === b.dataset.editLoad);
+    if (!l) return;
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
+    set('al-driver', l.driverId);
+    set('al-ref', l.reference);
+    set('al-pickup', l.pickupLocation);
+    set('al-pickup-wh', l.pickupWarehouse);
+    set('al-pickup-at', toLocalInput(l.pickupAt));
+    set('al-pickup-no', l.pickupNumber);
+    set('al-delivery', l.deliveryLocation);
+    set('al-delivery-wh', l.deliveryWarehouse);
+    set('al-delivery-at', toLocalInput(l.deliveryAt));
+    set('al-delivery-no', l.deliveryNumber);
+    set('al-notes', l.notes);
+    state.editingLoadId = l.id;
+    const h2 = main.querySelector('.card h2');
+    if (h2) h2.textContent = 'Edit load ' + l.reference;
+    const submitBtn = main.querySelector('#addLoadForm button[type="submit"]');
+    if (submitBtn) submitBtn.textContent = 'Save changes';
+    const actions = main.querySelector('#addLoadForm .form-actions');
+    if (actions && !document.getElementById('cancelEditBtn')) {
+      actions.insertAdjacentHTML('beforeend', ' <button class="btn btn-ghost" type="button" id="cancelEditBtn">Cancel</button>');
+      document.getElementById('cancelEditBtn').addEventListener('click', () => renderAdminView('loads'));
+    }
+    document.getElementById('addLoadForm').scrollIntoView({ behavior: 'smooth' });
+    toast('Editing ' + l.reference + ' — fix the addresses and save.', 'ok');
+  }));
   main.querySelectorAll('[data-cancel-load]').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('Cancel this load?')) return;
     try { await api('/api/admin/loads/' + b.dataset.cancelLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'cancelled' }) }); toast('Load cancelled.', 'ok'); renderAdminView('loads'); }

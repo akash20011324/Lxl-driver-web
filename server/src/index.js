@@ -1153,6 +1153,33 @@ admin.post('/loads/:id/status', (req, res) => {
   res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
 });
 
+// Edit a load's addresses (admin only): fixes typos like the LXL-2038499
+// pickup "Lebno". Times, driver and reference never change here.
+admin.post('/loads/:id/edit', (req, res) => {
+  const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.id);
+  if (!load) return err(res, 404, 'Load not found');
+  const { pickupLocation, pickupWarehouse, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryNumber, notes } = req.body || {};
+  const clean = (v) => (v && String(v).trim() ? String(v).trim() : null);
+  db.prepare(
+    'UPDATE loads SET pickupLocation = COALESCE(?, pickupLocation), pickupWarehouse = ?, pickupNumber = ?, deliveryLocation = COALESCE(?, deliveryLocation), deliveryWarehouse = ?, deliveryNumber = ?, notes = ? WHERE id = ?',
+  ).run(
+    clean(pickupLocation),
+    pickupWarehouse ?? null,
+    pickupNumber ?? null,
+    clean(deliveryLocation),
+    deliveryWarehouse ?? null,
+    deliveryNumber ?? null,
+    notes ?? null,
+    load.id,
+  );
+  // A new delivery address invalidates the cached coords so the
+  // delivery gate re-geocodes the new address.
+  if (clean(deliveryLocation) && clean(deliveryLocation) !== load.deliveryLocation) {
+    db.prepare('UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL WHERE id = ?').run(load.id);
+  }
+  res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
+});
+
 admin.get('/requests', (_req, res) => {
   const rows = db
     .prepare("SELECT * FROM requests ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, createdAt DESC, id DESC")
