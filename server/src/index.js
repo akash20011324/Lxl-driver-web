@@ -14,6 +14,7 @@ import { seedDemo } from './seed.js';
 import { seedRealFleet } from './seed-fleet.js';
 import { notifyDriver } from './push.js';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { createWorker } from 'tesseract.js';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
@@ -645,6 +646,42 @@ driver.get('/documents', (req, res) => {
 });
 
 const DOC_KINDS = ['pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc'];
+
+// Read the total off a receipt before it is uploaded: PDFs via pdf.js
+// text, images via on-device-style OCR (tesseract.js). The file is
+// read and discarded — nothing is stored. Always answers 200 with
+// { amount } (null when nothing could be read) so the app can just
+// leave the amount field blank for typing.
+driver.post('/receipt-amount', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.json({ amount: null });
+  const tmp = req.file.path;
+  try {
+    const buf = fs.readFileSync(tmp);
+    let text = '';
+    if (buf.length >= 4 && buf.subarray(0, 4).toString('ascii') === '%PDF') {
+      text = cleanRateText(await pdfTextFromBuffer(buf));
+    } else {
+      const worker = await createWorker('eng');
+      try {
+        const { data } = await worker.recognize(buf);
+        text = cleanRateText(data.text || '');
+      } finally {
+        await worker.terminate();
+      }
+    }
+    const cents = detectReceiptTotalCents(text);
+    res.json({ amount: cents == null ? null : cents / 100 });
+  } catch (e) {
+    console.error('receipt-amount failed', e);
+    res.json({ amount: null });
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // already gone — ignore
+    }
+  }
+});
 
 driver.post('/documents', upload.single('file'), (req, res) => {
   const { kind, loadId, category, label, amountCents } = req.body || {};
@@ -1593,6 +1630,39 @@ function detectRateCents(text) {
   let best = null;
   for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
     const c = amountToCents(m[1]);
+    if (c != null && (best == null || c > best)) best = c;
+  }
+  return best;
+}
+
+function detectReceiptTotalCents(text) {
+  // Receipt totals are smaller than rate-cons ($1–$10,000: a fuel fill,
+  // a toll, a parking fee). Keyword-anchored first, then the largest
+  // plausible amount on the page.
+  const toCents = (s) => {
+    const n = parseFloat(String(s).replace(/,/g, ''));
+    if (!Number.isFinite(n) || n < 1 || n > 10000) return null;
+    return Math.round(n * 100);
+  };
+  const patterns = [
+    /TOTAL\s+DUE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /GRAND\s+TOTAL\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+AMOUNT\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /AMOUNT\s+DUE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /BALANCE\s+DUE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+CHARGE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /\bTOTAL\b\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) {
+      const c = toCents(m[1]);
+      if (c != null) return c;
+    }
+  }
+  let best = null;
+  for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
+    const c = toCents(m[1]);
     if (c != null && (best == null || c > best)) best = c;
   }
   return best;
