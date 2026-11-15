@@ -250,6 +250,120 @@ body.rc-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
   -webkit-backdrop-filter: blur(10px);
 }
 
+/* ---------- documents ---------- */
+/* Full-page Liquid Glass over the paperwork photo (clipboard + bill of
+   lading flat-lay) — same fixed-layer pattern as Rate Cons (#docsBgLayer,
+   created by viewDocuments). The photo is bright, so the tint gradient
+   is stronger than the money page's to keep the glass readable. The
+   sidebar has no right border here either: one sheet, like Rate Cons. */
+body.docs-bg { background-color: #05070d; }
+#docsBgLayer {
+  position: fixed; inset: 0; z-index: 0;
+  background-image:
+    linear-gradient(rgba(3, 8, 20, 0.58), rgba(3, 8, 20, 0.72)),
+    url('assets/docs-bg.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+body.docs-bg .topbar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+body.docs-bg .sidebar {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015) 45%, rgba(255, 255, 255, 0.04));
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border-right: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+body.docs-bg .sidebar button { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7); }
+body.docs-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
+.docs-page { padding: 4px 0 0; }
+.docs-page .card {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01) 50%, rgba(255, 255, 255, 0.02));
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+.docs-quote {
+  color: var(--gold);
+  text-align: center;
+  font-size: 19px;
+  font-weight: 700;
+  margin: 2px 0 16px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+}
+.doc-load { margin-bottom: 16px; }
+.doc-load-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.doc-load-ref { font-size: 20px; font-weight: 800; }
+.doc-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.doc-btn {
+  padding: 8px 14px; border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff; cursor: pointer; font: inherit; font-size: 14px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.doc-btn.active { background: #1E40AF; border-color: var(--gold); }
+.doc-panel { margin-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.14); padding-top: 10px; }
+.doc-selectall { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 8px; cursor: pointer; }
+.doc-row { display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-radius: 10px; }
+.doc-row:hover { background: rgba(255, 255, 255, 0.05); }
+.doc-row-main { flex: 1; min-width: 0; }
+.doc-row-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docs-sendbar {
+  position: sticky; bottom: 12px;
+  display: flex; gap: 10px; align-items: center; justify-content: center;
+  padding: 12px; margin-top: 14px; border-radius: 14px;
+  background: rgba(8, 18, 42, 0.8);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+.docs-sendbar[hidden] { display: none; }
+.docs-modal-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(2, 6, 16, 0.66);
+  display: flex; align-items: flex-start; justify-content: center;
+  overflow-y: auto; padding: 24px 12px;
+}
+.docs-modal {
+  width: 100%; max-width: 640px; border-radius: 18px;
+  background: linear-gradient(160deg, rgba(16, 28, 56, 0.92), rgba(8, 16, 36, 0.94));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  padding: 18px; color: #fff;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+.docs-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 17px; }
+.docs-modal textarea { width: 100%; }
+.conv-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  width: 100%; text-align: left; padding: 12px; margin-top: 8px;
+  border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05); color: #fff; cursor: pointer; font: inherit;
+}
+.conv-row:hover { background: rgba(255, 255, 255, 0.1); }
+.conv-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.conv-name { font-weight: 700; }
+.conv-subject { font-weight: 600; }
+.conv-snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
+.conv-date { white-space: nowrap; }
+.thread-list { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; max-height: 320px; overflow-y: auto; }
+.thread-msg { padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); }
+.thread-msg.mine { background: rgba(30, 64, 175, 0.35); }
+.thread-text { white-space: pre-wrap; margin-top: 4px; font-size: 14px; }
+
 /* ---------- dashboard (Design 3 "Floating Glass") ---------- */
 /* The truck-at-sunset photo covers the whole viewport behind everything,
    on a real fixed layer (#dashBgLayer, created by viewDashboard) — the

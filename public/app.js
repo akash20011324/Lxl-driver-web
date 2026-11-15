@@ -147,6 +147,8 @@ async function boot() {
   removeRcBgLayer();
   document.body.classList.remove('dash-bg');
   removeDashBgLayer();
+  document.body.classList.remove('docs-bg');
+  removeDocsBgLayer();
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page"><p class="muted">Loading…</p></div>';
   // If we already have a token, try to resume the session.
@@ -318,6 +320,8 @@ async function renderAdminView(view) {
   removeRcBgLayer();
   document.body.classList.remove('dash-bg');
   removeDashBgLayer();
+  document.body.classList.remove('docs-bg');
+  removeDocsBgLayer();
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -1146,22 +1150,252 @@ async function viewLoads(main) {
 }
 
 /* ---------- Documents (fleet-wide) ---------- */
+/* ---------- Documents ---------- */
+/* Full-page paperwork background + liquid glass, same fixed-layer
+   pattern as Rate Cons (see ensureRcBgLayer). */
+function ensureDocsBgLayer() {
+  if (!document.getElementById('docsBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'docsBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeDocsBgLayer() {
+  const layer = document.getElementById('docsBgLayer');
+  if (layer) layer.remove();
+}
+
+// Click-anywhere-to-compact: registered by viewDocuments, replaced on
+// every visit. It self-guards on #docsPage existing, so it stays inert
+// on other views. Clicks on the type buttons, inside an open panel, in
+// the send bar or in the send window do not compact.
+let docsCompactHandler = null;
+function setDocsCompactHandler(fn) {
+  if (docsCompactHandler) document.removeEventListener('click', docsCompactHandler);
+  docsCompactHandler = fn;
+  if (fn) document.addEventListener('click', fn);
+}
+
 async function viewDocuments(main) {
-  const docs = await api('/api/admin/documents');
-  const list = Array.isArray(docs) ? docs : [];
-  main.innerHTML = '<h1>Documents</h1><p class="muted">BOLs and receipts from across the fleet.</p>' +
-    '<div class="card"><div class="table-wrap"><table><thead><tr>' +
-    '<th>Label</th><th>Kind</th><th>Driver</th><th>Load</th><th>Amount</th><th>Date</th><th></th>' +
-    '</tr></thead><tbody>' +
-    list.map(d => '<tr><td>' + esc(d.label || d.filename || '—') + '</td><td>' + esc(d.kind) + '</td>' +
-      '<td>' + esc(d.driverName || '—') + '</td><td>' + esc(d.loadId ? ('#' + d.loadId) : '—') + '</td>' +
-      '<td>' + fmtMoney(d.amountCents) + '</td><td>' + fmtDate(d.createdAt) + '</td>' +
-      '<td><button class="btn btn-ghost btn-sm" data-doc-view="' + d.id + '">View</button></td></tr>').join('') +
-    '</tbody></table></div>' + (list.length ? '' : '<p class="empty">No documents yet.</p>') + '</div>';
+  document.body.classList.add('docs-bg');
+  ensureDocsBgLayer();
+  const [docs, loads, outlook] = await Promise.all([
+    api('/api/admin/documents'),
+    api('/api/admin/loads').catch(() => []),
+    api('/api/admin/outlook/status').catch(() => ({ configured: false, connected: false, email: null })),
+  ]);
+  const KINDS = {
+    pickup: { kinds: ['pickup_bol'], label: 'Pickup BOLs', empty: 'No pickup BOLs yet' },
+    unitseal: { kinds: ['unit_picture', 'seal_picture'], label: 'Unit & Seal Pictures', empty: 'No unit or seal pictures yet' },
+    fuel: { kinds: ['fuel_receipt', 'receipt'], label: 'Fuel Receipts', empty: 'No fuel receipts yet' },
+    delivery: { kinds: ['delivery_bol'], label: 'Delivery BOL', empty: 'No delivery BOL yet' },
+  };
+  const TYPE_ORDER = ['pickup', 'unitseal', 'fuel', 'delivery'];
+  const docList = (Array.isArray(docs) ? docs : []).filter(d => d.loadId != null && TYPE_ORDER.some(t => KINDS[t].kinds.includes(d.kind)));
+  const loadList = (Array.isArray(loads) ? loads : []).filter(l => l && l.reference);
+  const byLoad = new Map();
+  for (const d of docList) {
+    if (!byLoad.has(d.loadId)) byLoad.set(d.loadId, []);
+    byLoad.get(d.loadId).push(d);
+  }
+  // Every load that has papers, plus active loads (their section is
+  // ready before the first upload). Newest pickup first.
+  const shown = loadList
+    .filter(l => byLoad.has(l.id) || l.status === 'active')
+    .sort((a, b) => new Date(b.pickupAt || 0) - new Date(a.pickupAt || 0));
+  const docById = new Map(docList.map(d => [d.id, d]));
+  const selected = new Set();
+  const shortPlace = (a) => (a || '').split(',').pop().replace(/\s*\d{5}(-\d{4})?\s*$/, '').trim();
+  const typeDocs = (loadId, t) => (byLoad.get(loadId) || []).filter(d => KINDS[t].kinds.includes(d.kind));
+  // First load starts with its Pickup BOLs open.
+  const openKey = shown.length ? shown[0].id + ':pickup' : null;
+
+  const docRow = (d) => {
+    const meta = [d.driverName || null, d.amountCents != null ? fmtMoney(d.amountCents) : null, fmtDate(d.createdAt)].filter(Boolean).join(' • ');
+    return '<div class="doc-row"><input type="checkbox" data-doc-check="' + d.id + '">' +
+      '<div class="doc-row-main"><div class="doc-row-title">' + esc(d.label || d.filename || '—') + '</div>' +
+      '<div class="muted small">' + esc(meta) + '</div></div>' +
+      '<button class="btn btn-ghost btn-sm" data-doc-view="' + d.id + '">View</button></div>';
+  };
+  const panelHtml = (load, t) => {
+    const items = typeDocs(load.id, t);
+    const key = load.id + ':' + t;
+    return '<div class="doc-panel" data-doc-panel="' + key + '"' + (key === openKey ? '' : ' hidden') + '>' +
+      (items.length
+        ? '<label class="doc-selectall"><input type="checkbox" data-doc-all="' + key + '"> Select all</label>' + items.map(docRow).join('')
+        : '<p class="empty">' + KINDS[t].empty + '</p>') + '</div>';
+  };
+  const sectionHtml = (load) => {
+    const badge = load.bolStatus
+      ? '<span class="pill ' + (String(load.bolStatus).toLowerCase() === 'clean' ? 'green' : 'red') + '">BOL: ' + esc(String(load.bolStatus).toUpperCase()) + '</span>'
+      : '';
+    const equip = [load.truckUnit ? 'Truck ' + load.truckUnit : null, load.trailerUnit ? 'Trailer ' + load.trailerUnit : null].filter(Boolean).join(' / ');
+    return '<div class="card doc-load"><div class="doc-load-head"><div>' +
+      '<div class="doc-load-ref">' + esc(load.reference) + '</div>' +
+      '<div class="muted">' + esc(shortPlace(load.pickupLocation)) + ' → ' + esc(shortPlace(load.deliveryLocation)) +
+      (load.driverName ? ' · ' + esc(load.driverName) : '') + (equip ? ' · ' + esc(equip) : '') + '</div>' +
+      '<div class="muted small">Pickup ' + fmtDate(load.pickupAt) + ' → Delivery ' + fmtDate(load.deliveryAt) + '</div>' +
+      '</div>' + badge + '</div>' +
+      '<div class="doc-btns">' + TYPE_ORDER.map(t =>
+        '<button class="doc-btn' + (load.id + ':' + t === openKey ? ' active' : '') + '" data-doc-btn="' + load.id + ':' + t + '">' +
+        KINDS[t].label + ' (' + typeDocs(load.id, t).length + ')</button>').join('') + '</div>' +
+      TYPE_ORDER.map(t => panelHtml(load, t)).join('') + '</div>';
+  };
+
+  main.innerHTML = '<div class="docs-page" id="docsPage">' +
+    '<div class="rc-head"><h1>Documents</h1></div>' +
+    '<p class="docs-quote">“Every mile counts. Every paper proves it.”</p>' +
+    (shown.length ? shown.map(sectionHtml).join('') : '<div class="card"><p class="empty">No documents yet.</p></div>') +
+    '<div class="docs-sendbar" id="docsSendBar" hidden><span id="docsSendCount"></span>' +
+    '<button class="btn" id="docsSendOpen">Send to broker</button>' +
+    '<button class="btn btn-ghost" id="docsSendClear">Clear</button></div></div>';
+
+  const updateSendBar = () => {
+    const bar = document.getElementById('docsSendBar');
+    if (!bar) return;
+    bar.hidden = selected.size === 0;
+    const count = document.getElementById('docsSendCount');
+    if (count) count.textContent = selected.size + ' file' + (selected.size === 1 ? '' : 's') + ' selected';
+  };
+
+  main.querySelectorAll('[data-doc-btn]').forEach(b => b.addEventListener('click', () => {
+    const key = b.dataset.docBtn;
+    const loadId = key.split(':')[0];
+    const panel = main.querySelector('[data-doc-panel="' + key + '"]');
+    const willOpen = panel.hidden;
+    main.querySelectorAll('[data-doc-panel]').forEach(p => { if (p.dataset.docPanel.split(':')[0] === loadId) p.hidden = true; });
+    main.querySelectorAll('[data-doc-btn]').forEach(x => { if (x.dataset.docBtn.split(':')[0] === loadId) x.classList.remove('active'); });
+    if (willOpen) { panel.hidden = false; b.classList.add('active'); }
+  }));
+  main.querySelectorAll('[data-doc-check]').forEach(c => c.addEventListener('change', () => {
+    const id = Number(c.dataset.docCheck);
+    if (c.checked) selected.add(id); else selected.delete(id);
+    updateSendBar();
+  }));
+  main.querySelectorAll('[data-doc-all]').forEach(c => c.addEventListener('change', () => {
+    const panel = c.closest('.doc-panel');
+    panel.querySelectorAll('[data-doc-check]').forEach(x => {
+      x.checked = c.checked;
+      const id = Number(x.dataset.docCheck);
+      if (c.checked) selected.add(id); else selected.delete(id);
+    });
+    updateSendBar();
+  }));
   main.querySelectorAll('[data-doc-view]').forEach(b => b.addEventListener('click', () => {
-    const d = list.find(x => String(x.id) === b.dataset.docView);
+    const d = docById.get(Number(b.dataset.docView));
     if (d) downloadFile(d.url, d.filename, true, d.mimeType);
   }));
+
+  setDocsCompactHandler((e) => {
+    const page = document.getElementById('docsPage');
+    if (!page) return;
+    if (document.getElementById('docsModal')) return;
+    if (e.target.closest('[data-doc-btn]') || e.target.closest('.doc-panel') || e.target.closest('#docsSendBar')) return;
+    page.querySelectorAll('[data-doc-panel]').forEach(p => { p.hidden = true; });
+    page.querySelectorAll('[data-doc-btn]').forEach(x => x.classList.remove('active'));
+  });
+
+  /* ----- Send to broker ----- */
+  const closeSendModal = () => { const m = document.getElementById('docsModal'); if (m) m.remove(); };
+  const connectOutlook = async () => {
+    try {
+      const res = await api('/api/admin/outlook/auth-url');
+      window.open(res.url, '_blank');
+      toast('Sign in to Microsoft in the new tab, then come back here.', 'ok');
+    } catch (err) { showError(err); }
+  };
+  const loadConversations = async () => {
+    const body = document.getElementById('docsModalBody');
+    if (!body) return;
+    if (!outlook.configured) { body.innerHTML = '<p class="muted">Outlook email is not set up on the server yet.</p>'; return; }
+    if (!outlook.connected) {
+      body.innerHTML = '<p class="muted">Connect your Outlook mailbox — then pick the broker conversation and send the files in that thread.</p>' +
+        '<div class="form-actions"><button class="btn btn-sm" id="docsOutlookConnect">Connect Outlook</button></div>';
+      document.getElementById('docsOutlookConnect').addEventListener('click', connectOutlook);
+      return;
+    }
+    body.innerHTML = '<p class="muted">Loading your inbox…</p>';
+    try {
+      const convs = await api('/api/admin/outlook/conversations');
+      const list = Array.isArray(convs) ? convs : [];
+      body.innerHTML = '<p class="small muted">Connected as <strong>' + esc(outlook.email || '') + '</strong> — tap the conversation to send to.</p>' +
+        (list.length
+          ? list.map(c => '<button class="conv-row" data-conv="' + esc(c.conversationId) + '"><span class="conv-main">' +
+            '<span class="conv-name">' + esc(c.fromName || c.fromEmail || '') + '</span>' +
+            '<span class="conv-subject">' + esc(c.subject || '') + '</span>' +
+            '<span class="conv-snippet muted small">' + esc(c.snippet || '') + '</span></span>' +
+            '<span class="conv-date muted small">' + fmtDate(c.lastAt) + '</span></button>').join('')
+          : '<p class="empty">No conversations in your inbox yet.</p>');
+      body.querySelectorAll('[data-conv]').forEach(b => b.addEventListener('click', () => loadThread(b.dataset.conv)));
+    } catch (err) {
+      body.innerHTML = '<p class="muted">' + esc(err.message || 'Could not load conversations.') + '</p>';
+    }
+  };
+  const loadThread = async (conversationId) => {
+    const body = document.getElementById('docsModalBody');
+    if (!body) return;
+    body.innerHTML = '<p class="muted">Loading…</p>';
+    try {
+      const t = await api('/api/admin/outlook/thread?conversationId=' + encodeURIComponent(conversationId));
+      const files = [...selected].map(id => docById.get(id)).filter(Boolean);
+      body.innerHTML = '<button class="btn btn-ghost btn-sm" id="docsThreadBack">← All conversations</button>' +
+        '<p class="small" style="margin-top:10px">To: <strong>' + esc(t.toName || '') + '</strong> &lt;' + esc(t.toEmail || '') + '&gt;<br>' +
+        '<span class="muted">' + esc(t.subject || '') + '</span></p>' +
+        '<div class="thread-list">' + (t.messages || []).map(m =>
+          '<div class="thread-msg' + (m.mine ? ' mine' : '') + '"><div><strong>' + esc(m.fromName || '') + '</strong> ' +
+          '<span class="muted small">' + fmtDate(m.at) + '</span></div>' +
+          '<div class="thread-text">' + esc(m.text || '') + '</div></div>').join('') + '</div>' +
+        '<div class="field"><label>Message</label><textarea id="docsSendText" rows="3" placeholder="Add a note for the broker…"></textarea></div>' +
+        '<p class="small"><strong>Files attached (' + files.length + '):</strong><br>' + files.map(f => esc(f.filename || f.label || '')).join('<br>') + '</p>' +
+        '<div class="form-actions"><button class="btn" id="docsSendNow">Send</button></div>' +
+        '<p id="docsSendResult" class="small mt"></p>';
+      document.getElementById('docsThreadBack').addEventListener('click', loadConversations);
+      document.getElementById('docsSendNow').addEventListener('click', async () => {
+        const btn = document.getElementById('docsSendNow');
+        btn.disabled = true;
+        btn.textContent = 'Sending…';
+        try {
+          await api('/api/admin/outlook/send-documents', {
+            method: 'POST',
+            body: JSON.stringify({ conversationId, body: document.getElementById('docsSendText').value, documentIds: [...selected] }),
+          });
+          toast('Sent to ' + (t.toName || 'the broker') + ' with ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '.', 'ok');
+          selected.clear();
+          main.querySelectorAll('[data-doc-check]').forEach(x => { x.checked = false; });
+          updateSendBar();
+          closeSendModal();
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = 'Send';
+          const res = document.getElementById('docsSendResult');
+          if (res) res.innerHTML = '<span style="color:#f87171">' + esc(err.message || 'Send failed.') + '</span>' +
+            (/reconnect/i.test(err.message || '') ? ' <button class="btn btn-sm" id="docsReconnect">Reconnect Outlook</button>' : '');
+          const rc = document.getElementById('docsReconnect');
+          if (rc) rc.addEventListener('click', connectOutlook);
+        }
+      });
+    } catch (err) {
+      body.innerHTML = '<p class="muted">' + esc(err.message || 'Could not load the conversation.') + '</p>';
+    }
+  };
+  const openSendModal = () => {
+    closeSendModal();
+    const modal = document.createElement('div');
+    modal.id = 'docsModal';
+    modal.className = 'docs-modal-backdrop';
+    modal.innerHTML = '<div class="docs-modal"><div class="docs-modal-head"><strong>Send to broker</strong>' +
+      '<button class="btn btn-ghost btn-sm" id="docsModalClose">✕</button></div><div id="docsModalBody"><p class="muted">Loading…</p></div></div>';
+    document.body.appendChild(modal);
+    document.getElementById('docsModalClose').addEventListener('click', closeSendModal);
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeSendModal(); });
+    loadConversations();
+  };
+  document.getElementById('docsSendOpen').addEventListener('click', openSendModal);
+  document.getElementById('docsSendClear').addEventListener('click', () => {
+    selected.clear();
+    main.querySelectorAll('[data-doc-check]').forEach(x => { x.checked = false; });
+    updateSendBar();
+  });
 }
 
 /* ---------- Requests ---------- */

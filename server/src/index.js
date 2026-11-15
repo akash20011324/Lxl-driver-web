@@ -77,6 +77,21 @@ function getDriverName(driverId) {
   return row ? row.name : null;
 }
 
+// Unit number for a truck/trailer: by the load's own assignment when it
+// has one, else by the driver's current assignment (table is an internal
+// constant — 'trucks' or 'trailers' — never user input).
+function unitNumberOf(table, id, driverId) {
+  if (id) {
+    const r = db.prepare(`SELECT unitNumber FROM ${table} WHERE id = ?`).get(id);
+    if (r) return r.unitNumber;
+  }
+  if (driverId) {
+    const r = db.prepare(`SELECT unitNumber FROM ${table} WHERE driverId = ?`).get(driverId);
+    if (r) return r.unitNumber;
+  }
+  return null;
+}
+
 function serializeTruck(t) {
   if (!t) return null;
   return {
@@ -131,6 +146,8 @@ function serializeLoad(l) {
     status: l.status,
     bolStatus: l.bolStatus ?? null,
     completedAt: l.completedAt ?? null,
+    truckUnit: unitNumberOf('trucks', l.truckId, l.driverId),
+    trailerUnit: unitNumberOf('trailers', l.trailerId, l.driverId),
   };
 }
 
@@ -1490,7 +1507,15 @@ const OUTLOOK_CLIENT_SECRET = process.env.OUTLOOK_CLIENT_SECRET || '';
 const OUTLOOK_REDIRECT_URI =
   process.env.OUTLOOK_REDIRECT_URI || 'https://app.lubanaxpress.com/api/outlook/callback';
 const OUTLOOK_TENANT = process.env.OUTLOOK_TENANT || 'common';
-const OUTLOOK_SCOPES = 'Mail.Read offline_access User.Read'; // User.Read is needed for the /me call that reads the connected mailbox address
+// Scopes asked at connect time (auth URL + code exchange). Mail.Send was
+// added for the Documents page's Send to broker: existing connections
+// were granted the read scopes only, so they must reconnect once before
+// sending works (the send endpoint reports that as a 401).
+const OUTLOOK_SCOPES = 'Mail.Read Mail.Send offline_access User.Read';
+// Refresh scope for read flows — a subset every connection already has,
+// so refreshing a read token can never fail on the newer Mail.Send scope.
+// User.Read is needed for the /me call that reads the connected mailbox address.
+const OUTLOOK_READ_SCOPES = 'Mail.Read offline_access User.Read';
 const OUTLOOK_STATE_TTL_MS = 30 * 60 * 1000; // Outlook sign-in states live in SQLite so a restart cannot wipe them
 
 function outlookConfigured() {
@@ -1538,7 +1563,7 @@ async function outlookAccessToken(user) {
       client_secret: OUTLOOK_CLIENT_SECRET,
       grant_type: 'refresh_token',
       refresh_token: user.outlookRefreshToken,
-      scope: OUTLOOK_SCOPES,
+      scope: OUTLOOK_READ_SCOPES,
     });
     // Graph rotates refresh tokens — keep the newest one.
     if (data.refresh_token && data.refresh_token !== user.outlookRefreshToken) {
@@ -1567,6 +1592,73 @@ async function outlookGraph(accessToken, path) {
     throw e;
   }
   return data;
+}
+
+// Graph request with a method + JSON body (reply / send flows).
+async function outlookGraphReq(accessToken, method, path, body) {
+  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 204) return {};
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error((data.error && data.error.message) || 'Outlook request failed');
+    e.status = res.status;
+    throw e;
+  }
+  return data;
+}
+
+// Access token that may SEND mail (Documents → Send to broker). The
+// stored refresh token only carries Mail.Send after the admin has
+// reconnected once since that scope was added; before that Microsoft
+// rejects the refresh and we surface a reconnect prompt (401).
+async function outlookSendAccessToken(user) {
+  if (!user.outlookRefreshToken) {
+    const e = new Error('Outlook is not connected for this account — connect it first.');
+    e.status = 401;
+    throw e;
+  }
+  try {
+    const data = await outlookTokenRequest({
+      client_id: OUTLOOK_CLIENT_ID,
+      client_secret: OUTLOOK_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token: user.outlookRefreshToken,
+      scope: 'Mail.Send offline_access',
+    });
+    if (data.refresh_token && data.refresh_token !== user.outlookRefreshToken) {
+      db.prepare('UPDATE users SET outlookRefreshToken = ? WHERE id = ?').run(data.refresh_token, user.id);
+    }
+    return data.access_token;
+  } catch (e) {
+    const gone = new Error('Sending needs one extra Outlook permission — reconnect Outlook once, then send again.');
+    gone.status = 401;
+    gone.code = 'needs_reconnect';
+    throw gone;
+  }
+}
+
+// Plain text from a Graph message body (thread display).
+function graphBodyText(m) {
+  const b = m.body;
+  if (!b || !b.content) return m.bodyPreview || '';
+  if (b.contentType === 'text') return b.content;
+  return b.content
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n\n')
+    .trim();
 }
 
 // Two-letter state code from a load address like "904 Edwards Dr, Lebanon IN 46052".
@@ -1937,6 +2029,145 @@ admin.get('/outlook/messages/:id/attachments', async (req, res) => {
     if (e.status) return err(res, e.status, e.message);
     console.error('outlook attachments failed', e);
     return err(res, 500, 'Could not list attachments');
+  }
+});
+
+// --- Documents → Send to broker -------------------------------------------
+// The Documents page picks a conversation from the admin's own Outlook
+// inbox, shows the thread in order, and replies in that same thread with
+// the selected BOL / receipt files attached.
+
+function conversationContact(messages, ownEmail) {
+  // The broker side of a thread: the newest sender who is not the
+  // mailbox owner. Falls back to the newest message's sender.
+  const own = (ownEmail || '').toLowerCase();
+  const sorted = [...messages].sort((a, b) => new Date(b.receivedDateTime || 0) - new Date(a.receivedDateTime || 0));
+  for (const m of sorted) {
+    const ea = m.from && m.from.emailAddress;
+    if (ea && ea.address && ea.address.toLowerCase() !== own) {
+      return { name: ea.name || ea.address, email: ea.address };
+    }
+  }
+  const first = sorted[0] && sorted[0].from && sorted[0].from.emailAddress;
+  return first ? { name: first.name || first.address || '', email: first.address || '' } : { name: '', email: '' };
+}
+
+admin.get('/outlook/conversations', async (req, res) => {
+  try {
+    const user = getUserById(req.user.id);
+    const accessToken = await outlookAccessToken(user);
+    const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    const data = await outlookGraph(
+      accessToken,
+      `/me/mailFolders/inbox/messages?${q({ $top: '60', $orderby: 'receivedDateTime desc', $select: 'id,conversationId,subject,from,receivedDateTime,bodyPreview' })}`,
+    );
+    const byConv = new Map();
+    for (const m of data.value || []) {
+      if (!m.conversationId) continue;
+      if (!byConv.has(m.conversationId)) byConv.set(m.conversationId, []);
+      byConv.get(m.conversationId).push(m);
+    }
+    const list = [...byConv.entries()].map(([conversationId, msgs]) => {
+      const latest = msgs[0]; // the inbox query is newest-first
+      const contact = conversationContact(msgs, user.outlookEmail);
+      return {
+        conversationId,
+        subject: latest.subject ?? '(no subject)',
+        fromName: contact.name,
+        fromEmail: contact.email,
+        lastAt: latest.receivedDateTime,
+        snippet: latest.bodyPreview || '',
+      };
+    });
+    list.sort((a, b) => new Date(b.lastAt || 0) - new Date(a.lastAt || 0));
+    res.json(list.slice(0, 25));
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('outlook conversations failed', e);
+    return err(res, 500, 'Could not list Outlook conversations');
+  }
+});
+
+admin.get('/outlook/thread', async (req, res) => {
+  try {
+    const user = getUserById(req.user.id);
+    const accessToken = await outlookAccessToken(user);
+    const conversationId = String(req.query.conversationId || '');
+    if (!conversationId) return err(res, 400, 'conversationId is required');
+    const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    const data = await outlookGraph(
+      accessToken,
+      `/me/messages?${q({ $filter: `conversationId eq '${conversationId.replace(/'/g, "''")}'`, $top: '50', $select: 'id,subject,from,receivedDateTime,body,bodyPreview' })}`,
+    );
+    const msgs = [...(data.value || [])].sort((a, b) => new Date(a.receivedDateTime || 0) - new Date(b.receivedDateTime || 0));
+    const contact = conversationContact(msgs, user.outlookEmail);
+    const own = (user.outlookEmail || '').toLowerCase();
+    res.json({
+      conversationId,
+      subject: (msgs[0] && msgs[0].subject) || '(no subject)',
+      toName: contact.name,
+      toEmail: contact.email,
+      messages: msgs.map((m) => ({
+        id: m.id,
+        fromName: (m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || '',
+        fromEmail: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
+        mine: ((m.from && m.from.emailAddress && m.from.emailAddress.address) || '').toLowerCase() === own,
+        at: m.receivedDateTime,
+        text: graphBodyText(m),
+      })),
+    });
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('outlook thread failed', e);
+    return err(res, 500, 'Could not load the conversation');
+  }
+});
+
+admin.post('/outlook/send-documents', async (req, res) => {
+  try {
+    const user = getUserById(req.user.id);
+    const { conversationId, body } = req.body || {};
+    const documentIds = Array.isArray(req.body?.documentIds) ? req.body.documentIds : [];
+    if (!conversationId) return err(res, 400, 'Pick a conversation first');
+    if (!documentIds.length) return err(res, 400, 'Select at least one file to send');
+    const docs = documentIds.map((id) => {
+      const d = db
+        .prepare('SELECT d.*, f.originalFilename, f.mimeType, f.storedFilename FROM documents d JOIN files f ON f.id = d.fileId WHERE d.id = ?')
+        .get(id);
+      if (!d) throw Object.assign(new Error('One of the selected files no longer exists'), { status: 400 });
+      return d;
+    });
+    for (const d of docs) {
+      const p = path.join(UPLOADS_DIR, d.storedFilename);
+      if (!fs.existsSync(p)) return err(res, 400, `File ${d.originalFilename} is missing on the server`);
+      if (fs.statSync(p).size > 3 * 1024 * 1024) return err(res, 400, `${d.originalFilename} is over 3 MB — too large to attach here`);
+    }
+    const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    const readToken = await outlookAccessToken(user);
+    const latest = await outlookGraph(
+      readToken,
+      `/me/messages?${q({ $filter: `conversationId eq '${String(conversationId).replace(/'/g, "''")}'`, $orderby: 'receivedDateTime desc', $top: '1', $select: 'id' })}`,
+    );
+    const lastMsg = (latest.value || [])[0];
+    if (!lastMsg) return err(res, 404, 'That conversation could not be found');
+    const sendToken = await outlookSendAccessToken(user);
+    const note = String(body || '').trim();
+    await outlookGraphReq(sendToken, 'POST', `/me/messages/${encodeURIComponent(lastMsg.id)}/reply`, {
+      comment: note || 'Please see the attached documents.',
+      message: {
+        attachments: docs.map((d) => ({
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          name: d.originalFilename,
+          contentType: d.mimeType || 'application/octet-stream',
+          contentBytes: fs.readFileSync(path.join(UPLOADS_DIR, d.storedFilename)).toString('base64'),
+        })),
+      },
+    });
+    res.json({ ok: true, sent: docs.length });
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('outlook send-documents failed', e);
+    return err(res, 500, 'Could not send the email');
   }
 });
 
