@@ -1256,14 +1256,48 @@ async function viewLocations(main) {
     return dirs[Math.round(h / 45) % 8] + ' (' + Math.round(h) + '°)';
   };
   const speedText = (l) => (typeof l.speedMph === 'number' ? Math.round(l.speedMph) + ' mph' : '—');
+  // Clicking a driver row selects that driver on the map: the map centers
+  // on his pin and his popup opens. The selection survives the 10s
+  // refresh (the popup is re-opened on the rebuilt marker).
+  let selectedDriverId = null;
+  let lastLocs = [];
+  const byDriver = {}; // driverId -> { loc, marker }
+  const openDriverPopup = (l, marker) => {
+    if (state.locInfo) state.locInfo.close();
+    state.locInfo = new google.maps.InfoWindow({
+      content: '<div style="color:#111827;font-size:14px;line-height:1.55;min-width:200px"><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="loc-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)) + '</div>',
+    });
+    state.locInfo.open(state.locMap, marker);
+    getCityState(l.lat, l.lng).then(place => {
+      const cel = document.getElementById('loc-iw-city-' + l.driverId);
+      if (cel) cel.textContent = place || '—';
+    });
+  };
+  const selectDriver = (driverId) => {
+    selectedDriverId = driverId;
+    renderList(lastLocs);
+    const hit = byDriver[driverId];
+    if (hit && state.locMap) {
+      state.locMap.setCenter({ lat: Number(hit.loc.lat), lng: Number(hit.loc.lng) });
+      state.locMap.setZoom(15);
+      openDriverPopup(hit.loc, hit.marker);
+    }
+  };
   const renderList = (locs) => {
     const el = document.getElementById('locList');
     if (!el) return;
     el.innerHTML = locs.length
       ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Driver</th><th>Speed</th><th>Latitude</th><th>Longitude</th><th>City / State</th><th>Last update</th></tr></thead><tbody>' +
-        locs.map(l => '<tr><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + speedText(l) + '</td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td><span class="city-slot" data-city-lat="' + esc(l.lat) + '" data-city-lng="' + esc(l.lng) + '">Locating…</span></td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
+        locs.map(l => '<tr class="loc-row' + (selectedDriverId !== null && l.driverId === selectedDriverId ? ' selected' : '') + '" data-driver-id="' + l.driverId + '"><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + speedText(l) + '</td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td><span class="city-slot" data-city-lat="' + esc(l.lat) + '" data-city-lng="' + esc(l.lng) + '">Locating…</span></td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
         '</tbody></table></div>'
       : '<p class="empty">No driver locations yet — a location appears once a driver signs in and shares theirs.</p>';
+    if (!el.dataset.bound) {
+      el.dataset.bound = '1';
+      el.addEventListener('click', (e) => {
+        const row = e.target.closest('tr.loc-row');
+        if (row) selectDriver(Number(row.dataset.driverId));
+      });
+    }
     fillCitySlots();
   };
   const loadLocs = async () => {
@@ -1271,6 +1305,7 @@ async function viewLocations(main) {
     try {
       const locs = await api('/api/admin/locations');
       const list = Array.isArray(locs) ? locs : [];
+      lastLocs = list;
       renderList(list);
       const mapEl = document.getElementById('map');
       if (mapEl && !state.locMap) {
@@ -1284,6 +1319,7 @@ async function viewLocations(main) {
       if (state.locMap && window.google && google.maps) {
         (state.locMapMarkers || []).forEach(m => m.setMap(null));
         state.locMapMarkers = [];
+        for (const k of Object.keys(byDriver)) delete byDriver[k];
         const bounds = new google.maps.LatLngBounds();
         list.forEach(l => {
           if (l.lat === undefined || l.lng === undefined) return;
@@ -1292,21 +1328,16 @@ async function viewLocations(main) {
             position: pos, map: state.locMap, title: l.driverName || ('Driver ' + l.driverId),
             icon: driverPinIcon(l.driverName || '', l.driverId),
           });
-          marker.addListener('click', () => {
-            if (state.locInfo) state.locInfo.close();
-            state.locInfo = new google.maps.InfoWindow({
-              content: '<div style="color:#111827;font-size:14px;line-height:1.55;min-width:200px"><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="loc-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)) + '</div>',
-            });
-            state.locInfo.open(state.locMap, marker);
-            getCityState(l.lat, l.lng).then(place => {
-              const cel = document.getElementById('loc-iw-city-' + l.driverId);
-              if (cel) cel.textContent = place || '—';
-            });
-          });
+          marker.addListener('click', () => { selectedDriverId = l.driverId; renderList(lastLocs); openDriverPopup(l, marker); });
           state.locMapMarkers.push(marker);
+          byDriver[l.driverId] = { loc: l, marker };
           bounds.extend(pos);
         });
-        if (state.locMapMarkers.length === 1) { state.locMap.setCenter(state.locMapMarkers[0].getPosition()); state.locMap.setZoom(12); }
+        if (selectedDriverId !== null && byDriver[selectedDriverId]) {
+          // Keep the selected driver's popup open across refreshes, but
+          // don't re-center — the user may have panned the map.
+          openDriverPopup(byDriver[selectedDriverId].loc, byDriver[selectedDriverId].marker);
+        } else if (state.locMapMarkers.length === 1) { state.locMap.setCenter(state.locMapMarkers[0].getPosition()); state.locMap.setZoom(12); }
         else if (state.locMapMarkers.length > 1) { state.locMap.fitBounds(bounds); }
       }
     } catch (e) { showError(e); }
