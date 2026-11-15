@@ -1311,13 +1311,18 @@ async function viewDocuments(main) {
     const badge = load.bolStatus
       ? '<span class="pill ' + (String(load.bolStatus).toLowerCase() === 'clean' ? 'green' : 'red') + '">BOL: ' + esc(String(load.bolStatus).toUpperCase()) + '</span>'
       : '';
+    const statusPill = load.status === 'active'
+      ? '<span class="doc-status"><span class="dot"></span>Active load</span>'
+      : load.status === 'completed'
+        ? '<span class="doc-status done"><span class="dot"></span>Completed</span>'
+        : (load.status ? '<span class="doc-status done"><span class="dot"></span>' + esc(String(load.status)) + '</span>' : '');
     const equip = [load.truckUnit ? 'Truck ' + load.truckUnit : null, load.trailerUnit ? 'Trailer ' + load.trailerUnit : null].filter(Boolean).join(' / ');
     return '<div class="card doc-load"><div class="doc-load-head"><div>' +
       '<div class="doc-load-ref">' + esc(load.reference) + '</div>' +
       '<div class="muted">' + esc(shortPlace(load.pickupLocation)) + ' → ' + esc(shortPlace(load.deliveryLocation)) +
       (load.driverName ? ' · ' + esc(load.driverName) : '') + (equip ? ' · ' + esc(equip) : '') + '</div>' +
       '<div class="muted small">Pickup ' + fmtDate(load.pickupAt) + ' → Delivery ' + fmtDate(load.deliveryAt) + '</div>' +
-      '</div>' + badge + '</div>' +
+      '</div><div class="doc-load-side">' + statusPill + badge + '</div></div>' +
       '<div class="doc-btns">' + TYPE_ORDER.map(t =>
         '<button class="doc-btn' + (load.id + ':' + t === openKey ? ' active' : '') + '" data-doc-btn="' + load.id + ':' + t + '">' +
         KINDS[t].label + ' (' + typeDocs(load.id, t).length + ')</button>').join('') + '</div>' +

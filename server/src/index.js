@@ -1527,11 +1527,13 @@ const OUTLOOK_CLIENT_SECRET = process.env.OUTLOOK_CLIENT_SECRET || '';
 const OUTLOOK_REDIRECT_URI =
   process.env.OUTLOOK_REDIRECT_URI || 'https://app.lubanaxpress.com/api/outlook/callback';
 const OUTLOOK_TENANT = process.env.OUTLOOK_TENANT || 'common';
-// Scopes asked at connect time (auth URL + code exchange). Mail.Send was
-// added for the Documents page's Send to broker: existing connections
-// were granted the read scopes only, so they must reconnect once before
-// sending works (the send endpoint reports that as a 401).
-const OUTLOOK_SCOPES = 'Mail.Read Mail.Send offline_access User.Read';
+// Scopes asked at connect time (auth URL + code exchange). Mail.Send +
+// Mail.ReadWrite were added for the Documents page's Send to broker
+// (sending, plus drafts for large-file upload sessions): existing
+// connections were granted the read scopes only, so they must
+// reconnect once before sending works (the send endpoint reports
+// that as a 401).
+const OUTLOOK_SCOPES = 'Mail.Read Mail.Send Mail.ReadWrite offline_access User.Read';
 // Refresh scope for read flows — a subset every connection already has,
 // so refreshing a read token can never fail on the newer Mail.Send scope.
 // User.Read is needed for the /me call that reads the connected mailbox address.
@@ -1634,6 +1636,58 @@ async function outlookGraphReq(accessToken, method, path, body) {
   return data;
 }
 
+// Attach one stored file to a draft message. Files up to 3 MB go in a
+// single request; larger files use an attachment upload session and
+// are PUT to Microsoft in chunks (the session URL is pre-authorized —
+// no Authorization header may be sent with the chunks).
+const GRAPH_SIMPLE_ATTACH_LIMIT = 3 * 1024 * 1024;
+const GRAPH_CHUNK = 5 * 1024 * 1024; // a multiple of 320 KiB, as Graph requires
+
+async function attachFileToDraft(accessToken, draftId, doc) {
+  const filePath = path.join(UPLOADS_DIR, doc.storedFilename);
+  const size = fs.statSync(filePath).size;
+  if (size <= GRAPH_SIMPLE_ATTACH_LIMIT) {
+    await outlookGraphReq(accessToken, 'POST', `/me/messages/${encodeURIComponent(draftId)}/attachments`, {
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: doc.originalFilename,
+      contentType: doc.mimeType || 'application/octet-stream',
+      contentBytes: fs.readFileSync(filePath).toString('base64'),
+    });
+    return;
+  }
+  const session = await outlookGraphReq(accessToken, 'POST', `/me/messages/${encodeURIComponent(draftId)}/attachments/createUploadSession`, {
+    AttachmentItem: {
+      attachmentType: 'file',
+      name: doc.originalFilename,
+      size,
+      contentType: doc.mimeType || 'application/octet-stream',
+    },
+  });
+  const uploadUrl = session.uploadUrl;
+  if (!uploadUrl) throw new Error('Microsoft did not start the large-file upload');
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    let offset = 0;
+    while (offset < size) {
+      const len = Math.min(GRAPH_CHUNK, size - offset);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, offset);
+      const up = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Range': `bytes ${offset}-${offset + len - 1}/${size}`,
+        },
+        body: buf,
+      });
+      if (!up.ok) throw new Error(`Large-file upload failed at byte ${offset}`);
+      offset += len;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 // Access token that may SEND mail (Documents → Send to broker). The
 // stored refresh token only carries Mail.Send after the admin has
 // reconnected once since that scope was added; before that Microsoft
@@ -1650,7 +1704,7 @@ async function outlookSendAccessToken(user) {
       client_secret: OUTLOOK_CLIENT_SECRET,
       grant_type: 'refresh_token',
       refresh_token: user.outlookRefreshToken,
-      scope: 'Mail.Send offline_access',
+      scope: 'Mail.Send Mail.ReadWrite offline_access',
     });
     if (data.refresh_token && data.refresh_token !== user.outlookRefreshToken) {
       db.prepare('UPDATE users SET outlookRefreshToken = ? WHERE id = ?').run(data.refresh_token, user.id);
@@ -2144,6 +2198,8 @@ admin.get('/outlook/thread', async (req, res) => {
 });
 
 admin.post('/outlook/send-documents', async (req, res) => {
+  let draftId = null;
+  let sendToken = null;
   try {
     const user = getUserById(req.user.id);
     const { conversationId, body } = req.body || {};
@@ -2158,9 +2214,7 @@ admin.post('/outlook/send-documents', async (req, res) => {
       return d;
     });
     for (const d of docs) {
-      const p = path.join(UPLOADS_DIR, d.storedFilename);
-      if (!fs.existsSync(p)) return err(res, 400, `File ${d.originalFilename} is missing on the server`);
-      if (fs.statSync(p).size > 3 * 1024 * 1024) return err(res, 400, `${d.originalFilename} is over 3 MB — too large to attach here`);
+      if (!fs.existsSync(path.join(UPLOADS_DIR, d.storedFilename))) return err(res, 400, `File ${d.originalFilename} is missing on the server`);
     }
     const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
     const readToken = await outlookAccessToken(user);
@@ -2170,21 +2224,31 @@ admin.post('/outlook/send-documents', async (req, res) => {
     );
     const lastMsg = (latest.value || [])[0];
     if (!lastMsg) return err(res, 404, 'That conversation could not be found');
-    const sendToken = await outlookSendAccessToken(user);
-    const note = String(body || '').trim();
-    await outlookGraphReq(sendToken, 'POST', `/me/messages/${encodeURIComponent(lastMsg.id)}/reply`, {
-      comment: note || 'Please see the attached documents.',
-      message: {
-        attachments: docs.map((d) => ({
-          '@odata.type': '#microsoft.graph.fileAttachment',
-          name: d.originalFilename,
-          contentType: d.mimeType || 'application/octet-stream',
-          contentBytes: fs.readFileSync(path.join(UPLOADS_DIR, d.storedFilename)).toString('base64'),
-        })),
-      },
+    sendToken = await outlookSendAccessToken(user);
+    // Build the reply as a draft first: files over 3 MB can only be
+    // attached through upload sessions, which exist on drafts. Then
+    // send the draft — it lands in the same conversation.
+    const draft = await outlookGraphReq(sendToken, 'POST', `/me/messages/${encodeURIComponent(lastMsg.id)}/createReply`, {});
+    draftId = draft.id;
+    const note = String(body || '').trim() || 'Please see the attached documents.';
+    const cur = await outlookGraph(sendToken, `/me/messages/${encodeURIComponent(draftId)}?$select=body`);
+    const escHtml = note.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+    const existing = (cur.body && cur.body.content) || '';
+    await outlookGraphReq(sendToken, 'PATCH', `/me/messages/${encodeURIComponent(draftId)}`, {
+      body: { contentType: 'html', content: `<p>${escHtml}</p><br>${existing}` },
     });
+    for (const d of docs) {
+      await attachFileToDraft(sendToken, draftId, d);
+    }
+    await outlookGraphReq(sendToken, 'POST', `/me/messages/${encodeURIComponent(draftId)}/send`);
+    draftId = null;
     res.json({ ok: true, sent: docs.length });
   } catch (e) {
+    if (draftId && sendToken) {
+      try {
+        await outlookGraphReq(sendToken, 'DELETE', `/me/messages/${encodeURIComponent(draftId)}`);
+      } catch { /* best effort */ }
+    }
     if (e.status) return err(res, e.status, e.message);
     console.error('outlook send-documents failed', e);
     return err(res, 500, 'Could not send the email');
