@@ -413,7 +413,7 @@ async function viewDashboard(main) {
       const truckNo = d.truck ? (d.truck.unitNumber || '') : (d.truckUnitNumber || '');
       const trailerNo = d.trailer ? (d.trailer.unitNumber || '') : (d.trailerUnitNumber || '');
       const citySlot = l ? '<div class="small city-slot" data-city-lat="' + esc(l.lat) + '" data-city-lng="' + esc(l.lng) + '">Locating…</div>' : '';
-      return '<div class="fleet-row"><span class="fleet-dot' + (on ? '' : ' off') + '"></span><div style="flex:1;min-width:0"><strong>' + esc(d.name) + '</strong><div class="small muted">' + esc(truckNo) + (truckNo && trailerNo ? ' · ' : '') + esc(trailerNo) + '</div>' + citySlot + '</div><span class="small muted">' + right + '</span></div>';
+      return '<div class="fleet-row"><span class="fleet-dot' + (on ? '' : ' off') + '"' + (on ? ' style="background:' + driverColor(d.id) + '"' : '') + '></span><div style="flex:1;min-width:0"><strong>' + esc(d.name) + '</strong><div class="small muted">' + esc(truckNo) + (truckNo && trailerNo ? ' · ' : '') + esc(trailerNo) + '</div>' + citySlot + '</div><span class="small muted">' + right + '</span></div>';
     }).join('') : '<p class="empty">No drivers yet.</p>');
     fillCitySlots();
   };
@@ -440,7 +440,7 @@ async function viewDashboard(main) {
       const pos = { lat: Number(l.lat), lng: Number(l.lng) };
       const marker = new google.maps.Marker({
         position: pos, map: state.dashMap, title: l.driverName || ('Driver ' + l.driverId),
-        icon: driverPinIcon(l.driverName || ''),
+        icon: driverPinIcon(l.driverName || '', l.driverId),
       });
       marker.addListener('click', () => {
         if (state.dashInfo) state.dashInfo.close();
@@ -596,10 +596,18 @@ async function ensureGoogleMaps() {
   })();
   return googleMapsPromise;
 }
-/* Gold circle pin with the driver's initial — on-brand marker for the map. */
-function driverPinIcon(name) {
+/* One map colour per driver, stable by driver id — no more all-gold pins.
+   Akash (id 3) gets royal blue, Test Driver (id 2) gets green. */
+const DRIVER_COLORS = ['#DC2626', '#EA580C', '#16A34A', '#2563EB', '#9333EA', '#0891B2', '#DB2777', '#65A30D'];
+function driverColor(driverId) {
+  const n = Number(driverId);
+  return DRIVER_COLORS[(Number.isFinite(n) ? Math.abs(n) : 0) % DRIVER_COLORS.length];
+}
+/* Coloured circle pin with the driver's initial. */
+function driverPinIcon(name, driverId) {
   const initial = String(name || '?').trim().charAt(0).toUpperCase();
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><circle cx="18" cy="18" r="16" fill="#F2B705" stroke="#111111" stroke-width="2"/><text x="18" y="24" font-size="16" font-weight="bold" text-anchor="middle" fill="#111111" font-family="Arial">' + initial + '</text></svg>';
+  const color = driverColor(driverId);
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><circle cx="18" cy="18" r="16" fill="' + color + '" stroke="#FFFFFF" stroke-width="2"/><text x="18" y="24" font-size="16" font-weight="bold" text-anchor="middle" fill="#FFFFFF" font-family="Arial">' + initial + '</text></svg>';
   return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg), scaledSize: new google.maps.Size(36, 36), anchor: new google.maps.Point(18, 18) };
 }
 /* City + state for a driver position: reverse-geocodes the coordinates
@@ -1169,7 +1177,7 @@ async function viewLocations(main) {
           const pos = { lat: Number(l.lat), lng: Number(l.lng) };
           const marker = new google.maps.Marker({
             position: pos, map: state.locMap, title: l.driverName || ('Driver ' + l.driverId),
-            icon: driverPinIcon(l.driverName || ''),
+            icon: driverPinIcon(l.driverName || '', l.driverId),
           });
           marker.addListener('click', () => {
             if (state.locInfo) state.locInfo.close();
