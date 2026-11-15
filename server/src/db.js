@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS users (
   isMainAdmin INTEGER NOT NULL DEFAULT 0,
   pushToken TEXT,
   notificationPrefs TEXT,
+  outlookRefreshToken TEXT,
+  outlookEmail TEXT,
+  outlookConnectedAt TEXT,
   createdAt TEXT NOT NULL
 );
 
@@ -256,6 +259,18 @@ export function openDb(dataDir) {
   const msgColumns = db.prepare('PRAGMA table_info(messages)').all();
   if (!msgColumns.some((c) => c.name === 'senderName')) {
     db.exec('ALTER TABLE messages ADD COLUMN senderName TEXT');
+  }
+  // Migrate databases created before Outlook connections: each admin can
+  // connect their own Outlook mailbox so rate confirmations can be pulled
+  // from their email (fresh databases get them from the schema above).
+  if (!columns.some((c) => c.name === 'outlookRefreshToken')) {
+    db.exec('ALTER TABLE users ADD COLUMN outlookRefreshToken TEXT');
+  }
+  if (!columns.some((c) => c.name === 'outlookEmail')) {
+    db.exec('ALTER TABLE users ADD COLUMN outlookEmail TEXT');
+  }
+  if (!columns.some((c) => c.name === 'outlookConnectedAt')) {
+    db.exec('ALTER TABLE users ADD COLUMN outlookConnectedAt TEXT');
   }
   db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('demo_active', '0')").run();
   return db;

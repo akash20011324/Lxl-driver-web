@@ -880,9 +880,11 @@ async function viewLocations(main) {
 
 /* ---------- Rate Cons ---------- */
 async function viewRateCons(main) {
-  const [rcs, loads] = await Promise.all([
+  state.rcOutlook = null;
+  const [rcs, loads, outlook] = await Promise.all([
     api('/api/admin/rate-confirmations'),
     api('/api/admin/loads').catch(() => []),
+    api('/api/admin/outlook/status').catch(() => ({ configured: false, connected: false, email: null })),
   ]);
   const list = Array.isArray(rcs) ? rcs : [];
   const loadList = (Array.isArray(loads) ? loads : []).filter(l => l && l.reference);
@@ -905,6 +907,16 @@ async function viewRateCons(main) {
     '<p id="rcResult" class="small mt"></p></form>'
     : '<p class="empty">No loads yet — assign a load first, then upload its rate confirmation here.</p>') +
     '</div>' +
+    '<div class="card"><h2>From Outlook email</h2>' +
+    (outlook && outlook.configured
+      ? (outlook.connected
+        ? '<p class="small">Connected as <strong>' + esc(outlook.email || '') + '</strong> — pick the RC email, then the file.</p>' +
+          '<div class="form-actions"><button class="btn btn-sm" id="outlookPick">Pick from Outlook</button> <button class="btn btn-ghost btn-sm" id="outlookDisconnect">Disconnect</button></div>'
+        : '<p class="small muted">Connect your Outlook mailbox — then the RC comes straight from the email you pick, no downloading.</p>' +
+          '<div class="form-actions"><button class="btn btn-sm" id="outlookConnect">Connect Outlook</button></div>')
+      : '<p class="small muted">Outlook email is not set up on the server yet.</p>') +
+    '<div id="outlookPicker" style="display:none" class="mt"></div>' +
+    '<p id="outlookChosen" class="small mt"></p></div>' +
     '<div class="card"><div class="table-wrap"><table><thead><tr>' +
     '<th>Reference</th><th>Broker</th><th>Route</th><th>Dates</th><th>Rate</th><th>File</th><th></th>' +
     '</tr></thead><tbody>' +
@@ -925,7 +937,8 @@ async function viewRateCons(main) {
       const sel = document.getElementById('rcLoad');
       const f = document.getElementById('rcFile');
       const l = loadList.find(x => String(x.id) === (sel && sel.value));
-      const ext = f && f.files && f.files[0] ? (f.files[0].name.split('.').pop() || 'pdf') : 'pdf';
+      const pickedName = (state.rcOutlook && state.rcOutlook.name) || (f && f.files && f.files[0] ? f.files[0].name : '');
+      const ext = pickedName ? (pickedName.split('.').pop() || 'pdf') : 'pdf';
       const pv = document.getElementById('rcPreview');
       if (pv) pv.textContent = previewName(l, ext);
     };
@@ -934,15 +947,90 @@ async function viewRateCons(main) {
     updatePreview();
     rcForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const fd = new FormData(rcForm);
+      const loadId = document.getElementById('rcLoad').value;
       try {
-        const res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
+        let res;
+        if (state.rcOutlook) {
+          res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId }) });
+        } else {
+          const fd = new FormData(rcForm);
+          res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
+        }
         const saved = (res && (res.filename || (res.rateConfirmation && res.rateConfirmation.filename))) || '';
         document.getElementById('rcResult').textContent = saved ? 'Saved as: ' + saved : 'Uploaded.';
         toast('Rate confirmation uploaded' + (saved ? ' as ' + saved : '') + '.', 'ok');
         renderAdminView('ratecons');
       } catch (err) { showError(err); }
     });
+  }
+  // Outlook: connect this admin's mailbox, pick the RC email + file.
+  const outlookConnect = document.getElementById('outlookConnect');
+  if (outlookConnect) outlookConnect.addEventListener('click', async () => {
+    try {
+      const res = await api('/api/admin/outlook/auth-url');
+      window.open(res.url, '_blank');
+      toast('Sign in to Microsoft in the new tab, then come back here.', 'ok');
+    } catch (err) { showError(err); }
+  });
+  const outlookDisconnect = document.getElementById('outlookDisconnect');
+  if (outlookDisconnect) outlookDisconnect.addEventListener('click', async () => {
+    if (!confirm('Disconnect your Outlook mailbox?')) return;
+    try { await api('/api/admin/outlook/disconnect', { method: 'POST', body: JSON.stringify({}) }); renderAdminView('ratecons'); }
+    catch (err) { showError(err); }
+  });
+  const outlookPick = document.getElementById('outlookPick');
+  if (outlookPick) outlookPick.addEventListener('click', () => loadOutlookMessages(''));
+  async function loadOutlookMessages(search) {
+    const picker = document.getElementById('outlookPicker');
+    if (!picker) return;
+    picker.style.display = 'block';
+    picker.innerHTML = '<p class="muted small">Loading emails…</p>';
+    try {
+      const msgs = await api('/api/admin/outlook/messages' + (search ? '?search=' + encodeURIComponent(search) : ''));
+      const list = Array.isArray(msgs) ? msgs : [];
+      picker.innerHTML = '<div class="field"><label>Search emails</label><input id="outlookSearch" placeholder="Broker name, load number…" value="' + esc(search || '') + '"></div>' +
+        (list.length ? list.map(m =>
+          '<div class="card outlook-msg" data-outlook-msg="' + esc(m.id) + '" style="cursor:pointer">' +
+          '<strong>' + esc(m.subject) + '</strong><p class="small muted">' + esc(m.from) + ' · ' + fmtDate(m.receivedAt) + (m.hasAttachments ? ' · has attachments' : '') + '</p>' +
+          '<div class="outlook-atts"></div></div>').join('')
+        : '<p class="empty">No emails with attachments found.</p>');
+      document.getElementById('outlookSearch').addEventListener('change', (e) => loadOutlookMessages(e.target.value.trim()));
+      picker.querySelectorAll('.outlook-msg').forEach(el => el.addEventListener('click', async () => {
+        const box = el.querySelector('.outlook-atts');
+        if (!box || box.dataset.loaded) return;
+        box.dataset.loaded = '1';
+        box.innerHTML = '<p class="muted small">Loading attachments…</p>';
+        try {
+          const atts = await api('/api/admin/outlook/messages/' + encodeURIComponent(el.dataset.outlookMsg) + '/attachments');
+          const arr = Array.isArray(atts) ? atts : [];
+          box.innerHTML = arr.length ? arr.map(a =>
+            '<button class="btn btn-sm" data-outlook-att="' + esc(a.id) + '" data-outlook-att-name="' + esc(a.name) + '">' + esc(a.name) + (a.size ? ' (' + Math.round(a.size / 1024) + ' KB)' : '') + '</button> ').join('')
+            : '<p class="small muted">No attachments on this email.</p>';
+          box.querySelectorAll('[data-outlook-att]').forEach(b => b.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            const subject = el.querySelector('strong').textContent;
+            state.rcOutlook = { messageId: el.dataset.outlookMsg, attachmentId: b.dataset.outlookAtt, name: b.dataset.outlookAttName };
+            const fileInput = document.getElementById('rcFile');
+            if (fileInput) fileInput.required = false;
+            const chosen = document.getElementById('outlookChosen');
+            if (chosen) chosen.innerHTML = 'Selected from Outlook: <strong>' + esc(b.dataset.outlookAttName) + '</strong> — ' + esc(subject) + ' <button class="btn btn-ghost btn-sm" id="outlookClear">Clear</button>';
+            document.getElementById('outlookClear').addEventListener('click', () => {
+              state.rcOutlook = null;
+              if (fileInput) fileInput.required = true;
+              if (chosen) chosen.textContent = '';
+            });
+            const pv = document.getElementById('rcPreview');
+            if (pv) {
+              const sel = document.getElementById('rcLoad');
+              const l = loadList.find(x => String(x.id) === (sel && sel.value));
+              const ext = (b.dataset.outlookAttName.split('.').pop() || 'pdf');
+              pv.textContent = previewName(l, ext);
+            }
+            toast('Attachment selected — pick the load and Upload.', 'ok');
+          }));
+        } catch (err) { box.innerHTML = '<p class="empty">Could not load attachments.</p>'; showError(err); }
+      }));
+    } catch (err) { picker.innerHTML = '<p class="empty">Could not load emails.</p>'; showError(err); }
   }
   main.querySelectorAll('[data-rc-view]').forEach(b => b.addEventListener('click', () => {
     const r = list.find(x => String(x.id) === b.dataset.rcView);

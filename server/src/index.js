@@ -318,6 +318,46 @@ app.post('/api/setup/admin', (req, res) => {
   res.status(201).json({ user: publicUser(user), token: createSession(id) });
 });
 
+// Microsoft redirects here after an admin signs in to Outlook. The
+// sign-in is started from the Rate Confirmations page; the state value
+// ties the callback to the admin who started it.
+app.get('/api/outlook/callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query || {};
+  const safe = (s) => String(s || '').replace(/[<>&"]/g, '');
+  const fail = (msg) =>
+    res.status(400).send(`<h1>Outlook connection failed</h1><p>${safe(msg)}</p><p><a href="/">Back to LXL Driver</a></p>`);
+  if (error) return fail(error_description || error);
+  const pending = state ? outlookStates.get(state) : null;
+  if (!pending || Date.now() - pending.createdAt > 10 * 60 * 1000) {
+    if (state) outlookStates.delete(state);
+    return fail('This sign-in link expired — start again from the Rate Confirmations page.');
+  }
+  outlookStates.delete(state);
+  try {
+    const tokens = await outlookTokenRequest({
+      client_id: OUTLOOK_CLIENT_ID,
+      client_secret: OUTLOOK_CLIENT_SECRET,
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: OUTLOOK_REDIRECT_URI,
+      scope: OUTLOOK_SCOPES,
+    });
+    if (!tokens.refresh_token) return fail('Microsoft did not return a lasting connection — try again.');
+    const me = await outlookGraph(tokens.access_token, '/me?$select=mail,userPrincipalName');
+    const email = me.mail || me.userPrincipalName || null;
+    db.prepare('UPDATE users SET outlookRefreshToken = ?, outlookEmail = ?, outlookConnectedAt = ? WHERE id = ?').run(
+      tokens.refresh_token,
+      email,
+      now(),
+      pending.userId,
+    );
+    res.redirect('https://app.lubanaxpress.com/');
+  } catch (e) {
+    console.error('outlook callback failed', e);
+    return fail('Microsoft sign-in failed — try again from the Rate Confirmations page.');
+  }
+});
+
 app.post('/api/auth/login', (req, res) => {
   // Drivers sign in with a phone number OR an email, plus password.
   // Admins sign in with email only (admins have no phone on file).
@@ -1267,6 +1307,97 @@ async function ensureDeliveryCoords(load) {
   return coords;
 }
 
+// ---------------------------------------------------------------------------
+// Outlook (Microsoft Graph): each admin connects their OWN Outlook mailbox
+// so rate confirmations can be pulled from the email they pick. Needs a
+// Microsoft app registration: OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET as
+// env vars (see render.yaml). The refresh token is stored on the admin's
+// user row; the access token is refreshed on demand and never stored.
+// ---------------------------------------------------------------------------
+const OUTLOOK_CLIENT_ID = process.env.OUTLOOK_CLIENT_ID || '';
+const OUTLOOK_CLIENT_SECRET = process.env.OUTLOOK_CLIENT_SECRET || '';
+const OUTLOOK_REDIRECT_URI =
+  process.env.OUTLOOK_REDIRECT_URI || 'https://app.lubanaxpress.com/api/outlook/callback';
+const OUTLOOK_TENANT = process.env.OUTLOOK_TENANT || 'common';
+const OUTLOOK_SCOPES = 'Mail.Read offline_access';
+const outlookStates = new Map(); // state -> { userId, createdAt }
+
+function outlookConfigured() {
+  return !!OUTLOOK_CLIENT_ID && !!OUTLOOK_CLIENT_SECRET;
+}
+
+function outlookAuthUrl(state) {
+  const params = new URLSearchParams({
+    client_id: OUTLOOK_CLIENT_ID,
+    response_type: 'code',
+    redirect_uri: OUTLOOK_REDIRECT_URI,
+    scope: OUTLOOK_SCOPES,
+    state,
+  });
+  return `https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/authorize?${params}`;
+}
+
+async function outlookTokenRequest(body) {
+  const res = await fetch(
+    `https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/token`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(body),
+    },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error(data.error_description || data.error || 'Microsoft sign-in failed');
+    e.code = data.error || 'token_failed';
+    throw e;
+  }
+  return data;
+}
+
+async function outlookAccessToken(user) {
+  if (!user.outlookRefreshToken) {
+    const e = new Error('Outlook is not connected for this account — connect it first.');
+    e.status = 401;
+    throw e;
+  }
+  try {
+    const data = await outlookTokenRequest({
+      client_id: OUTLOOK_CLIENT_ID,
+      client_secret: OUTLOOK_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token: user.outlookRefreshToken,
+      scope: OUTLOOK_SCOPES,
+    });
+    // Graph rotates refresh tokens — keep the newest one.
+    if (data.refresh_token && data.refresh_token !== user.outlookRefreshToken) {
+      db.prepare('UPDATE users SET outlookRefreshToken = ? WHERE id = ?').run(data.refresh_token, user.id);
+    }
+    return data.access_token;
+  } catch (e) {
+    if (e.code === 'invalid_grant') {
+      db.prepare('UPDATE users SET outlookRefreshToken = NULL, outlookEmail = NULL, outlookConnectedAt = NULL WHERE id = ?').run(user.id);
+      const gone = new Error('Outlook needs to be connected again — the permission was revoked or expired.');
+      gone.status = 401;
+      throw gone;
+    }
+    throw e;
+  }
+}
+
+async function outlookGraph(accessToken, path) {
+  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error((data.error && data.error.message) || 'Outlook request failed');
+    e.status = res.status;
+    throw e;
+  }
+  return data;
+}
+
 // Two-letter state code from a load address like "904 Edwards Dr, Lebanon IN 46052".
 function stateFromAddress(address) {
   if (!address) return null;
@@ -1303,14 +1434,16 @@ admin.get('/rate-confirmations', (_req, res) => {
   res.json(rows.map(serializeRateCon));
 });
 
-admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
-  const { loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents } = req.body || {};
+// Save a rate confirmation, naming the file from the load. Shared by the
+// file-upload endpoint and the Outlook endpoint. Throws an Error with
+// .status (400/404) for bad input.
+function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType }) {
   // Pick a load and the file is named from the load — no typing. Typed
   // fields still win when given (older clients send them).
   let load = null;
   if (loadId) {
     load = db.prepare('SELECT * FROM loads WHERE id = ?').get(Number(loadId));
-    if (!load) return err(res, 404, 'Load not found');
+    if (!load) throw Object.assign(new Error('Load not found'), { status: 404 });
   }
   const ref = reference || (load && load.reference);
   const pState = pickupState || (load && stateFromAddress(load.pickupLocation));
@@ -1318,12 +1451,11 @@ admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
   const pDate = pickupDate || (load && dateInZone(load.pickupAt, load.pickupTimezone));
   const dDate = deliveryDate || (load && dateInZone(load.deliveryAt, load.deliveryTimezone));
   if (!ref || !pState || !dState || !pDate || !dDate)
-    return err(res, 400, 'Pick a load, or fill in reference, pickup/delivery state and dates');
-  const ext = req.file ? path.extname(req.file.originalname || '') : '';
+    throw Object.assign(new Error('Pick a load, or fill in reference, pickup/delivery state and dates'), { status: 400 });
+  const ext = fileName ? path.extname(fileName || '') : '';
   const autoName = `${ref}_${pState}-${dState}_${pDate}_to_${dDate}${ext}`;
   let fileId = null;
-  if (req.file) {
-    const target = path.join(UPLOADS_DIR, autoName);
+  if (fileBuffer) {
     // Avoid clobbering an existing file with the same auto-generated name.
     let finalName = autoName;
     let n = 1;
@@ -1331,12 +1463,12 @@ admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
       finalName = `${ref}_${pState}-${dState}_${pDate}_to_${dDate}-${n}${ext}`;
       n += 1;
     }
-    fs.renameSync(req.file.path, path.join(UPLOADS_DIR, finalName));
+    fs.writeFileSync(path.join(UPLOADS_DIR, finalName), fileBuffer);
     fileId = db
       .prepare(
         'INSERT INTO files (storedFilename, originalFilename, mimeType, ownerType, ownerId, driverId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(finalName, finalName, req.file.mimetype, 'rate_confirmation', null, null, now()).lastInsertRowid;
+      .run(finalName, finalName, mimeType || 'application/octet-stream', 'rate_confirmation', null, null, now()).lastInsertRowid;
   }
   const id = db
     .prepare(
@@ -1357,9 +1489,125 @@ admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
   const row = db
     .prepare('SELECT r.*, f.originalFilename, f.mimeType FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId WHERE r.id = ?')
     .get(id);
-  // No uploaded file: still report the auto-generated name as the filename.
+  // No file: still report the auto-generated name as the filename.
   if (!fileId) row.originalFilename = autoName;
-  res.status(201).json(serializeRateCon(row));
+  return serializeRateCon(row);
+}
+
+admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
+  const { loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents } = req.body || {};
+  try {
+    let fileBuffer = null;
+    let fileName = null;
+    let mimeType = null;
+    if (req.file) {
+      fileBuffer = fs.readFileSync(req.file.path);
+      fileName = req.file.originalname;
+      mimeType = req.file.mimetype;
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(201).json(
+      createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType }),
+    );
+  } catch (e) {
+    if (req.file) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch {}
+    }
+    if (e.status) return err(res, e.status, e.message);
+    throw e;
+  }
+});
+
+// Pull the RC file from the signed-in admin's own Outlook mailbox instead
+// of uploading it: pick the email, pick the attachment, pick the load.
+admin.post('/rate-confirmations/from-outlook', async (req, res) => {
+  try {
+    const { loadId, messageId, attachmentId } = req.body || {};
+    if (!loadId || !messageId || !attachmentId)
+      return err(res, 400, 'loadId, messageId and attachmentId are required');
+    const user = getUserById(req.user.id);
+    const accessToken = await outlookAccessToken(user);
+    const att = await outlookGraph(
+      accessToken,
+      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}?$select=id,name,contentType,contentBytes`,
+    );
+    if (!att.contentBytes)
+      return err(res, 400, 'That attachment has no file to download — pick a file attachment (PDF).');
+    const fileBuffer = Buffer.from(att.contentBytes, 'base64');
+    if (!fileBuffer.length) return err(res, 400, 'That attachment is empty.');
+    res.status(201).json(
+      createRateCon({ loadId, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf' }),
+    );
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('rate-con from outlook failed', e);
+    return err(res, 500, 'Could not pull the file from Outlook');
+  }
+});
+
+// Outlook: connect this admin's own mailbox, list RC emails, pull the file.
+admin.get('/outlook/status', (req, res) => {
+  const user = getUserById(req.user.id);
+  res.json({ configured: outlookConfigured(), connected: !!user.outlookRefreshToken, email: user.outlookEmail ?? null });
+});
+
+admin.get('/outlook/auth-url', (req, res) => {
+  if (!outlookConfigured())
+    return err(res, 400, 'Outlook is not set up on the server yet — the main admin needs to finish the Microsoft setup.');
+  const state = crypto.randomBytes(16).toString('hex');
+  outlookStates.set(state, { userId: req.user.id, createdAt: Date.now() });
+  for (const [s, v] of outlookStates)
+    if (Date.now() - v.createdAt > 10 * 60 * 1000) outlookStates.delete(s);
+  res.json({ url: outlookAuthUrl(state) });
+});
+
+admin.post('/outlook/disconnect', (req, res) => {
+  db.prepare('UPDATE users SET outlookRefreshToken = NULL, outlookEmail = NULL, outlookConnectedAt = NULL WHERE id = ?').run(req.user.id);
+  res.json({ ok: true });
+});
+
+admin.get('/outlook/messages', async (req, res) => {
+  try {
+    const user = getUserById(req.user.id);
+    const accessToken = await outlookAccessToken(user);
+    const search = (req.query.search || '').trim();
+    const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    const path = search
+      ? `/me/messages?${q({ $search: `"${search}"`, $top: '20', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`
+      : `/me/messages?${q({ $filter: 'hasAttachments eq true', $orderby: 'receivedDateTime desc', $top: '20', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`;
+    const data = await outlookGraph(accessToken, path);
+    res.json(
+      (data.value || []).map((m) => ({
+        id: m.id,
+        subject: m.subject ?? '(no subject)',
+        from: (m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || '',
+        receivedAt: m.receivedDateTime,
+        hasAttachments: !!m.hasAttachments,
+      })),
+    );
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('outlook messages failed', e);
+    return err(res, 500, 'Could not list Outlook emails');
+  }
+});
+
+admin.get('/outlook/messages/:id/attachments', async (req, res) => {
+  try {
+    const user = getUserById(req.user.id);
+    const accessToken = await outlookAccessToken(user);
+    const data = await outlookGraph(
+      accessToken,
+      `/me/messages/${encodeURIComponent(req.params.id)}/attachments?$select=id,name,size,contentType`,
+    );
+    res.json((data.value || []).map((a) => ({ id: a.id, name: a.name, size: a.size ?? null, contentType: a.contentType ?? null })));
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('outlook attachments failed', e);
+    return err(res, 500, 'Could not list attachments');
+  }
 });
 
 admin.delete('/rate-confirmations/:id', (req, res) => {
