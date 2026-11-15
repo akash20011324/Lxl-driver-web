@@ -1049,12 +1049,14 @@ async function viewRateCons(main) {
     catch (err) { showError(err); }
   }));
   // Search the table: reference, broker, route, dates, rate, filename.
+  // Normalizes both sides so "dandl" finds "D & L" (the & reads as "and").
+  const norm = s => s.toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]/g, '');
   const rcSearch = document.getElementById('rcSearch');
   if (rcSearch) rcSearch.addEventListener('input', () => {
-    const q = rcSearch.value.trim().toLowerCase();
+    const q = norm(rcSearch.value.trim());
     let visible = 0;
     main.querySelectorAll('.rc-page tbody tr').forEach(tr => {
-      const hit = !q || tr.textContent.toLowerCase().includes(q);
+      const hit = !q || norm(tr.textContent).includes(q);
       tr.style.display = hit ? '' : 'none';
       if (hit) visible++;
     });
