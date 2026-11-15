@@ -13,6 +13,7 @@ import { openDb, now, withTransaction, getMeta, demoAvailable, deactivateDemo, n
 import { seedDemo } from './seed.js';
 import { seedRealFleet } from './seed-fleet.js';
 import { notifyDriver } from './push.js';
+import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
@@ -1437,7 +1438,122 @@ admin.get('/rate-confirmations', (_req, res) => {
 // Save a rate confirmation, naming the file from the load. Shared by the
 // file-upload endpoint and the Outlook endpoint. Throws an Error with
 // .status (400/404) for bad input.
-function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType }) {
+// --- Rate confirmation auto-detection ------------------------------------
+// Read the rate ($ amount) and broker name out of an RC PDF so the admin
+// never has to type them. Runs on every upload, and once at startup for
+// any RC row saved before this existed. Never breaks the upload: on any
+// failure it returns {} and the row keeps nulls.
+async function pdfTextFromBuffer(fileBuffer) {
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(fileBuffer) }).promise;
+  let text = '';
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map((it) => it.str).join(' ') + '\n';
+  }
+  return text;
+}
+
+function cleanRateText(text) {
+  // Strip control chars pdf.js leaves behind, collapse whitespace.
+  return String(text || '').replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function amountToCents(s) {
+  const n = parseFloat(String(s).replace(/,/g, ''));
+  if (!Number.isFinite(n) || n < 50 || n > 50000) return null;
+  return Math.round(n * 100);
+}
+
+function detectRateCents(text) {
+  // Keyword-anchored first: the total is what gets paid.
+  const patterns = [
+    /TOTAL\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /FLAT\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) {
+      const c = amountToCents(m[1]);
+      if (c != null) return c;
+    }
+  }
+  // Fallback: largest plausible dollar amount in the document (fees and
+  // fines are smaller; cargo-insurance figures are way above the cap).
+  let best = null;
+  for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
+    const c = amountToCents(m[1]);
+    if (c != null && (best == null || c > best)) best = c;
+  }
+  return best;
+}
+
+function cleanBrokerName(s) {
+  return String(s || '').replace(/\s+/g, ' ').replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9.)]+$/g, '').trim() || null;
+}
+
+function detectBroker(text, subject) {
+  // Email subject first: "Carrier Rate Confirmation Pro # 2038499 from
+  // D & L TRANSPORT, LLC" — the broker is everything after "from".
+  if (subject) {
+    const m = String(subject).match(/\bfrom\s+(.+?)\s*$/i);
+    if (m && m[1].trim().length > 1) return cleanBrokerName(m[1]);
+  }
+  // PDF text: drop "Att: <name>" headers (they sit in front of the broker
+  // name), then take the first company-like name near the top.
+  const head = cleanRateText(text).slice(0, 2000).replace(/\bAttn?\s*:?\s*[A-Z][A-Za-z]+/g, '');
+  const m = head.match(/([A-Z][A-Za-z0-9&'.,\- ]{1,60}?(?:LLC|Inc\.?|Ltd\.?|Corp\.?|Co\.?))\b/);
+  if (m) return cleanBrokerName(m[1]);
+  const m2 = head.match(/([A-Z][A-Za-z0-9&'.,\- ]{1,60}?(?:TRANSPORT|LOGISTICS|FREIGHT|EXPRESS|TRUCKING))\b/);
+  if (m2) return cleanBrokerName(m2[1]);
+  return null;
+}
+
+async function extractRateConDetails(fileBuffer, subject) {
+  try {
+    if (!fileBuffer || fileBuffer.length < 4 || fileBuffer.subarray(0, 4).toString('ascii') !== '%PDF') return {};
+    const text = cleanRateText(await pdfTextFromBuffer(fileBuffer));
+    if (!text) return {};
+    return { broker: detectBroker(text, subject), rateCents: detectRateCents(text) };
+  } catch (e) {
+    console.error('rate-con auto-detect failed', e);
+    return {};
+  }
+}
+
+// One-time backfill: RC rows saved before auto-detection get their rate
+// and broker read from the stored PDF the next time the server starts.
+async function backfillRateConDetails() {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT r.id, r.rateCents, r.broker, f.storedFilename FROM rate_confirmations r
+         LEFT JOIN files f ON f.id = r.fileId
+         WHERE (r.rateCents IS NULL OR r.broker IS NULL) AND f.storedFilename IS NOT NULL`,
+      )
+      .all();
+    for (const row of rows) {
+      try {
+        const buf = fs.readFileSync(path.join(UPLOADS_DIR, row.storedFilename));
+        const d = await extractRateConDetails(buf);
+        const nb = row.broker ?? d.broker ?? null;
+        const nr = row.rateCents != null ? row.rateCents : (d.rateCents ?? null);
+        if (nb !== row.broker || nr !== row.rateCents) {
+          db.prepare('UPDATE rate_confirmations SET broker = ?, rateCents = ? WHERE id = ?').run(nb, nr, row.id);
+          console.log(`rate-con backfill: RC ${row.id} broker=${nb} rateCents=${nr}`);
+        }
+      } catch (e) {
+        console.error(`rate-con backfill failed for RC ${row.id}`, e);
+      }
+    }
+  } catch (e) {
+    console.error('rate-con backfill failed', e);
+  }
+}
+
+async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // Pick a load and the file is named from the load — no typing. Typed
   // fields still win when given (older clients send them).
   let load = null;
@@ -1454,6 +1570,12 @@ function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDa
     throw Object.assign(new Error('Pick a load, or fill in reference, pickup/delivery state and dates'), { status: 400 });
   const ext = fileName ? path.extname(fileName || '') : '';
   const autoName = `${ref}_${pState}-${dState}_${pDate}_to_${dDate}${ext}`;
+  // Auto-detect rate + broker from the PDF when they weren't typed.
+  // Typed values still win when given (older clients send them).
+  let detected = {};
+  if ((!broker || rateCents == null) && fileBuffer) detected = await extractRateConDetails(fileBuffer, subject);
+  const finalBroker = broker ?? detected.broker ?? null;
+  const finalRate = rateCents != null ? Number(rateCents) : (detected.rateCents ?? null);
   let fileId = null;
   if (fileBuffer) {
     // Avoid clobbering an existing file with the same auto-generated name.
@@ -1477,12 +1599,12 @@ function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDa
     .run(
       ref,
       loadId ? Number(loadId) : null,
-      broker ?? null,
+      finalBroker,
       pState,
       dState,
       pDate,
       dDate,
-      rateCents != null ? Number(rateCents) : null,
+      finalRate,
       fileId,
       now(),
     ).lastInsertRowid;
@@ -1494,7 +1616,7 @@ function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDa
   return serializeRateCon(row);
 }
 
-admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
+admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
   const { loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents } = req.body || {};
   try {
     let fileBuffer = null;
@@ -1507,7 +1629,7 @@ admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
       fs.unlinkSync(req.file.path);
     }
     res.status(201).json(
-      createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType }),
+      await createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType }),
     );
   } catch (e) {
     if (req.file) {
@@ -1524,7 +1646,7 @@ admin.post('/rate-confirmations', upload.single('file'), (req, res) => {
 // of uploading it: pick the email, pick the attachment, pick the load.
 admin.post('/rate-confirmations/from-outlook', async (req, res) => {
   try {
-    const { loadId, messageId, attachmentId } = req.body || {};
+    const { loadId, messageId, attachmentId, subject } = req.body || {};
     if (!loadId || !messageId || !attachmentId)
       return err(res, 400, 'loadId, messageId and attachmentId are required');
     const user = getUserById(req.user.id);
@@ -1538,7 +1660,7 @@ admin.post('/rate-confirmations/from-outlook', async (req, res) => {
     const fileBuffer = Buffer.from(att.contentBytes, 'base64');
     if (!fileBuffer.length) return err(res, 400, 'That attachment is empty.');
     res.status(201).json(
-      createRateCon({ loadId, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf' }),
+      await createRateCon({ loadId, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject }),
     );
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
@@ -1745,4 +1867,5 @@ app.use((e, _req, res, _next) => {
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
+  backfillRateConDetails();
 });

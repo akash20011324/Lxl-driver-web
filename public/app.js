@@ -951,7 +951,7 @@ async function viewRateCons(main) {
       try {
         let res;
         if (state.rcOutlook) {
-          res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId }) });
+          res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId, subject: state.rcOutlook.subject }) });
         } else {
           const fd = new FormData(rcForm);
           res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
@@ -1012,7 +1012,7 @@ async function viewRateCons(main) {
           box.querySelectorAll('[data-outlook-att]').forEach(b => b.addEventListener('click', (ev) => {
             ev.stopPropagation();
             const subject = el.querySelector('strong').textContent;
-            state.rcOutlook = { messageId: el.dataset.outlookMsg, attachmentId: b.dataset.outlookAtt, name: b.dataset.outlookAttName };
+            state.rcOutlook = { messageId: el.dataset.outlookMsg, attachmentId: b.dataset.outlookAtt, name: b.dataset.outlookAttName, subject };
             const fileInput = document.getElementById('rcFile');
             if (fileInput) fileInput.required = false;
             const chosen = document.getElementById('outlookChosen');
