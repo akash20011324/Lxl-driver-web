@@ -445,7 +445,7 @@ async function viewDashboard(main) {
       marker.addListener('click', () => {
         if (state.dashInfo) state.dashInfo.close();
         state.dashInfo = new google.maps.InfoWindow({
-          content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="dash-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
+          content: '<div style="color:#111827;font-size:14px;line-height:1.55;min-width:200px"><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="dash-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)) + '</div>',
         });
         state.dashInfo.open(state.dashMap, marker);
         getCityState(l.lat, l.lng).then(place => {
@@ -592,15 +592,28 @@ function fmtShortTime(iso, tz) {
    no key is configured or the script fails — callers show a fallback note. */
 let googleMapsPromise = null;
 let googleMapsKey = null; // kept for the REST geocode fallback below
+let googleMapsKeyPromise = null;
+/* Fetches + caches the browser key (admin-only endpoint). Kept separate
+   from the script loader: once the map script is loaded, ensureGoogleMaps
+   returns early and would never fetch the key — which is exactly why the
+   REST geocode fallback silently never ran (the key stayed null). */
+async function ensureGoogleMapsKey() {
+  if (googleMapsKey) return googleMapsKey;
+  if (!googleMapsKeyPromise) {
+    googleMapsKeyPromise = api('/api/admin/maps-config').catch(() => ({})).then(cfg => {
+      googleMapsKey = cfg && cfg.googleMapsApiKey ? cfg.googleMapsApiKey : null;
+      return googleMapsKey;
+    });
+  }
+  return googleMapsKeyPromise;
+}
 async function ensureGoogleMaps() {
   if (window.google && google.maps) return google.maps;
   if (googleMapsPromise) return googleMapsPromise;
   googleMapsPromise = (async () => {
     try {
-      const cfg = await api('/api/admin/maps-config').catch(() => ({}));
-      const key = cfg && cfg.googleMapsApiKey;
+      const key = await ensureGoogleMapsKey();
       if (!key) return null;
-      googleMapsKey = key;
       await new Promise((resolve, reject) => {
         const s = document.createElement('script');
         s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key);
@@ -661,7 +674,7 @@ async function getCityState(lat, lng) {
     // (The JS path stayed silent before, so a second route + a console
     // note means the next check can say WHY it failed instead of "—".)
     try {
-      if (!googleMapsKey) await ensureGoogleMaps();
+      if (!googleMapsKey) await ensureGoogleMapsKey();
       if (!googleMapsKey) return null;
       const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + Number(lat) + ',' + Number(lng) + '&key=' + encodeURIComponent(googleMapsKey));
       const j = await r.json();
@@ -1268,7 +1281,7 @@ async function viewLocations(main) {
           marker.addListener('click', () => {
             if (state.locInfo) state.locInfo.close();
             state.locInfo = new google.maps.InfoWindow({
-              content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="loc-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
+              content: '<div style="color:#111827;font-size:14px;line-height:1.55;min-width:200px"><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="loc-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)) + '</div>',
             });
             state.locInfo.open(state.locMap, marker);
             getCityState(l.lat, l.lng).then(place => {
