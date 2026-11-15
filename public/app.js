@@ -390,6 +390,7 @@ async function viewDashboard(main) {
     '<div class="glass-panel mt" id="dashFleet"></div>' +
     '</div></div>';
   renderAdminSidebar(pendingReq);
+  fillCitySlots();
   const compass = (h) => {
     if (typeof h !== 'number') return '—';
     const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -409,8 +410,10 @@ async function viewDashboard(main) {
         : (l && l.updatedAt ? 'Last seen ' + esc(fmtDate(l.updatedAt)) : 'No location yet');
       const truckNo = d.truck ? (d.truck.unitNumber || '') : (d.truckUnitNumber || '');
       const trailerNo = d.trailer ? (d.trailer.unitNumber || '') : (d.trailerUnitNumber || '');
-      return '<div class="fleet-row"><span class="fleet-dot' + (on ? '' : ' off') + '"></span><div style="flex:1;min-width:0"><strong>' + esc(d.name) + '</strong><div class="small muted">' + esc(truckNo) + (truckNo && trailerNo ? ' · ' : '') + esc(trailerNo) + '</div></div><span class="small muted">' + right + '</span></div>';
+      const citySlot = l ? '<div class="small city-slot" data-city-lat="' + esc(l.lat) + '" data-city-lng="' + esc(l.lng) + '">Locating…</div>' : '';
+      return '<div class="fleet-row"><span class="fleet-dot' + (on ? '' : ' off') + '"></span><div style="flex:1;min-width:0"><strong>' + esc(d.name) + '</strong><div class="small muted">' + esc(truckNo) + (truckNo && trailerNo ? ' · ' : '') + esc(trailerNo) + '</div>' + citySlot + '</div><span class="small muted">' + right + '</span></div>';
     }).join('') : '<p class="empty">No drivers yet.</p>');
+    fillCitySlots();
   };
   const refreshPills = (locList) => {
     const byId = {};
@@ -439,9 +442,13 @@ async function viewDashboard(main) {
       marker.addListener('click', () => {
         if (state.dashInfo) state.dashInfo.close();
         state.dashInfo = new google.maps.InfoWindow({
-          content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
+          content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="dash-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
         });
         state.dashInfo.open(state.dashMap, marker);
+        getCityState(l.lat, l.lng).then(place => {
+          const cel = document.getElementById('dash-iw-city-' + l.driverId);
+          if (cel) cel.textContent = place || '—';
+        });
       });
       state.dashMapMarkers.push(marker);
       bounds.extend(pos);
@@ -499,13 +506,14 @@ function dashDriverCard(d, load, rcByLoad, loc, live) {
     route = '<p class="small muted mt">No active load</p>';
   }
   const speed = (live && loc && typeof loc.speedMph === 'number') ? ' &middot; ' + Math.round(loc.speedMph) + ' mph' : '';
+  const citySlot = (live && loc && loc.lat !== undefined && loc.lng !== undefined) ? ' &middot; <span class="city-slot" data-city-lat="' + esc(loc.lat) + '" data-city-lng="' + esc(loc.lng) + '">Locating…</span>' : '';
   return '<div class="glass-panel dw">' +
     '<div class="dw-head"><div class="dw-avatar' + (d.active === false ? ' off' : '') + '">' + esc(initial) + '</div>' +
     '<div class="dw-id"><h3>' + esc(d.name) + '</h3><div class="small muted">' + esc(d.phone || '') + (d.phone && d.email ? ' · ' : '') + esc(d.email || '') + '</div></div>' +
     status + '</div>' +
     '<div class="dw-chips">' + chips + '</div>' +
     route +
-    '<p class="small muted dw-foot">Pending requests: <strong>' + (Number(d.pendingRequests) || 0) + '</strong> &middot; Unread messages: <strong>' + (Number(d.unreadMessages) || 0) + '</strong>' + speed + '</p>' +
+    '<p class="small muted dw-foot">Pending requests: <strong>' + (Number(d.pendingRequests) || 0) + '</strong> &middot; Unread messages: <strong>' + (Number(d.unreadMessages) || 0) + '</strong>' + speed + citySlot + '</p>' +
     '</div>';
 }
 /* Route progress from a load's pickup/delivery times: 0 before pickup,
@@ -555,6 +563,45 @@ function driverPinIcon(name) {
   const initial = String(name || '?').trim().charAt(0).toUpperCase();
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><circle cx="18" cy="18" r="16" fill="#F2B705" stroke="#111111" stroke-width="2"/><text x="18" y="24" font-size="16" font-weight="bold" text-anchor="middle" fill="#111111" font-family="Arial">' + initial + '</text></svg>';
   return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg), scaledSize: new google.maps.Size(36, 36), anchor: new google.maps.Point(18, 18) };
+}
+/* City + state for a driver position: reverse-geocodes the coordinates
+   through Google (Geocoding API, same key as the maps). Results are cached
+   by rounded coordinates so the 10-second refresh doesn't re-geocode the
+   same spot over and over. Returns e.g. "Lebanon, IN", or null. */
+const geoCache = new Map();
+async function getCityState(lat, lng) {
+  const key = Number(lat).toFixed(3) + ',' + Number(lng).toFixed(3);
+  if (geoCache.has(key)) return geoCache.get(key);
+  const pr = (async () => {
+    try {
+      const g = await ensureGoogleMaps();
+      if (!g) return null;
+      const geocoder = new g.Geocoder();
+      const out = await new Promise((resolve) => geocoder.geocode({ location: { lat: Number(lat), lng: Number(lng) } }, (results, status) => resolve({ results, status })));
+      if (out.status !== 'OK' || !out.results || !out.results.length) return null;
+      const comps = out.results[0].address_components || [];
+      const find = (type) => { const c = comps.find(c => (c.types || []).includes(type)); return c ? c.short_name : null; };
+      const city = find('locality') || find('sublocality') || find('postal_town') || find('administrative_area_level_2');
+      const state = find('administrative_area_level_1');
+      return (city && state) ? (city + ', ' + state) : (city || state || null);
+    } catch (e) { return null; }
+  })();
+  geoCache.set(key, pr);
+  return pr;
+}
+/* Fills every .city-slot that hasn't been filled yet (each carries its
+   coordinates in data-city-lat / data-city-lng). Call after any render
+   that adds slots — fleet list, driver widgets, Locations table. */
+function fillCitySlots() {
+  document.querySelectorAll('.city-slot:not([data-city-done])').forEach(el => {
+    el.setAttribute('data-city-done', '1');
+    const lat = el.getAttribute('data-city-lat'), lng = el.getAttribute('data-city-lng');
+    if (lat === null || lng === null) return;
+    getCityState(lat, lng).then(place => {
+      if (!document.contains(el)) return;
+      el.textContent = place || '—';
+    });
+  });
 }
 /* The dashboard background is a real fixed layer (not a body background):
    body backgrounds are unreliable for glass — backdrop filters don't
@@ -1050,10 +1097,11 @@ async function viewLocations(main) {
     const el = document.getElementById('locList');
     if (!el) return;
     el.innerHTML = locs.length
-      ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Driver</th><th>Speed</th><th>Latitude</th><th>Longitude</th><th>Last update</th></tr></thead><tbody>' +
-        locs.map(l => '<tr><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + speedText(l) + '</td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
+      ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Driver</th><th>Speed</th><th>Latitude</th><th>Longitude</th><th>City / State</th><th>Last update</th></tr></thead><tbody>' +
+        locs.map(l => '<tr><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + speedText(l) + '</td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td><span class="city-slot" data-city-lat="' + esc(l.lat) + '" data-city-lng="' + esc(l.lng) + '">Locating…</span></td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
         '</tbody></table></div>'
       : '<p class="empty">No driver locations yet — a location appears once a driver signs in and shares theirs.</p>';
+    fillCitySlots();
   };
   const loadLocs = async () => {
     if (state.adminView !== 'locations') return;
@@ -1084,9 +1132,13 @@ async function viewLocations(main) {
           marker.addListener('click', () => {
             if (state.locInfo) state.locInfo.close();
             state.locInfo = new google.maps.InfoWindow({
-              content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
+              content: '<strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong><br>Near: <span id="loc-iw-city-' + l.driverId + '">Locating…</span><br>Speed: ' + speedText(l) + '<br>Heading: ' + compass(l.heading) + '<br>Last update: ' + esc(fmtDate(l.updatedAt)),
             });
             state.locInfo.open(state.locMap, marker);
+            getCityState(l.lat, l.lng).then(place => {
+              const cel = document.getElementById('loc-iw-city-' + l.driverId);
+              if (cel) cel.textContent = place || '—';
+            });
           });
           state.locMapMarkers.push(marker);
           bounds.extend(pos);
