@@ -343,6 +343,14 @@ body.dash-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .fleet-row:last-child { border-bottom: none; }
 .fleet-dot { width: 10px; height: 10px; border-radius: 50%; background: #4ade80; flex-shrink: 0; }
 .fleet-dot.off { background: #6b7280; }
+/* A live driver's fleet dot blinks (fades in and out) so you can see at a
+   glance who is online and being tracked right now. */
+.fleet-dot:not(.off) { animation: blink-dot 1.6s infinite; }
+@keyframes blink-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+/* Blinking green dot before the "Live tracking" heading: green + pulsing
+   while at least one driver is live, grey and still when nobody is. */
+.live-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #4ade80; margin-right: 8px; vertical-align: 1px; animation: pulse-dot 1.6s infinite; }
+.live-dot.off { background: #6b7280; animation: none; }
 @media (max-width: 900px) {
   .dash-main { grid-template-columns: 1fr; }
   .dash-track { order: -1; }

@@ -387,7 +387,7 @@ async function viewDashboard(main) {
     (list.length ? list.map(d => dashDriverCard(d, activeLoadByDriver[d.id], rcByLoad, locByDriver[d.id] || d.location, isLive(d))).join('') : '<p class="empty">No drivers yet. Add one from the Drivers page.</p>') +
     '</div>' +
     '<div class="dash-track">' +
-    '<div class="glass-panel"><h2 style="margin-top:0">Live tracking</h2><div id="dashMap" class="dash-map"></div><p class="small muted" id="dashMapNote" style="display:none"></p></div>' +
+    '<div class="glass-panel"><h2 style="margin-top:0"><span class="live-dot off" id="dashLiveDot"></span>Live tracking</h2><div id="dashMap" class="dash-map"></div><p class="small muted" id="dashMapNote" style="display:none"></p></div>' +
     '<div class="glass-panel mt" id="dashFleet"></div>' +
     '</div></div>';
   renderAdminSidebar(pendingReq);
@@ -404,6 +404,13 @@ async function viewDashboard(main) {
     const drivers = driverList || list;
     const byId = {};
     locList.forEach(l => { byId[l.driverId] = l; });
+    // The dot before "Live tracking" blinks green while at least one
+    // driver is live (fresh location), grey when nobody is.
+    const liveDot = document.getElementById('dashLiveDot');
+    if (liveDot) {
+      const anyLive = drivers.some(d => d.active !== false && locFresh(byId[d.id] || d.location));
+      liveDot.className = 'live-dot' + (anyLive ? '' : ' off');
+    }
     el.innerHTML = '<h2 style="margin-top:0">Fleet</h2>' + (drivers.length ? drivers.map(d => {
       const l = byId[d.id] || d.location;
       const on = d.active !== false && locFresh(l);
