@@ -106,6 +106,9 @@ function serializeTruck(t) {
     yardStatus: t.yardStatus,
     driverId: t.driverId ?? null,
     driverName: t.driverId ? getDriverName(t.driverId) : null,
+    odometerMi: t.odometerMi ?? null,
+    odometerUpdatedAt: t.odometerUpdatedAt ?? null,
+    engineHours: t.engineHours ?? null,
   };
 }
 
@@ -1113,6 +1116,34 @@ admin.post('/trucks/:id/yard-status', (req, res) => {
   res.json(serializeTruck(db.prepare('SELECT * FROM trucks WHERE id = ?').get(truck.id)));
 });
 
+// Latest ELD odometer for a truck (pulled from TRC eLOGS). Stores the
+// newest reading on the truck row; the Locations page reads it back via
+// /api/admin/locations and /api/admin/trucks. recordedAt is when the ELD
+// recorded the reading (defaults to now); engineHours is optional and
+// only overwritten when a value is sent.
+admin.post('/trucks/:id/odometer', (req, res) => {
+  const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(req.params.id);
+  if (!truck) return err(res, 404, 'Truck not found');
+  const { odometerMi, engineHours, recordedAt } = req.body || {};
+  const miles = Number(odometerMi);
+  if (odometerMi === undefined || odometerMi === null || !Number.isFinite(miles) || miles < 0)
+    return err(res, 400, 'odometerMi must be a non-negative number');
+  let hours = null;
+  if (engineHours !== undefined && engineHours !== null && engineHours !== '') {
+    hours = Number(engineHours);
+    if (!Number.isFinite(hours) || hours < 0) return err(res, 400, 'engineHours must be a non-negative number');
+  }
+  let at = now();
+  if (recordedAt) {
+    const d = new Date(recordedAt);
+    if (isNaN(d)) return err(res, 400, 'recordedAt must be a valid date');
+    at = d.toISOString();
+  }
+  db.prepare('UPDATE trucks SET odometerMi = ?, odometerUpdatedAt = ?, engineHours = COALESCE(?, engineHours) WHERE id = ?')
+    .run(Math.round(miles), at, hours, truck.id);
+  res.json(serializeTruck(db.prepare('SELECT * FROM trucks WHERE id = ?').get(truck.id)));
+});
+
 admin.get('/trailers', (_req, res) => {
   res.json(db.prepare('SELECT * FROM trailers ORDER BY unitNumber').all().map(serializeTrailer));
 });
@@ -1382,7 +1413,27 @@ admin.get('/locations', (_req, res) => {
     )
     .all();
   res.json(
-    rows.map((r) => ({ driverId: r.driverId, driverName: r.driverName, lat: r.lat, lng: r.lng, speedMph: r.speedMph, heading: r.heading, updatedAt: r.updatedAt })),
+    rows.map((r) => {
+      // The driver's current truck/trailer ride along so the Locations
+      // cards can show the units and the truck's live ELD odometer.
+      const truck = db.prepare('SELECT * FROM trucks WHERE driverId = ?').get(r.driverId);
+      const trailer = db.prepare('SELECT unitNumber FROM trailers WHERE driverId = ?').get(r.driverId);
+      return {
+        driverId: r.driverId,
+        driverName: r.driverName,
+        lat: r.lat,
+        lng: r.lng,
+        speedMph: r.speedMph,
+        heading: r.heading,
+        updatedAt: r.updatedAt,
+        truckId: truck ? truck.id : null,
+        truckUnit: truck ? truck.unitNumber : null,
+        trailerUnit: trailer ? trailer.unitNumber : null,
+        odometerMi: truck ? (truck.odometerMi ?? null) : null,
+        odometerUpdatedAt: truck ? (truck.odometerUpdatedAt ?? null) : null,
+        engineHours: truck ? (truck.engineHours ?? null) : null,
+      };
+    }),
   );
 });
 

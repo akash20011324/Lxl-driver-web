@@ -149,6 +149,8 @@ async function boot() {
   removeDashBgLayer();
   document.body.classList.remove('docs-bg');
   removeDocsBgLayer();
+  document.body.classList.remove('loc-bg');
+  removeLocBgLayer();
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page"><p class="muted">Loading…</p></div>';
   // If we already have a token, try to resume the session.
@@ -456,6 +458,8 @@ async function renderAdminView(view) {
   removeDashBgLayer();
   document.body.classList.remove('docs-bg');
   removeDocsBgLayer();
+  document.body.classList.remove('loc-bg');
+  removeLocBgLayer();
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -778,10 +782,15 @@ function driverColor(driverId) {
   const n = Number(driverId);
   return DRIVER_COLORS[(Number.isFinite(n) ? Math.abs(n) : 0) % DRIVER_COLORS.length];
 }
-/* Coloured circle pin with the driver's initial. */
-function driverPinIcon(name, driverId) {
+/* Coloured circle pin with the driver's initial. The selected driver's
+   pin is bigger with a gold ring so it stands out on the Locations map. */
+function driverPinIcon(name, driverId, selected) {
   const initial = String(name || '?').trim().charAt(0).toUpperCase();
   const color = driverColor(driverId);
+  if (selected) {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><circle cx="24" cy="24" r="21" fill="' + color + '" stroke="#F2B705" stroke-width="4"/><text x="24" y="31" font-size="20" font-weight="bold" text-anchor="middle" fill="#FFFFFF" font-family="Arial">' + initial + '</text></svg>';
+    return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg), scaledSize: new google.maps.Size(48, 48), anchor: new google.maps.Point(24, 24) };
+  }
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><circle cx="18" cy="18" r="16" fill="' + color + '" stroke="#FFFFFF" stroke-width="2"/><text x="18" y="24" font-size="16" font-weight="bold" text-anchor="middle" fill="#FFFFFF" font-family="Arial">' + initial + '</text></svg>';
   return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg), scaledSize: new google.maps.Size(36, 36), anchor: new google.maps.Point(18, 18) };
 }
@@ -866,6 +875,19 @@ function ensureDashBgLayer() {
 }
 function removeDashBgLayer() {
   const layer = document.getElementById('dashBgLayer');
+  if (layer) layer.remove();
+}
+/* The Locations background is a real fixed layer too — same pattern as
+   the dashboard / Rate Cons / Documents layers. */
+function ensureLocBgLayer() {
+  if (!document.getElementById('locBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'locBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeLocBgLayer() {
+  const layer = document.getElementById('locBgLayer');
   if (layer) layer.remove();
 }
 
@@ -1635,22 +1657,56 @@ async function viewDispatch(main) {
 
 /* ---------- Locations (live map) ---------- */
 async function viewLocations(main) {
-  main.innerHTML = '<h1>Locations</h1><p class="muted">Live locations of your drivers — last known position shows even after a driver signs out. Refreshes every 10 seconds.</p>' +
-    '<div id="map"></div><div id="locList" class="mt"></div>';
+  document.body.classList.add('loc-bg'); // daytime highway photo + liquid glass (removed on view switch)
+  ensureLocBgLayer();
+  main.innerHTML = '<div class="loc-page">' +
+    '<div class="loc-head"><h1>Locations</h1><p class="muted">Live locations of your drivers — last known position shows even after a driver signs out. Refreshes every 10 seconds. The road colours on the map are live traffic.</p></div>' +
+    '<div class="loc-layout" id="locLayout">' +
+      '<div class="loc-map-panel"><div id="map"></div><p class="small loc-map-note" id="locMapNote" style="display:none"></p></div>' +
+      '<div class="loc-search"><input id="locSearch" type="search" placeholder="Search driver — name, truck, trailer or city" autocomplete="off"></div>' +
+      '<p class="loc-nomatch" id="locNoMatch" style="display:none">No driver matches that search.</p>' +
+      '<p class="empty loc-empty" id="locEmpty" style="display:none">No driver locations yet — a location appears once a driver signs in and shares theirs.</p>' +
+    '</div></div>';
   state.locMap = null;
   state.locMapMarkers = [];
+  state.locTraffic = null;
+  state.locMapFitted = false;
+  const LIVE_MS = 15 * 60 * 1000; // same freshness window as the dashboard's live dot
   const compass = (h) => {
     if (typeof h !== 'number') return '—';
     const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
     return dirs[Math.round(h / 45) % 8] + ' (' + Math.round(h) + '°)';
   };
   const speedText = (l) => (typeof l.speedMph === 'number' ? Math.round(l.speedMph) + ' mph' : '—');
-  // Clicking a driver row selects that driver on the map: the map centers
-  // on his pin and his popup opens. The selection survives the 10s
-  // refresh (the popup is re-opened on the rebuilt marker).
+  const isLive = (l) => !!(l && l.updatedAt && (Date.now() - Date.parse(l.updatedAt) < LIVE_MS));
+  const fmtMiles = (v) => Number(v).toLocaleString('en-US');
+  // Clicking a driver card selects that driver: the card lights up gold,
+  // his pin grows a gold ring, the map centers on him (traffic stays on)
+  // and his popup opens. Clicking anywhere else pops the selection out.
+  // The selection survives the 10s refresh (the popup is re-opened on
+  // the rebuilt marker).
   let selectedDriverId = null;
+  let searchQuery = '';
   let lastLocs = [];
   const byDriver = {}; // driverId -> { loc, marker }
+  const layout = document.getElementById('locLayout');
+  // The map panel spans grid rows sized by the search bar and the first
+  // card, so its height changes as cards render / the search filters /
+  // the window resizes — nudge Google Maps to resize (keeping the
+  // center) or it can paint grey or clipped.
+  const nudgeMap = () => {
+    if (!state.locMap || !window.google || !google.maps) return;
+    const c = state.locMap.getCenter();
+    google.maps.event.trigger(state.locMap, 'resize');
+    if (c) state.locMap.setCenter(c);
+  };
+  state.locNudgeMap = nudgeMap;
+  if (!state.locResizeBound) {
+    state.locResizeBound = true;
+    window.addEventListener('resize', () => {
+      if (state.adminView === 'locations' && state.locNudgeMap) state.locNudgeMap();
+    });
+  }
   const openDriverPopup = (l, marker) => {
     if (state.locInfo) state.locInfo.close();
     state.locInfo = new google.maps.InfoWindow({
@@ -1662,32 +1718,87 @@ async function viewLocations(main) {
       if (cel) cel.textContent = place || '—';
     });
   };
+  const paintSelection = () => {
+    if (layout) layout.querySelectorAll('.loc-card').forEach(card => {
+      card.classList.toggle('selected', Number(card.dataset.driverId) === selectedDriverId);
+    });
+    Object.keys(byDriver).forEach(id => {
+      const rec = byDriver[id];
+      if (rec && rec.marker) rec.marker.setIcon(driverPinIcon(rec.loc.driverName || '', rec.loc.driverId, Number(id) === selectedDriverId));
+    });
+  };
   const selectDriver = (driverId) => {
     selectedDriverId = driverId;
-    renderList(lastLocs);
+    paintSelection();
     const hit = byDriver[driverId];
     if (hit && state.locMap) {
       state.locMap.setCenter({ lat: Number(hit.loc.lat), lng: Number(hit.loc.lng) });
       state.locMap.setZoom(15);
       openDriverPopup(hit.loc, hit.marker);
     }
+    nudgeMap();
   };
-  const renderList = (locs) => {
-    const el = document.getElementById('locList');
-    if (!el) return;
-    el.innerHTML = locs.length
-      ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Driver</th><th>Speed</th><th>Latitude</th><th>Longitude</th><th>City / State</th><th>Last update</th></tr></thead><tbody>' +
-        locs.map(l => '<tr class="loc-row' + (selectedDriverId !== null && l.driverId === selectedDriverId ? ' selected' : '') + '" data-driver-id="' + l.driverId + '"><td><strong>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</strong></td><td>' + speedText(l) + '</td><td>' + esc(l.lat) + '</td><td>' + esc(l.lng) + '</td><td><span class="city-slot" data-city-lat="' + esc(l.lat) + '" data-city-lng="' + esc(l.lng) + '">Locating…</span></td><td>' + fmtDate(l.updatedAt) + '</td></tr>').join('') +
-        '</tbody></table></div>'
-      : '<p class="empty">No driver locations yet — a location appears once a driver signs in and shares theirs.</p>';
-    if (!el.dataset.bound) {
-      el.dataset.bound = '1';
-      el.addEventListener('click', (e) => {
-        const row = e.target.closest('tr.loc-row');
-        if (row) selectDriver(Number(row.dataset.driverId));
-      });
-    }
+  const deselectDriver = () => {
+    if (selectedDriverId === null) return;
+    selectedDriverId = null;
+    paintSelection();
+    if (state.locInfo) state.locInfo.close();
+    nudgeMap();
+  };
+  const cardHtml = (l) => {
+    const live = isLive(l);
+    const units = [l.truckUnit ? 'Truck ' + l.truckUnit : null, l.trailerUnit ? 'Trailer ' + l.trailerUnit : null].filter(Boolean).join(' · ') || 'No truck / trailer assigned';
+    const search = (String(l.driverName || '') + ' truck ' + (l.truckUnit || '') + ' trailer ' + (l.trailerUnit || '')).toLowerCase();
+    const odo = (l.odometerMi === null || l.odometerMi === undefined)
+      ? '<div class="loc-mileage-v">—</div>'
+      : '<div class="loc-mileage-v">' + fmtMiles(l.odometerMi) + ' <span>mi</span></div>';
+    const caption = 'Live from TRC eLOGS — the truck\'s ELD odometer' + (l.odometerUpdatedAt ? ' · ' + esc(fmtDate(l.odometerUpdatedAt)) : '');
+    return '<article class="loc-card' + (selectedDriverId !== null && l.driverId === selectedDriverId ? ' selected' : '') + '" data-driver-id="' + l.driverId + '" data-search="' + esc(search) + '">' +
+      '<div class="loc-card-head"><div class="loc-card-id"><h3>' + esc(l.driverName || ('Driver ' + l.driverId)) + '</h3><div class="loc-units">' + esc(units) + '</div></div>' +
+      '<span class="status-pill' + (live ? '' : ' off') + '"><span class="dot"></span>' + (live ? 'Driving' : 'Offline') + '</span></div>' +
+      '<div class="loc-speed"><span class="loc-speed-num">' + (typeof l.speedMph === 'number' ? Math.round(l.speedMph) : '—') + '</span><span class="loc-speed-unit">mph</span><span class="loc-speed-label">SPEED</span></div>' +
+      '<div class="loc-meta">' +
+        '<div><span class="k">Near</span><span class="city-slot" data-city-lat="' + esc(l.lat) + '" data-city-lng="' + esc(l.lng) + '">Locating…</span></div>' +
+        '<div><span class="k">Coordinates</span>' + esc(Number(l.lat).toFixed(5)) + ', ' + esc(Number(l.lng).toFixed(5)) + '</div>' +
+        '<div><span class="k">Heading</span>' + compass(l.heading) + '</div>' +
+        '<div><span class="k">Last update</span>' + esc(fmtDate(l.updatedAt)) + '</div>' +
+      '</div>' +
+      '<div class="loc-mileage"><div class="loc-mileage-k">TRUCK MILEAGE · LIVE</div>' + odo +
+      '<div class="loc-mileage-cap">' + caption + '</div></div>' +
+    '</article>';
+  };
+  // Cards are direct children of the grid layout (after the placed map
+  // panel and search bar), so they auto-flow in API order: first card
+  // beside the map, the rest underneath it two per row. Filtered-out
+  // cards are display:none, so the visible ones reflow with no gaps.
+  const renderCards = (locs) => {
+    if (!layout) return;
+    layout.querySelectorAll('.loc-card').forEach(el => el.remove());
+    const anchor = document.getElementById('locNoMatch');
+    if (locs.length && anchor) anchor.insertAdjacentHTML('beforebegin', locs.map(cardHtml).join(''));
+    const empty = document.getElementById('locEmpty');
+    if (empty) empty.style.display = locs.length ? 'none' : '';
     fillCitySlots();
+    applyFilter();
+  };
+  const applyFilter = () => {
+    if (!layout) return;
+    const q = searchQuery.trim().toLowerCase();
+    let visible = 0;
+    layout.querySelectorAll('.loc-card').forEach(card => {
+      const hit = !q || (card.dataset.search || '').includes(q) || card.textContent.toLowerCase().includes(q);
+      card.style.display = hit ? '' : 'none';
+      const rec = byDriver[Number(card.dataset.driverId)];
+      if (rec && rec.marker) rec.marker.setVisible(hit);
+      if (hit) visible += 1;
+    });
+    const noMatch = document.getElementById('locNoMatch');
+    if (noMatch) noMatch.style.display = (q && lastLocs.length && visible === 0) ? '' : 'none';
+    if (selectedDriverId !== null) {
+      const sel = layout.querySelector('.loc-card[data-driver-id="' + selectedDriverId + '"]');
+      if (!sel || sel.style.display === 'none') deselectDriver();
+    }
+    nudgeMap();
   };
   const loadLocs = async () => {
     if (state.adminView !== 'locations') return;
@@ -1695,16 +1806,27 @@ async function viewLocations(main) {
       const locs = await api('/api/admin/locations');
       const list = Array.isArray(locs) ? locs : [];
       lastLocs = list;
-      renderList(list);
       const mapEl = document.getElementById('map');
       if (mapEl && !state.locMap) {
         const g = await ensureGoogleMaps();
         if (!g) {
-          mapEl.outerHTML = '<div class="card"><p><strong>Map unavailable</strong> — Google Maps is not set up yet (the map key is missing). Driver locations are listed below.</p></div>';
+          mapEl.style.display = 'none';
+          const note = document.getElementById('locMapNote');
+          if (note) { note.style.display = 'block'; note.textContent = 'Map unavailable — Google Maps is not set up yet (the map key is missing). Driver locations are shown in the cards.'; }
         } else {
           state.locMap = new g.Map(mapEl, { center: { lat: 39.7684, lng: -86.1581 }, zoom: 5, mapTypeId: 'hybrid', streetViewControl: false });
+          // Live traffic ON by default: green / amber / red road colours
+          // show at a glance whether a driver is stuck in traffic. The
+          // built-in Map | Satellite control stays available.
+          state.locTraffic = new google.maps.TrafficLayer();
+          state.locTraffic.setMap(state.locMap);
+          // The panel reaches its final size only after the grid lays
+          // out — resize the map into it or it can paint grey.
+          requestAnimationFrame(nudgeMap);
+          setTimeout(nudgeMap, 350);
         }
       }
+      renderCards(list);
       if (state.locMap && window.google && google.maps) {
         (state.locMapMarkers || []).forEach(m => m.setMap(null));
         state.locMapMarkers = [];
@@ -1715,22 +1837,38 @@ async function viewLocations(main) {
           const pos = { lat: Number(l.lat), lng: Number(l.lng) };
           const marker = new google.maps.Marker({
             position: pos, map: state.locMap, title: l.driverName || ('Driver ' + l.driverId),
-            icon: driverPinIcon(l.driverName || '', l.driverId),
+            icon: driverPinIcon(l.driverName || '', l.driverId, selectedDriverId !== null && l.driverId === selectedDriverId),
           });
-          marker.addListener('click', () => { selectedDriverId = l.driverId; renderList(lastLocs); openDriverPopup(l, marker); });
+          marker.addListener('click', () => selectDriver(l.driverId));
           state.locMapMarkers.push(marker);
           byDriver[l.driverId] = { loc: l, marker };
           bounds.extend(pos);
         });
+        applyFilter(); // sync marker visibility with the search box
         if (selectedDriverId !== null && byDriver[selectedDriverId]) {
           // Keep the selected driver's popup open across refreshes, but
           // don't re-center — the user may have panned the map.
           openDriverPopup(byDriver[selectedDriverId].loc, byDriver[selectedDriverId].marker);
-        } else if (state.locMapMarkers.length === 1) { state.locMap.setCenter(state.locMapMarkers[0].getPosition()); state.locMap.setZoom(12); }
-        else if (state.locMapMarkers.length > 1) { state.locMap.fitBounds(bounds); }
+        } else if (!state.locMapFitted && state.locMapMarkers.length === 1) {
+          state.locMap.setCenter(state.locMapMarkers[0].getPosition()); state.locMap.setZoom(12); state.locMapFitted = true;
+        } else if (!state.locMapFitted && state.locMapMarkers.length > 1) {
+          state.locMap.fitBounds(bounds); state.locMapFitted = true;
+        }
+        nudgeMap();
       }
     } catch (e) { showError(e); }
   };
+  // Card clicks select the driver; clicks anywhere else in the layout
+  // (but not on the map itself or in the search box) pop the selection
+  // out — the same behaviour as the approved preview.
+  layout.addEventListener('click', (e) => {
+    const card = e.target.closest('.loc-card');
+    if (card) { selectDriver(Number(card.dataset.driverId)); return; }
+    if (e.target.closest('.loc-map-panel') || e.target.closest('.loc-search')) return;
+    deselectDriver();
+  });
+  const searchInput = document.getElementById('locSearch');
+  if (searchInput) searchInput.addEventListener('input', () => { searchQuery = searchInput.value || ''; applyFilter(); });
   await loadLocs();
   addTimer(loadLocs, 10000);
 }

@@ -72,7 +72,10 @@ CREATE TABLE IF NOT EXISTS trucks (
   vin TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
   yardStatus TEXT NOT NULL DEFAULT 'yard' CHECK (yardStatus IN ('yard', 'road')),
-  driverId INTEGER UNIQUE REFERENCES users(id)
+  driverId INTEGER UNIQUE REFERENCES users(id),
+  odometerMi INTEGER,
+  odometerUpdatedAt TEXT,
+  engineHours REAL
 );
 
 CREATE TABLE IF NOT EXISTS trailers (
@@ -246,6 +249,19 @@ export function openDb(dataDir) {
   }
   if (!locColumns.some((c) => c.name === 'heading')) {
     db.exec('ALTER TABLE locations ADD COLUMN heading REAL');
+  }
+  // Migrate databases created before TRC odometer readings: the latest
+  // ELD odometer (and engine hours) per truck, shown live on the admin
+  // Locations page (fresh databases get them from the schema above).
+  const truckColumns = db.prepare('PRAGMA table_info(trucks)').all();
+  if (!truckColumns.some((c) => c.name === 'odometerMi')) {
+    db.exec('ALTER TABLE trucks ADD COLUMN odometerMi INTEGER');
+  }
+  if (!truckColumns.some((c) => c.name === 'odometerUpdatedAt')) {
+    db.exec('ALTER TABLE trucks ADD COLUMN odometerUpdatedAt TEXT');
+  }
+  if (!truckColumns.some((c) => c.name === 'engineHours')) {
+    db.exec('ALTER TABLE trucks ADD COLUMN engineHours REAL');
   }
   // Migrate databases created before warehouse names: add the pickup /
   // delivery warehouse (facility) name to loads (fresh databases get
