@@ -2218,11 +2218,14 @@ admin.post('/outlook/send-documents', async (req, res) => {
     }
     const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
     const readToken = await outlookAccessToken(user);
+    // No $orderby here: Exchange rejects filter+orderby on different
+    // properties ("The restriction or sort order is too complex"), so
+    // the newest message in the thread is picked client-side instead.
     const latest = await outlookGraph(
       readToken,
-      `/me/messages?${q({ $filter: `conversationId eq '${String(conversationId).replace(/'/g, "''")}'`, $orderby: 'receivedDateTime desc', $top: '1', $select: 'id' })}`,
+      `/me/messages?${q({ $filter: `conversationId eq '${String(conversationId).replace(/'/g, "''")}'`, $top: '50', $select: 'id,receivedDateTime' })}`,
     );
-    const lastMsg = (latest.value || [])[0];
+    const lastMsg = (latest.value || []).slice().sort((a, b) => new Date(b.receivedDateTime) - new Date(a.receivedDateTime))[0];
     if (!lastMsg) return err(res, 404, 'That conversation could not be found');
     sendToken = await outlookSendAccessToken(user);
     // Build the reply as a draft first: files over 3 MB can only be
