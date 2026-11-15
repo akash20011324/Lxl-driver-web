@@ -115,10 +115,12 @@ function serializeLoad(l) {
     driverId: l.driverId,
     driverName: getDriverName(l.driverId),
     pickupLocation: l.pickupLocation,
+    pickupWarehouse: l.pickupWarehouse ?? null,
     pickupAt: l.pickupAt,
     pickupTimezone: l.pickupTimezone,
     pickupNumber: l.pickupNumber ?? null,
     deliveryLocation: l.deliveryLocation,
+    deliveryWarehouse: l.deliveryWarehouse ?? null,
     deliveryAt: l.deliveryAt,
     deliveryTimezone: l.deliveryTimezone,
     deliveryNumber: l.deliveryNumber ?? null,
@@ -970,41 +972,49 @@ admin.post('/loads', (req, res) => {
     driverId,
     reference,
     pickupLocation,
+    pickupWarehouse,
     pickupAt,
     pickupTimezone,
     pickupNumber,
     deliveryLocation,
+    deliveryWarehouse,
     deliveryAt,
     deliveryTimezone,
     deliveryNumber,
     notes,
   } = req.body || {};
-  if (!driverId || !reference || !pickupLocation || !pickupAt || !pickupTimezone || !deliveryLocation || !deliveryAt || !deliveryTimezone)
+  if (!driverId || !reference || !pickupLocation || !pickupAt || !deliveryLocation || !deliveryAt)
     return err(res, 400, 'driverId, reference, pickup and delivery details are required');
+  // Timezone is no longer asked in the form — the time is entered in the
+  // admin's local time and stored as UTC; keep the company-base zone as
+  // metadata for older clients.
+  const tz = 'America/Indiana/Indianapolis';
   const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(driverId);
   if (!driverUser) return err(res, 404, 'Driver not found');
   const ts = now();
   const id = db
     .prepare(
-      "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, pickupNumber, deliveryLocation, deliveryAt, deliveryTimezone, deliveryNumber, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+      "INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, deliveryNumber, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     )
     .run(
       reference,
       driverId,
       pickupLocation,
+      pickupWarehouse ?? null,
       pickupAt,
-      pickupTimezone,
+      pickupTimezone || tz,
       pickupNumber ?? null,
       deliveryLocation,
+      deliveryWarehouse ?? null,
       deliveryAt,
-      deliveryTimezone,
+      deliveryTimezone || tz,
       deliveryNumber ?? null,
       notes ?? null,
       ts,
     ).lastInsertRowid;
   deactivateDemo(db); // first real load deactivates demo
   const load = serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(id));
-  notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${reference}: ${pickupLocation} → ${deliveryLocation}.`).catch(() => {});
+  notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${reference}: ${pickupWarehouse || pickupLocation} → ${deliveryWarehouse || deliveryLocation}.`).catch(() => {});
   res.status(201).json(load);
 });
 

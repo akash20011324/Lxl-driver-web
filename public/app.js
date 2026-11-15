@@ -39,6 +39,17 @@ function fmtDateOnly(s) {
   const d = new Date(s);
   return isNaN(d) ? esc(s) : d.toLocaleDateString();
 }
+/* Load route cell: warehouse names (when set) on the bold line, street
+   addresses below. Falls back to plain addresses for older loads. */
+function routeCell(l) {
+  const wh = [l.pickupWarehouse, l.deliveryWarehouse].filter(Boolean).join(' → ');
+  const addr = esc(l.pickupLocation) + ' → ' + esc(l.deliveryLocation);
+  return wh ? '<strong>' + esc(wh) + '</strong><br><span class="muted small">' + addr + '</span>' : addr;
+}
+/* One-line route for summary cards: warehouse names when set, else addresses. */
+function routeLine(l) {
+  return esc(l.pickupWarehouse || l.pickupLocation) + ' → ' + esc(l.deliveryWarehouse || l.deliveryLocation);
+}
 function dollarsToCents(v) {
   if (v === '' || v === null || v === undefined) return null;
   const n = Math.round(parseFloat(v) * 100);
@@ -597,12 +608,12 @@ async function viewLoads(main) {
     state.driversCache.map(d => '<option value="' + d.id + '">' + esc(d.name) + '</option>').join('') + '</select></div>' +
     '<div class="field"><label>Reference *</label><input id="al-ref" required placeholder="e.g. LXL-2482"></div>' +
     '<div class="field"><label>Pickup location *</label><input id="al-pickup" required></div>' +
+    '<div class="field"><label>Pickup warehouse name</label><input id="al-pickup-wh" placeholder="e.g. Walmart DC 6094"></div>' +
     '<div class="field"><label>Pickup date &amp; time *</label><input id="al-pickup-at" type="datetime-local" required></div>' +
-    '<div class="field"><label>Pickup timezone</label><input id="al-pickup-tz" value="America/Indiana/Indianapolis"></div>' +
     '<div class="field"><label>Pickup number</label><input id="al-pickup-no"></div>' +
     '<div class="field"><label>Delivery location *</label><input id="al-delivery" required></div>' +
+    '<div class="field"><label>Delivery warehouse name</label><input id="al-delivery-wh" placeholder="e.g. Amazon PHL6"></div>' +
     '<div class="field"><label>Delivery date &amp; time *</label><input id="al-delivery-at" type="datetime-local" required></div>' +
-    '<div class="field"><label>Delivery timezone</label><input id="al-delivery-tz" value="America/Indiana/Indianapolis"></div>' +
     '<div class="field"><label>Delivery number</label><input id="al-delivery-no"></div>' +
     '</div><div class="field"><label>Notes</label><textarea id="al-notes" rows="2"></textarea></div>' +
     '<div class="form-actions"><button class="btn" type="submit">Assign load</button></div></form></div>' +
@@ -611,7 +622,7 @@ async function viewLoads(main) {
     '</tr></thead><tbody>' +
     list.map(l => '<tr><td><strong>' + esc(l.reference) + '</strong></td>' +
       '<td>' + esc(l.driverName || '—') + '</td>' +
-      '<td>' + esc(l.pickupLocation) + ' → ' + esc(l.deliveryLocation) + '</td>' +
+      '<td>' + routeCell(l) + '</td>' +
       '<td>' + fmtDate(l.pickupAt) + '<br>' + fmtDate(l.deliveryAt) + '</td>' +
       '<td><span class="pill ' + (l.status === 'active' ? 'blue' : l.status === 'completed' ? 'green' : 'red') + '">' + esc(l.status) + '</span></td>' +
       '<td>' + esc(l.bolStatus || '—') + '</td>' +
@@ -629,11 +640,11 @@ async function viewLoads(main) {
       reference: v('al-ref'),
       pickupLocation: v('al-pickup'),
       pickupAt: new Date(v('al-pickup-at')).toISOString(),
-      pickupTimezone: v('al-pickup-tz') || 'America/Indiana/Indianapolis',
       deliveryLocation: v('al-delivery'),
       deliveryAt: new Date(v('al-delivery-at')).toISOString(),
-      deliveryTimezone: v('al-delivery-tz') || 'America/Indiana/Indianapolis',
     };
+    if (v('al-pickup-wh')) body.pickupWarehouse = v('al-pickup-wh');
+    if (v('al-delivery-wh')) body.deliveryWarehouse = v('al-delivery-wh');
     if (v('al-pickup-no')) body.pickupNumber = v('al-pickup-no');
     if (v('al-delivery-no')) body.deliveryNumber = v('al-delivery-no');
     if (v('al-notes')) body.notes = v('al-notes');
@@ -942,7 +953,7 @@ async function viewDriverHome(main) {
     '<div class="card"><h2>Active load</h2>' +
     (load
       ? '<p><strong>' + esc(load.reference) + '</strong> · <span class="pill ' + (load.bolStatus === 'wrong' ? 'red' : 'blue') + '">BOL: ' + esc(load.bolStatus || 'pending') + '</span></p>' +
-        '<p>' + esc(load.pickupLocation) + ' → ' + esc(load.deliveryLocation) + '</p>' +
+        '<p>' + routeLine(load) + '</p>' +
         '<p class="muted small">Pickup: ' + fmtDate(load.pickupAt) + '<br>Delivery: ' + fmtDate(load.deliveryAt) + '</p>' +
         '<button class="btn" onclick="goDriver(\'loads\')">Open load</button>'
       : '<p class="empty">No active load right now.</p>') +
@@ -1073,8 +1084,8 @@ async function viewDriverLoads(main) {
 function activeLoadHtml(l) {
   return '<p><strong>' + esc(l.reference) + '</strong> · <span class="pill ' + (l.bolStatus === 'wrong' ? 'red' : l.bolStatus === 'clean' ? 'green' : 'blue') + '">BOL: ' + esc(l.bolStatus || 'pending') + '</span></p>' +
     '<div class="grid2">' +
-    '<div class="detail-box"><div class="k">Pickup</div><div class="v" style="font-size:16px">' + esc(l.pickupLocation) + '</div><div class="muted small">' + fmtDate(l.pickupAt) + (l.pickupTimezone ? ' (' + esc(l.pickupTimezone) + ')' : '') + (l.pickupNumber ? '<br>Ref: ' + esc(l.pickupNumber) : '') + '</div></div>' +
-    '<div class="detail-box"><div class="k">Delivery</div><div class="v" style="font-size:16px">' + esc(l.deliveryLocation) + '</div><div class="muted small">' + fmtDate(l.deliveryAt) + (l.deliveryTimezone ? ' (' + esc(l.deliveryTimezone) + ')' : '') + (l.deliveryNumber ? '<br>Ref: ' + esc(l.deliveryNumber) : '') + '</div></div>' +
+    '<div class="detail-box"><div class="k">Pickup</div><div class="v" style="font-size:16px">' + esc(l.pickupWarehouse || l.pickupLocation) + '</div><div class="muted small">' + (l.pickupWarehouse ? esc(l.pickupLocation) + '<br>' : '') + fmtDate(l.pickupAt) + (l.pickupNumber ? '<br>Ref: ' + esc(l.pickupNumber) : '') + '</div></div>' +
+    '<div class="detail-box"><div class="k">Delivery</div><div class="v" style="font-size:16px">' + esc(l.deliveryWarehouse || l.deliveryLocation) + '</div><div class="muted small">' + (l.deliveryWarehouse ? esc(l.deliveryLocation) + '<br>' : '') + fmtDate(l.deliveryAt) + (l.deliveryNumber ? '<br>Ref: ' + esc(l.deliveryNumber) : '') + '</div></div>' +
     '</div>' +
     (l.notes ? '<p class="small mt">Notes: ' + esc(l.notes) + '</p>' : '') +
     '<div class="grid2 mt">' +
@@ -1138,7 +1149,7 @@ function pastLoadHtml(l) {
   return '<div class="card" style="cursor:pointer" data-past-load="' + l.id + '">' +
     '<div class="flex-between"><strong>' + esc(l.reference) + '</strong>' +
     '<span class="pill ' + (l.status === 'completed' ? 'green' : 'red') + '">' + esc(l.status) + '</span></div>' +
-    '<p class="small">' + esc(l.pickupLocation) + ' → ' + esc(l.deliveryLocation) + '</p>' +
+    '<p class="small">' + routeLine(l) + '</p>' +
     '<p class="muted small">' + fmtDate(l.pickupAt) + ' → ' + fmtDate(l.deliveryAt) + ' · BOL: ' + esc(l.bolStatus || '—') + ' · tap for details &amp; documents</p>' +
     '<div id="past-' + l.id + '" style="display:none"></div></div>';
 }

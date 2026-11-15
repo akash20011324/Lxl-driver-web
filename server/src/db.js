@@ -80,10 +80,12 @@ CREATE TABLE IF NOT EXISTS loads (
   reference TEXT NOT NULL,
   driverId INTEGER NOT NULL REFERENCES users(id),
   pickupLocation TEXT NOT NULL,
+  pickupWarehouse TEXT,
   pickupAt TEXT NOT NULL,
   pickupTimezone TEXT NOT NULL,
   pickupNumber TEXT,
   deliveryLocation TEXT NOT NULL,
+  deliveryWarehouse TEXT,
   deliveryAt TEXT NOT NULL,
   deliveryTimezone TEXT NOT NULL,
   deliveryNumber TEXT,
@@ -215,6 +217,16 @@ export function openDb(dataDir) {
   }
   if (!locColumns.some((c) => c.name === 'heading')) {
     db.exec('ALTER TABLE locations ADD COLUMN heading REAL');
+  }
+  // Migrate databases created before warehouse names: add the pickup /
+  // delivery warehouse (facility) name to loads (fresh databases get
+  // them from the schema above).
+  const loadColumns = db.prepare('PRAGMA table_info(loads)').all();
+  if (!loadColumns.some((c) => c.name === 'pickupWarehouse')) {
+    db.exec('ALTER TABLE loads ADD COLUMN pickupWarehouse TEXT');
+  }
+  if (!loadColumns.some((c) => c.name === 'deliveryWarehouse')) {
+    db.exec('ALTER TABLE loads ADD COLUMN deliveryWarehouse TEXT');
   }
   db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('demo_active', '0')").run();
   return db;
