@@ -80,7 +80,14 @@ async function api(path, opts) {
   if (ct.indexOf('application/json') !== -1) data = await res.json().catch(() => null);
   if (res.status === 401) {
     signOutLocal();
-    throw new Error('Session expired — please sign in again.');
+    // A failed sign-in must say so: the server's own message tells the
+    // user the credentials were wrong. Every other 401 is an expired
+    // session. (Before this, a wrong password also showed "Session
+    // expired", which sent the owner in circles on his iPad.)
+    const isLogin = path === '/api/auth/login';
+    throw new Error(isLogin
+      ? ((data && data.error) || 'Invalid phone number, email or password')
+      : 'Session expired — please sign in again.');
   }
   if (!res.ok) throw new Error((data && data.error) || ('Request failed (' + res.status + ')'));
   return data;
