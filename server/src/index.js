@@ -55,6 +55,7 @@ function publicUser(u) {
     photoUrl: u.photoUrl ?? null,
     emergencyContact: u.emergencyContact ?? null,
     active: !!u.active,
+    isMainAdmin: !!u.isMainAdmin,
     createdAt: u.createdAt,
   };
 }
@@ -246,6 +247,14 @@ function requireRole(role) {
 }
 
 const requireAdmin = requireRole('admin');
+
+// Only the main admin (the owner, first admin account) can manage admin
+// accounts. Dispatchers can do everything else in the portal.
+const requireMainAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin' || !req.user.isMainAdmin)
+    return err(res, 403, 'Only the main admin can manage admin accounts');
+  next();
+};
 const requireDriver = requireRole('driver');
 
 // ---------------------------------------------------------------------------
@@ -302,7 +311,7 @@ app.post('/api/setup/admin', (req, res) => {
     return err(res, 409, 'Email is already in use');
   const ts = now();
   const id = db
-    .prepare("INSERT INTO users (role, name, email, passwordHash, active, createdAt) VALUES ('admin', ?, ?, ?, 1, ?)")
+    .prepare("INSERT INTO users (role, name, email, passwordHash, isMainAdmin, active, createdAt) VALUES ('admin', ?, ?, ?, 1, 1, ?)")
     .run(name, email, bcrypt.hashSync(password, 10), ts).lastInsertRowid;
   const user = getUserById(id);
   res.status(201).json({ user: publicUser(user), token: createSession(id) });
@@ -715,11 +724,11 @@ admin.get('/drivers', (_req, res) => {
 
 // Admins & dispatchers — any admin can add another Admin Portal login.
 // Dispatchers sign in with email + password, same as the owner.
-admin.get('/admins', (_req, res) => {
+admin.get('/admins', requireMainAdmin, (_req, res) => {
   res.json(db.prepare("SELECT * FROM users WHERE role = 'admin' ORDER BY name").all().map(publicUser));
 });
 
-admin.post('/admins', (req, res) => {
+admin.post('/admins', requireMainAdmin, (req, res) => {
   const { name, email, password } = req.body || {};
   if (!name || !email || !password) return err(res, 400, 'name, email and password are required');
   if (typeof password !== 'string' || password.length < 8)
@@ -735,7 +744,7 @@ admin.post('/admins', (req, res) => {
 
 // Remove an admin / dispatcher login. You cannot delete your own account,
 // and the last active admin cannot be deleted.
-admin.delete('/admins/:id', (req, res) => {
+admin.delete('/admins/:id', requireMainAdmin, (req, res) => {
   const adminUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'admin'").get(req.params.id);
   if (!adminUser) return err(res, 404, 'Admin not found');
   if (adminUser.id === req.user.id) return err(res, 400, 'You cannot delete your own admin account');

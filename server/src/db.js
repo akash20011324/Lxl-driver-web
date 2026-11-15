@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS users (
   emergencyContact TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   isDemo INTEGER NOT NULL DEFAULT 0,
+  isMainAdmin INTEGER NOT NULL DEFAULT 0,
   pushToken TEXT,
   notificationPrefs TEXT,
   createdAt TEXT NOT NULL
@@ -207,6 +208,15 @@ export function openDb(dataDir) {
     if (normalized) {
       db.prepare('UPDATE users SET phoneNormalized = ? WHERE id = ?').run(normalized, u.id);
     }
+  }
+  // Migrate databases created before dispatcher roles: the main admin
+  // (the first admin account, created at setup) can manage admin
+  // accounts; later admins are dispatchers.
+  if (!columns.some((c) => c.name === 'isMainAdmin')) {
+    db.exec('ALTER TABLE users ADD COLUMN isMainAdmin INTEGER NOT NULL DEFAULT 0');
+    db.prepare(
+      "UPDATE users SET isMainAdmin = 1 WHERE role = 'admin' AND id = (SELECT id FROM users WHERE role = 'admin' ORDER BY createdAt ASC, id ASC LIMIT 1)",
+    ).run();
   }
   // Migrate databases created before live speed: add speed (mph) and
   // heading (degrees) to the stored driver location (fresh databases get

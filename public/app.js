@@ -282,7 +282,7 @@ function renderAdminShell() {
 function renderAdminSidebar(pendingRequests) {
   const nav = document.getElementById('adminSidebar');
   if (!nav) return;
-  nav.innerHTML = ADMIN_VIEWS.map(([key, label]) => {
+  nav.innerHTML = ADMIN_VIEWS.filter(([key]) => key !== 'admins' || (state.user && state.user.isMainAdmin)).map(([key, label]) => {
     const badge = (key === 'requests' && pendingRequests > 0)
       ? '<span class="badge">' + pendingRequests + '</span>' : '';
     return '<button data-view="' + key + '" class="' + (state.adminView === key ? 'active' : '') + '">' +
@@ -300,6 +300,10 @@ async function renderAdminView(view) {
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
+  if (view === 'admins' && !(state.user && state.user.isMainAdmin)) {
+    main.innerHTML = '<p class="empty">Only the main admin can manage admin accounts.</p>';
+    return;
+  }
   try {
     if (view === 'dashboard') await viewDashboard(main);
     else if (view === 'drivers') await viewDrivers(main);
@@ -455,7 +459,7 @@ async function viewAdmins(main) {
     '<div class="field"><label for="aa-name">Name *</label><input id="aa-name" required></div>' +
     '<div class="field"><label for="aa-email">Email *</label><input id="aa-email" type="email" required autocomplete="email"></div>' +
     '<div class="field"><label for="aa-pass">Password *</label><input id="aa-pass" type="password" required minlength="8" autocomplete="new-password"></div>' +
-    '</div><p class="small muted">Admins sign in to the Admin Portal with their email and password.</p>' +
+    '</div><p class="small muted">Admins sign in to the Admin Portal with their email and password. New admins are dispatchers: they can do everything except manage other admin accounts — only the main admin can do that.</p>' +
     '<div class="form-actions"><button class="btn" type="submit">Add admin</button></div>' +
     '</form></div>' +
     '<div class="card"><div class="table-wrap"><table><thead><tr>' +
