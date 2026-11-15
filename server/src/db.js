@@ -263,6 +263,16 @@ export function openDb(dataDir) {
   if (!truckColumns.some((c) => c.name === 'engineHours')) {
     db.exec('ALTER TABLE trucks ADD COLUMN engineHours REAL');
   }
+  // One-time seed of the first verified TRC eLOGS odometer readings
+  // (2026-11-15: unit 1301 at 5:52 PM ET, unit 1302 at 6:00 PM ET).
+  // Guarded on odometerMi IS NULL, so it fills only trucks that have
+  // no reading yet and can never overwrite a newer one on later boots.
+  db.prepare(
+    "UPDATE trucks SET odometerMi = 546610, engineHours = 14698, odometerUpdatedAt = '2026-11-15T22:52:00.000Z' WHERE unitNumber = '1301' AND odometerMi IS NULL",
+  ).run();
+  db.prepare(
+    "UPDATE trucks SET odometerMi = 679888, engineHours = 17438.8, odometerUpdatedAt = '2026-11-15T23:00:00.000Z' WHERE unitNumber = '1302' AND odometerMi IS NULL",
+  ).run();
   // Migrate databases created before warehouse names: add the pickup /
   // delivery warehouse (facility) name to loads (fresh databases get
   // them from the schema above).

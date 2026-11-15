@@ -722,6 +722,7 @@ tr.loc-row.selected:hover td { background: rgba(37, 99, 235, 0.35); }
 .unit-card .unit-no { font-size: 19px; font-weight: 700; }
 .unit-card .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
 .unit-card select { width: auto; min-width: 180px; }
+.unit-card input[data-odo-input] { width: 160px; }
 .docs-list { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 #map { height: 460px; width: 100%; border-radius: 12px; border: 1px solid var(--border); background: #111; }
 .leaflet-container { background: #111; color: #111; }

@@ -323,13 +323,26 @@ let sidebarOrderRequested = false;
 async function loadSidebarOrder() {
   if (sidebarOrderRequested) return;
   sidebarOrderRequested = true;
-  try {
-    const res = await api('/api/admin/sidebar-order');
-    if (res && Array.isArray(res.order)) {
-      state.sidebarOrder = res.order;
-      renderAdminSidebar();
+  // The saved order lives on the server; this fetch is the only thing
+  // that applies it. A deploy restart can drop that one fetch, and the
+  // old code latched the flag and silently kept the default order for
+  // the whole session — the sidebar looked "reset" even though the
+  // saved order was untouched. Retry through a restart window; if every
+  // attempt fails, un-latch so the next shell render tries again.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const res = await api('/api/admin/sidebar-order');
+      if (res && Array.isArray(res.order)) {
+        state.sidebarOrder = res.order;
+        renderAdminSidebar();
+      }
+      return;
+    } catch {
+      if (!state.token) { sidebarOrderRequested = false; return; }
+      if (attempt < 5) await new Promise(r => setTimeout(r, 5000));
     }
-  } catch { /* keep the default order */ }
+  }
+  sidebarOrderRequested = false;
 }
 
 // Press-and-drag reordering in Organize mode (pointer events, so it
@@ -1110,7 +1123,15 @@ function unitCard(u, type) {
     '<select data-assign-select>' + driverOpts + '</select>' +
     '<button class="btn btn-ghost btn-sm" data-assign-btn>Assign</button>' +
     '<button class="btn btn-ghost btn-sm" data-paperwork-btn>' + (open ? 'Hide paperwork' : 'Paperwork') + '</button>' +
-    '</div><div class="docs-list" data-paperwork></div></div>';
+    '</div>' +
+    (type === 'truck'
+      ? '<div class="row"><label class="small" for="odo-' + u.id + '">Odometer (mi)</label>' +
+        '<input type="number" min="0" step="1" id="odo-' + u.id + '" data-odo-input data-odo-orig="' + (u.odometerMi ?? '') + '" value="' + (u.odometerMi ?? '') + '" placeholder="No reading yet">' +
+        '<button class="btn btn-ghost btn-sm" data-odo-btn>Save odometer</button>' +
+        (u.odometerUpdatedAt ? '<span class="muted small">Updated ' + esc(fmtDate(u.odometerUpdatedAt)) + '</span>' : '') +
+        '</div>'
+      : '') +
+    '<div class="docs-list" data-paperwork></div></div>';
 }
 function bindUnitCards(main, type) {
   const base = type === 'truck' ? '/api/admin/trucks' : '/api/admin/trailers';
@@ -1134,6 +1155,24 @@ function bindUnitCards(main, type) {
         renderAdminView('equipment');
       } catch (err) { showError(err); }
     });
+    if (type === 'truck') {
+      const odoInput = card.querySelector('[data-odo-input]');
+      card.querySelector('[data-odo-btn]').addEventListener('click', async () => {
+        const raw = odoInput.value.trim();
+        const miles = Number(raw);
+        if (raw === '' || !Number.isFinite(miles) || miles < 0) {
+          showError(new Error('Enter a valid odometer reading (0 or more).'));
+          return;
+        }
+        // Unchanged since the card rendered — nothing to save.
+        if (odoInput.dataset.odoOrig !== '' && miles === Number(odoInput.dataset.odoOrig)) return;
+        try {
+          await api('/api/admin/trucks/' + id + '/odometer', { method: 'POST', body: JSON.stringify({ odometerMi: miles }) });
+          toast('Odometer updated.', 'ok');
+          renderAdminView('equipment');
+        } catch (err) { showError(err); }
+      });
+    }
     card.querySelector('[data-paperwork-btn]').addEventListener('click', async () => {
       state.expandedPaperwork[key] = !state.expandedPaperwork[key];
       const box = card.querySelector('[data-paperwork]');
