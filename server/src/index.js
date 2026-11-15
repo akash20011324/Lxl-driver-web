@@ -1263,25 +1263,47 @@ admin.get('/maps-config', (_req, res) => {
 });
 
 // Reverse-geocode lat/lng -> "City, ST" on the server. The browser routes
-// both proved unreliable: google.maps.importLibrary isn't reliably present
-// with the classic Maps loader, and the Geocoding web-service endpoint
-// doesn't answer browser fetches (CORS). From the server, the same key
-// works — the Referer header satisfies its HTTP-referrer restriction.
+// both proved unreliable (importLibrary not reliably present; the Geocoding
+// web service doesn't answer browser fetches). Google is tried first; if
+// it denies the call (API not enabled / key restriction), Nominatim —
+// already used by this server for delivery addresses — is the fallback.
 admin.get('/geocode', async (req, res) => {
   const lat = Number(req.query.lat), lng = Number(req.query.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return err(res, 400, 'lat and lng are required');
   const key = process.env.GOOGLE_MAPS_API_KEY;
-  if (!key) return res.json({ place: null, status: 'NO_KEY' });
+  if (key) {
+    try {
+      const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + lat + ',' + lng + '&key=' + encodeURIComponent(key), { headers: { Referer: 'https://app.lubanaxpress.com/' } });
+      const j = await r.json();
+      if (j.status === 'OK' && j.results && j.results.length) {
+        const comps = j.results[0].address_components || [];
+        const find = (type) => { const c = comps.find(c => (c.types || []).includes(type)); return c ? c.short_name : null; };
+        const city = find('locality') || find('sublocality') || find('postal_town') || find('administrative_area_level_2');
+        const state = find('administrative_area_level_1');
+        const place = (city && state) ? (city + ', ' + state) : (city || state || null);
+        if (place) { console.log('geocode google OK', lat, lng, '->', place); return res.json({ place, status: 'OK', source: 'google' }); }
+      }
+      console.log('geocode google failed', lat, lng, j.status, j.error_message || '');
+    } catch (e) { console.log('geocode google error', lat, lng, String((e && e.message) || e)); }
+  } else {
+    console.log('geocode google skipped: NO_KEY');
+  }
   try {
-    const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + lat + ',' + lng + '&key=' + encodeURIComponent(key), { headers: { Referer: 'https://app.lubanaxpress.com/' } });
-    const j = await r.json();
-    if (j.status !== 'OK' || !j.results || !j.results.length) return res.json({ place: null, status: j.status || 'ERROR', error: j.error_message || null });
-    const comps = j.results[0].address_components || [];
-    const find = (type) => { const c = comps.find(c => (c.types || []).includes(type)); return c ? c.short_name : null; };
-    const city = find('locality') || find('sublocality') || find('postal_town') || find('administrative_area_level_2');
-    const state = find('administrative_area_level_1');
-    return res.json({ place: (city && state) ? (city + ', ' + state) : (city || state || null), status: 'OK' });
-  } catch (e) { return res.json({ place: null, status: 'ERROR', error: String((e && e.message) || e) }); }
+    const r = await fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&zoom=10&addressdetails=1', { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' } });
+    if (r.ok) {
+      const j = await r.json();
+      const a = j.address || {};
+      const city = a.city || a.town || a.village || a.municipality || a.county || null;
+      const iso = a['ISO3166-2-lvl4'] || '';
+      const state = (iso.indexOf('US-') === 0 ? iso.slice(3) : null) || a.state_code || a.state || null;
+      const place = (city && state) ? (city + ', ' + state) : (city || state || null);
+      if (place) { console.log('geocode nominatim OK', lat, lng, '->', place); return res.json({ place, status: 'OK', source: 'nominatim' }); }
+      console.log('geocode nominatim no place', lat, lng, JSON.stringify(a));
+    } else {
+      console.log('geocode nominatim HTTP', r.status);
+    }
+  } catch (e) { console.log('geocode nominatim error', lat, lng, String((e && e.message) || e)); }
+  return res.json({ place: null, status: 'FAILED' });
 });
 
 admin.get('/messages/:driverId', (req, res) => {
