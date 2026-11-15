@@ -613,8 +613,12 @@ async function getCityState(lat, lng) {
   const pr = (async () => {
     try {
       const g = await ensureGoogleMaps();
-      if (!g) return null;
-      const geocoder = new g.Geocoder();
+      if (!g || !google.maps.importLibrary) return null;
+      // Geocoder lives in the modular "geocoding" library — the classic
+      // google.maps.Geocoder is not reliably present, which made lookups
+      // silently return nothing (city/state showed "—").
+      const { Geocoder } = await google.maps.importLibrary('geocoding');
+      const geocoder = new Geocoder();
       const out = await new Promise((resolve) => geocoder.geocode({ location: { lat: Number(lat), lng: Number(lng) } }, (results, status) => resolve({ results, status })));
       if (out.status !== 'OK' || !out.results || !out.results.length) return null;
       const comps = out.results[0].address_components || [];
