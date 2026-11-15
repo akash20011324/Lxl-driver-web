@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   createdAt TEXT NOT NULL
 );
 
+-- Outlook sign-in states: kept in SQLite (not memory) so a server restart
+-- or redeploy cannot wipe a sign-in that is still in progress.
+CREATE TABLE IF NOT EXISTS outlook_states (
+  state TEXT PRIMARY KEY,
+  userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  createdAt INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS trucks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   unitNumber TEXT NOT NULL UNIQUE,

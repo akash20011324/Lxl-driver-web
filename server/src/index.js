@@ -327,12 +327,12 @@ app.get('/api/outlook/callback', async (req, res) => {
   const fail = (msg) =>
     res.status(400).send(`<h1>Outlook connection failed</h1><p>${safe(msg)}</p><p><a href="/">Back to LXL Driver</a></p>`);
   if (error) return fail(error_description || error);
-  const pending = state ? outlookStates.get(state) : null;
-  if (!pending || Date.now() - pending.createdAt > 10 * 60 * 1000) {
-    if (state) outlookStates.delete(state);
+  const pending = state ? db.prepare('SELECT userId, createdAt FROM outlook_states WHERE state = ?').get(state) : null;
+  if (!pending || Date.now() - pending.createdAt > OUTLOOK_STATE_TTL_MS) {
+    if (state) db.prepare('DELETE FROM outlook_states WHERE state = ?').run(state);
     return fail('This sign-in link expired — start again from the Rate Confirmations page.');
   }
-  outlookStates.delete(state);
+  db.prepare('DELETE FROM outlook_states WHERE state = ?').run(state);
   try {
     const tokens = await outlookTokenRequest({
       client_id: OUTLOOK_CLIENT_ID,
@@ -1320,7 +1320,7 @@ const OUTLOOK_REDIRECT_URI =
   process.env.OUTLOOK_REDIRECT_URI || 'https://app.lubanaxpress.com/api/outlook/callback';
 const OUTLOOK_TENANT = process.env.OUTLOOK_TENANT || 'common';
 const OUTLOOK_SCOPES = 'Mail.Read offline_access';
-const outlookStates = new Map(); // state -> { userId, createdAt }
+const OUTLOOK_STATE_TTL_MS = 30 * 60 * 1000; // Outlook sign-in states live in SQLite so a restart cannot wipe them
 
 function outlookConfigured() {
   return !!OUTLOOK_CLIENT_ID && !!OUTLOOK_CLIENT_SECRET;
@@ -1557,9 +1557,8 @@ admin.get('/outlook/auth-url', (req, res) => {
   if (!outlookConfigured())
     return err(res, 400, 'Outlook is not set up on the server yet — the main admin needs to finish the Microsoft setup.');
   const state = crypto.randomBytes(16).toString('hex');
-  outlookStates.set(state, { userId: req.user.id, createdAt: Date.now() });
-  for (const [s, v] of outlookStates)
-    if (Date.now() - v.createdAt > 10 * 60 * 1000) outlookStates.delete(s);
+  db.prepare('INSERT INTO outlook_states (state, userId, createdAt) VALUES (?, ?, ?)').run(state, req.user.id, Date.now());
+  db.prepare('DELETE FROM outlook_states WHERE createdAt < ?').run(Date.now() - OUTLOOK_STATE_TTL_MS);
   res.json({ url: outlookAuthUrl(state) });
 });
 
