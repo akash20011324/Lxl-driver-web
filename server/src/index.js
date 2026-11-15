@@ -1833,7 +1833,14 @@ app.get('/files/:id', auth, (req, res) => {
   }
   const filePath = path.join(UPLOADS_DIR, file.storedFilename);
   if (!fs.existsSync(filePath)) return err(res, 404, 'File not found');
-  res.type(file.mimeType);
+  // View must open inline (PDF in a browser tab); Download forces a save.
+  // The stored mimeType can be generic (e.g. from an email attachment), so
+  // prefer the type implied by the file extension when it is known.
+  const ext = path.extname(file.storedFilename).toLowerCase();
+  const extType = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.txt': 'text/plain' }[ext];
+  const type = extType || (file.mimeType && file.mimeType !== 'application/octet-stream' ? file.mimeType : 'application/octet-stream');
+  res.type(type);
+  res.set('Content-Disposition', (req.query.download === '1' ? 'attachment' : 'inline') + '; filename="' + String(file.originalFilename || file.storedFilename).replace(/"/g, '') + '"');
   res.sendFile(filePath);
 });
 

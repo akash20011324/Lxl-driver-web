@@ -87,12 +87,18 @@ async function api(path, opts) {
 }
 
 /* ---------- file downloads (Bearer token required — plain <a href> won't work) ---------- */
-async function downloadFile(url, filename, view) {
+async function downloadFile(url, filename, view, mimeType) {
   try {
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
     if (res.status === 401) { signOutLocal(); throw new Error('Session expired — please sign in again.'); }
     if (!res.ok) throw new Error('Download failed (' + res.status + ')');
-    const blob = await res.blob();
+    // Give the blob an explicit type from the filename extension. A blob
+    // built from a generic (octet-stream) response opens as a download
+    // instead of rendering inline — that is why View used to download.
+    const ext = String(filename || '').split('.').pop().toLowerCase();
+    const extType = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', txt: 'text/plain' }[ext];
+    const type = extType || mimeType || res.headers.get('content-type') || 'application/octet-stream';
+    const blob = new Blob([await res.arrayBuffer()], { type });
     const objUrl = URL.createObjectURL(blob);
     if (view) {
       window.open(objUrl, '_blank');
@@ -107,8 +113,8 @@ async function downloadFile(url, filename, view) {
     setTimeout(() => URL.revokeObjectURL(objUrl), 60000);
   } catch (e) { showError(e); }
 }
-window.viewFile = function (url, filename) { downloadFile(url, filename, true); };
-window.downloadFileAction = function (url, filename) { downloadFile(url, filename, false); };
+window.viewFile = function (url, filename, mimeType) { downloadFile(url, filename, true, mimeType); };
+window.downloadFileAction = function (url, filename, mimeType) { downloadFile(url, filename, false, mimeType); };
 
 /* ---------- auth ---------- */
 function signOutLocal() {
@@ -624,7 +630,7 @@ function bindUnitCards(main, type) {
           '<button class="btn btn-sm" type="submit">Upload</button></form>';
         box.querySelectorAll('[data-view-doc]').forEach(b => b.addEventListener('click', () => {
           const d = list.find(x => String(x.id) === b.dataset.viewDoc);
-          if (d) downloadFile(d.url, d.filename, true);
+          if (d) downloadFile(d.url, d.filename, true, d.mimeType);
         }));
         box.querySelectorAll('[data-del-doc]').forEach(b => b.addEventListener('click', async () => {
           if (!confirm('Delete this document?')) return;
@@ -738,7 +744,7 @@ async function viewDocuments(main) {
     '</tbody></table></div>' + (list.length ? '' : '<p class="empty">No documents yet.</p>') + '</div>';
   main.querySelectorAll('[data-doc-view]').forEach(b => b.addEventListener('click', () => {
     const d = list.find(x => String(x.id) === b.dataset.docView);
-    if (d) downloadFile(d.url, d.filename, true);
+    if (d) downloadFile(d.url, d.filename, true, d.mimeType);
   }));
 }
 
@@ -1037,11 +1043,11 @@ async function viewRateCons(main) {
   }
   main.querySelectorAll('[data-rc-view]').forEach(b => b.addEventListener('click', () => {
     const r = list.find(x => String(x.id) === b.dataset.rcView);
-    if (r && r.url) downloadFile(r.url, r.filename, true);
+    if (r && r.url) downloadFile(r.url, r.filename, true, r.mimeType);
   }));
   main.querySelectorAll('[data-rc-dl]').forEach(b => b.addEventListener('click', () => {
     const r = list.find(x => String(x.id) === b.dataset.rcDl);
-    if (r && r.url) downloadFile(r.url, r.filename, false);
+    if (r && r.url) downloadFile(r.url, r.filename, false, r.mimeType);
   }));
   main.querySelectorAll('[data-rc-del]').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('Delete this rate confirmation?')) return;
@@ -1260,7 +1266,7 @@ async function viewDriverLoads(main) {
         body.querySelectorAll('[data-past-doc]').forEach(b => b.addEventListener('click', (ev) => {
           ev.stopPropagation();
           const d = list.find(x => String(x.id) === b.dataset.pastDoc);
-          if (d) downloadFile(d.url, d.filename, true);
+          if (d) downloadFile(d.url, d.filename, true, d.mimeType);
         }));
       } catch (err) { body.innerHTML = '<p class="empty">Could not load documents.</p>'; showError(err); }
     }
