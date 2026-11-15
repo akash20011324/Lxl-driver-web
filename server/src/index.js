@@ -1573,19 +1573,23 @@ admin.get('/outlook/messages', async (req, res) => {
     const accessToken = await outlookAccessToken(user);
     const search = (req.query.search || '').trim();
     const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    // NOTE: do NOT combine $filter with $orderby here — Exchange rejects
+    // hasAttachments + orderby with "The restriction or sort order is too
+    // complex for this operation." Filter server-side, sort newest-first
+    // in code, then take the first 20.
     const path = search
       ? `/me/messages?${q({ $search: `"${search}"`, $top: '20', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`
-      : `/me/messages?${q({ $filter: 'hasAttachments eq true', $orderby: 'receivedDateTime desc', $top: '20', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`;
+      : `/me/messages?${q({ $filter: 'hasAttachments eq true', $top: '50', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`;
     const data = await outlookGraph(accessToken, path);
-    res.json(
-      (data.value || []).map((m) => ({
-        id: m.id,
-        subject: m.subject ?? '(no subject)',
-        from: (m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || '',
-        receivedAt: m.receivedDateTime,
-        hasAttachments: !!m.hasAttachments,
-      })),
-    );
+    const list = (data.value || []).map((m) => ({
+      id: m.id,
+      subject: m.subject ?? '(no subject)',
+      from: (m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || '',
+      receivedAt: m.receivedDateTime,
+      hasAttachments: !!m.hasAttachments,
+    }));
+    if (!search) list.sort((a, b) => new Date(b.receivedAt || 0) - new Date(a.receivedAt || 0));
+    res.json(search ? list : list.slice(0, 20));
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
     console.error('outlook messages failed', e);
