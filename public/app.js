@@ -663,7 +663,14 @@ async function getCityState(lat, lng) {
   const key = Number(lat).toFixed(3) + ',' + Number(lng).toFixed(3);
   if (geoCache.has(key)) return geoCache.get(key);
   const pr = (async () => {
-    // 1) Google Maps JS Geocoder (modular "geocoding" library).
+    // 1) Server-side reverse-geocode — the reliable route (the browser
+    // Geocoder and the REST fetch both failed silently in the live app).
+    try {
+      const r = await api('/api/admin/geocode?lat=' + Number(lat) + '&lng=' + Number(lng));
+      if (r && r.place) return r.place;
+      console.warn('city/state: server geocode returned', r && r.status, (r && r.error) || '');
+    } catch (e) { console.warn('city/state: server geocode failed', e && e.message); }
+    // 2) Google Maps JS Geocoder (modular "geocoding" library).
     try {
       const g = await ensureGoogleMaps();
       if (g && google.maps.importLibrary) {
@@ -677,7 +684,7 @@ async function getCityState(lat, lng) {
         console.warn('city/state: Maps API or importLibrary unavailable');
       }
     } catch (e) { console.warn('city/state: JS Geocoder failed', e && e.message); }
-    // 2) Fallback: Geocoding API over plain HTTPS with the same key.
+    // 3) Fallback: Geocoding API over plain HTTPS with the same key.
     // (The JS path stayed silent before, so a second route + a console
     // note means the next check can say WHY it failed instead of "—".)
     try {

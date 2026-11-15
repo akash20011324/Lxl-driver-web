@@ -1262,6 +1262,28 @@ admin.get('/maps-config', (_req, res) => {
   res.json({ googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || null });
 });
 
+// Reverse-geocode lat/lng -> "City, ST" on the server. The browser routes
+// both proved unreliable: google.maps.importLibrary isn't reliably present
+// with the classic Maps loader, and the Geocoding web-service endpoint
+// doesn't answer browser fetches (CORS). From the server, the same key
+// works — the Referer header satisfies its HTTP-referrer restriction.
+admin.get('/geocode', async (req, res) => {
+  const lat = Number(req.query.lat), lng = Number(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return err(res, 400, 'lat and lng are required');
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) return res.json({ place: null, status: 'NO_KEY' });
+  try {
+    const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + lat + ',' + lng + '&key=' + encodeURIComponent(key), { headers: { Referer: 'https://app.lubanaxpress.com/' } });
+    const j = await r.json();
+    if (j.status !== 'OK' || !j.results || !j.results.length) return res.json({ place: null, status: j.status || 'ERROR', error: j.error_message || null });
+    const comps = j.results[0].address_components || [];
+    const find = (type) => { const c = comps.find(c => (c.types || []).includes(type)); return c ? c.short_name : null; };
+    const city = find('locality') || find('sublocality') || find('postal_town') || find('administrative_area_level_2');
+    const state = find('administrative_area_level_1');
+    return res.json({ place: (city && state) ? (city + ', ' + state) : (city || state || null), status: 'OK' });
+  } catch (e) { return res.json({ place: null, status: 'ERROR', error: String((e && e.message) || e) }); }
+});
+
 admin.get('/messages/:driverId', (req, res) => {
   const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.driverId);
   if (!driverUser) return err(res, 404, 'Driver not found');
