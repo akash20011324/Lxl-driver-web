@@ -553,7 +553,7 @@ function dashDriverCard(d, load, rcByLoad, loc, live) {
   const speed = (live && loc && typeof loc.speedMph === 'number') ? ' &middot; ' + Math.round(loc.speedMph) + ' mph' : '';
   const citySlot = (live && loc && loc.lat !== undefined && loc.lng !== undefined) ? ' &middot; <span class="city-slot" data-city-lat="' + esc(loc.lat) + '" data-city-lng="' + esc(loc.lng) + '">Locating…</span>' : '';
   return '<div class="glass-panel dw">' +
-    '<div class="dw-head"><div class="dw-avatar' + (d.active === false ? ' off' : '') + '">' + esc(initial) + '</div>' +
+    '<div class="dw-head"><div class="dw-avatar' + (d.active === false ? ' off' : '') + '"' + (d.active === false ? '' : ' style="background:' + driverColor(d.id) + ';color:#fff"') + '>' + esc(initial) + '</div>' +
     '<div class="dw-id"><h3>' + esc(d.name) + '</h3><div class="small muted">' + esc(d.phone || '') + (d.phone && d.email ? ' · ' : '') + esc(d.email || '') + '</div></div>' +
     status + '</div>' +
     '<div class="dw-chips">' + chips + '</div>' +
