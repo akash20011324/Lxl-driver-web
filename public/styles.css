@@ -188,7 +188,29 @@ p { margin: 0 0 10px; }
 .detail-box .v { font-size: 20px; font-weight: 700; word-break: break-word; }
 .detail-box .v.big { font-size: 28px; }
 
-/* ---------- tables ---------- */
+/* ---------- rate confirmations ---------- */
+/* Same setup, with the owner's Highway Night photo dimmed behind the
+   page so the table stays readable. Cards stay dark and translucent so
+   the background breathes through. */
+.rc-page {
+  border-radius: 16px;
+  padding: 20px;
+  background-color: #05070d;
+  background-image:
+    linear-gradient(rgba(3, 6, 14, 0.82), rgba(3, 6, 14, 0.9)),
+    url('assets/signin-bg.jpg');
+  background-size: cover;
+  background-position: center 30%;
+  background-repeat: no-repeat;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.rc-page .card { background: rgba(18, 18, 18, 0.9); }
+.rc-page h1 {
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--gold);
+}
+.rc-search { margin-bottom: 12px; }
+.rc-search input { background: rgba(10, 10, 10, 0.9); }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }

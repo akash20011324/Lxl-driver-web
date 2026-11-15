@@ -896,7 +896,7 @@ async function viewRateCons(main) {
   };
   const previewName = (l, ext) => l ? l.reference + '_' + stateOf(l.pickupLocation) + '-' + stateOf(l.deliveryLocation) + '_' + dateOf(l.pickupAt, l.pickupTimezone) + '_to_' + dateOf(l.deliveryAt, l.deliveryTimezone) + '.' + (ext || 'pdf') : '';
   const loadOptions = loadList.map(l => '<option value="' + l.id + '">' + esc(l.reference) + ' · ' + esc(shortPlace(l.pickupLocation)) + ' → ' + esc(shortPlace(l.deliveryLocation)) + '</option>').join('');
-  main.innerHTML = '<h1>Rate Confirmations</h1>' +
+  main.innerHTML = '<div class="rc-page"><h1>Rate Confirmations</h1>' +
     '<div class="card"><h2>Upload rate confirmation</h2>' +
     (loadList.length ? '<form id="rcForm">' +
     '<div class="form-row">' +
@@ -917,7 +917,7 @@ async function viewRateCons(main) {
       : '<p class="small muted">Outlook email is not set up on the server yet.</p>') +
     '<div id="outlookPicker" style="display:none" class="mt"></div>' +
     '<p id="outlookChosen" class="small mt"></p></div>' +
-    '<div class="card"><div class="table-wrap"><table><thead><tr>' +
+    '<div class="card"><div class="rc-search"><input id="rcSearch" type="search" placeholder="Search rate confirmations — reference, broker, route…"></div><div class="table-wrap"><table><thead><tr>' +
     '<th>Reference</th><th>Broker</th><th>Route</th><th>Dates</th><th>Rate</th><th>File</th><th></th>' +
     '</tr></thead><tbody>' +
     list.map(r => '<tr><td><strong>' + esc(r.reference) + '</strong></td>' +
@@ -929,7 +929,7 @@ async function viewRateCons(main) {
       '<td><button class="btn btn-ghost btn-sm" data-rc-view="' + r.id + '">View</button> ' +
       '<button class="btn btn-ghost btn-sm" data-rc-dl="' + r.id + '">Download</button> ' +
       '<button class="btn btn-danger btn-sm" data-rc-del="' + r.id + '">Delete</button></td></tr>').join('') +
-    '</tbody></table></div>' + (list.length ? '' : '<p class="empty">No rate confirmations yet.</p>') + '</div>';
+    '</tbody></table></div><p class="empty" id="rcNoMatch" style="display:none">No rate confirmations match your search.</p>' + (list.length ? '' : '<p class="empty">No rate confirmations yet.</p>') + '</div></div>';
 
   const rcForm = document.getElementById('rcForm');
   if (rcForm) {
@@ -1048,6 +1048,19 @@ async function viewRateCons(main) {
     try { await api('/api/admin/rate-confirmations/' + b.dataset.rcDel, { method: 'DELETE' }); toast('Rate confirmation deleted.', 'ok'); renderAdminView('ratecons'); }
     catch (err) { showError(err); }
   }));
+  // Search the table: reference, broker, route, dates, rate, filename.
+  const rcSearch = document.getElementById('rcSearch');
+  if (rcSearch) rcSearch.addEventListener('input', () => {
+    const q = rcSearch.value.trim().toLowerCase();
+    let visible = 0;
+    main.querySelectorAll('.rc-page tbody tr').forEach(tr => {
+      const hit = !q || tr.textContent.toLowerCase().includes(q);
+      tr.style.display = hit ? '' : 'none';
+      if (hit) visible++;
+    });
+    const nm = document.getElementById('rcNoMatch');
+    if (nm) nm.style.display = visible ? 'none' : 'block';
+  });
 }
 
 /* ================= DRIVER ================= */
