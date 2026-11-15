@@ -437,17 +437,46 @@ driver.get('/loads/history', (req, res) => {
   res.json(rows.map(serializeLoad));
 });
 
-driver.post('/loads/:id/complete', (req, res) => {
-  const load = db.prepare('SELECT * FROM loads WHERE id = ? AND driverId = ?').get(req.params.id, req.user.id);
-  if (!load) return err(res, 404, 'Load not found');
-  if (load.status !== 'active') return err(res, 400, 'Only an active load can be completed');
-  withTransaction(db, () => {
-    db.prepare("UPDATE loads SET status = 'completed', completedAt = ? WHERE id = ?").run(now(), load.id);
-    // Unit is back in the yard once the load is done.
-    db.prepare("UPDATE trucks SET yardStatus = 'yard' WHERE driverId = ?").run(req.user.id);
-    db.prepare("UPDATE trailers SET yardStatus = 'yard' WHERE driverId = ?").run(req.user.id);
-  });
-  res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
+driver.post('/loads/:id/complete', async (req, res) => {
+  try {
+    const load = db.prepare('SELECT * FROM loads WHERE id = ? AND driverId = ?').get(req.params.id, req.user.id);
+    if (!load) return err(res, 404, 'Load not found');
+    if (load.status !== 'active') return err(res, 400, 'Only an active load can be completed');
+    // Gate 1: the BOL result must be marked first.
+    if (!load.bolStatus) return err(res, 400, 'Mark the BOL result first — tap Clean BOL or Wrong BOL.');
+    // Gate 2: the driver must be at the delivery location.
+    const coords = await ensureDeliveryCoords(load);
+    if (coords) {
+      const { latitude, longitude } = req.body || {};
+      let here = null;
+      let hereAt = null;
+      if (typeof latitude === 'number' && typeof longitude === 'number' && Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        here = { lat: latitude, lng: longitude };
+      } else {
+        const loc = db.prepare('SELECT * FROM locations WHERE driverId = ?').get(req.user.id);
+        if (loc) {
+          here = { lat: loc.lat, lng: loc.lng };
+          hereAt = loc.updatedAt;
+        }
+      }
+      if (!here) return err(res, 400, 'No location yet — open the app so it reports your position, then try again.');
+      if (hereAt && Date.now() - new Date(hereAt).getTime() > LOCATION_FRESH_MS)
+        return err(res, 400, 'Your location is stale — open the app so it reports your position, then try again.');
+      const d = distanceMeters(here.lat, here.lng, coords.lat, coords.lng);
+      if (d > DELIVERY_GEOFENCE_M)
+        return err(res, 400, `You're ${formatDistance(d)} from the delivery location — complete the load once you've arrived at ${load.deliveryLocation}.`);
+    }
+    withTransaction(db, () => {
+      db.prepare("UPDATE loads SET status = 'completed', completedAt = ? WHERE id = ?").run(now(), load.id);
+      // Unit is back in the yard once the load is done.
+      db.prepare("UPDATE trucks SET yardStatus = 'yard' WHERE driverId = ?").run(req.user.id);
+      db.prepare("UPDATE trailers SET yardStatus = 'yard' WHERE driverId = ?").run(req.user.id);
+    });
+    res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
+  } catch (e) {
+    console.error('complete load failed', e);
+    return err(res, 500, 'Could not complete the load');
+  }
 });
 
 driver.post('/loads/:id/bol-status', (req, res) => {
@@ -1057,6 +1086,9 @@ admin.post('/loads', (req, res) => {
     ).lastInsertRowid;
   deactivateDemo(db); // first real load deactivates demo
   const load = serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(id));
+  // Geocode the delivery address in the background so the
+  // delivery-location gate has coordinates by delivery day.
+  void ensureDeliveryCoords(db.prepare('SELECT * FROM loads WHERE id = ?').get(id));
   notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${reference}: ${pickupWarehouse || pickupLocation} → ${deliveryWarehouse || deliveryLocation}.`).catch(() => {});
   res.status(201).json(load);
 });
@@ -1066,7 +1098,17 @@ admin.post('/loads/:id/status', (req, res) => {
   if (status !== 'cancelled' && status !== 'active') return err(res, 400, 'status must be "cancelled" or "active"');
   const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.id);
   if (!load) return err(res, 404, 'Load not found');
-  db.prepare('UPDATE loads SET status = ? WHERE id = ?').run(status, load.id);
+  withTransaction(db, () => {
+    // Reopening a load completed too early: clear the completion time
+    // and put the driver's units back on the road.
+    if (status === 'active' && load.status === 'completed') {
+      db.prepare("UPDATE loads SET status = 'active', completedAt = NULL WHERE id = ?").run(load.id);
+      db.prepare("UPDATE trucks SET yardStatus = 'road' WHERE driverId = ?").run(load.driverId);
+      db.prepare("UPDATE trailers SET yardStatus = 'road' WHERE driverId = ?").run(load.driverId);
+    } else {
+      db.prepare('UPDATE loads SET status = ? WHERE id = ?').run(status, load.id);
+    }
+  });
   res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
 });
 
@@ -1165,6 +1207,65 @@ admin.post('/messages/:driverId', (req, res) => {
   notifyDriver(db, driverUser.id, 'dispatch_message', `Message from ${req.user.name}`, String(body).trim()).catch(() => {});
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
 });
+
+// Delivery-location gate: a load can only be completed at the delivery
+// address. The delivery coordinates are geocoded (OpenStreetMap Nominatim,
+// no key) when the load is assigned and cached on the load; the driver's
+// position at completion must be within the fence.
+const DELIVERY_GEOFENCE_M = 500;
+const LOCATION_FRESH_MS = 15 * 60 * 1000;
+
+function distanceMeters(lat1, lng1, lat2, lng2) {
+  const r = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * r * Math.asin(Math.sqrt(a));
+}
+
+function formatDistance(m) {
+  if (m < 1609) return `${Math.round(m)} m`;
+  return `${(m / 1609.34).toFixed(1)} mi`;
+}
+
+async function geocodeAddress(address) {
+  if (!address) return null;
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`,
+      { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' } },
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (!rows || !rows[0]) return null;
+    const lat = Number(rows[0].lat);
+    const lng = Number(rows[0].lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  } catch {
+    return null;
+  }
+}
+
+// Delivery coordinates for a load: stored ones first, otherwise geocode
+// the delivery address now and cache it on the load. Null when the
+// address cannot be geocoded — then the location gate cannot run and
+// completion falls back to the BOL check only.
+async function ensureDeliveryCoords(load) {
+  if (typeof load.deliveryLat === 'number' && typeof load.deliveryLng === 'number')
+    return { lat: load.deliveryLat, lng: load.deliveryLng };
+  const coords = await geocodeAddress(load.deliveryLocation);
+  if (!coords) return null;
+  db.prepare('UPDATE loads SET deliveryLat = ?, deliveryLng = ? WHERE id = ?').run(
+    coords.lat,
+    coords.lng,
+    load.id,
+  );
+  return coords;
+}
 
 // Two-letter state code from a load address like "904 Edwards Dr, Lebanon IN 46052".
 function stateFromAddress(address) {

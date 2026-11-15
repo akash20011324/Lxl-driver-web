@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS loads (
   pickupNumber TEXT,
   deliveryLocation TEXT NOT NULL,
   deliveryWarehouse TEXT,
+  deliveryLat REAL,
+  deliveryLng REAL,
   deliveryAt TEXT NOT NULL,
   deliveryTimezone TEXT NOT NULL,
   deliveryNumber TEXT,
@@ -238,6 +240,15 @@ export function openDb(dataDir) {
   }
   if (!loadColumns.some((c) => c.name === 'deliveryWarehouse')) {
     db.exec('ALTER TABLE loads ADD COLUMN deliveryWarehouse TEXT');
+  }
+  // Migrate databases created before the delivery-location gate: store
+  // the geocoded delivery coordinates on the load (fresh databases get
+  // them from the schema above).
+  if (!loadColumns.some((c) => c.name === 'deliveryLat')) {
+    db.exec('ALTER TABLE loads ADD COLUMN deliveryLat REAL');
+  }
+  if (!loadColumns.some((c) => c.name === 'deliveryLng')) {
+    db.exec('ALTER TABLE loads ADD COLUMN deliveryLng REAL');
   }
   // Migrate databases created before sender names: record who sent each
   // message (the admin's name — Akash, Ali, …) so the driver sees who is

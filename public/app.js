@@ -682,6 +682,8 @@ async function viewLoads(main) {
       '<td>' + esc(l.bolStatus || '—') + '</td>' +
       '<td>' + (l.status === 'active'
         ? '<button class="btn btn-danger btn-sm" data-cancel-load="' + l.id + '">Cancel</button>'
+        : l.status === 'completed'
+          ? '<button class="btn btn-ghost btn-sm" data-reopen-load="' + l.id + '">Reopen</button>'
         : l.status === 'cancelled'
           ? '<button class="btn btn-ghost btn-sm" data-reactivate-load="' + l.id + '">Reactivate</button>' : '') + '</td></tr>').join('') +
     '</tbody></table></div>' + (list.length ? '' : '<p class="empty">No loads yet.</p>') + '</div>';
@@ -712,6 +714,11 @@ async function viewLoads(main) {
   }));
   main.querySelectorAll('[data-reactivate-load]').forEach(b => b.addEventListener('click', async () => {
     try { await api('/api/admin/loads/' + b.dataset.reactivateLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'active' }) }); toast('Load reactivated.', 'ok'); renderAdminView('loads'); }
+    catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-reopen-load]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Reopen this load? It goes back to active.')) return;
+    try { await api('/api/admin/loads/' + b.dataset.reopenLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'active' }) }); toast('Load reopened.', 'ok'); renderAdminView('loads'); }
     catch (err) { showError(err); }
   }));
 }
@@ -1209,9 +1216,18 @@ function bindActiveLoad(main, load) {
   document.getElementById('bolClean').addEventListener('click', () => bolStatus('clean'));
   document.getElementById('bolWrong').addEventListener('click', () => bolStatus('wrong'));
   document.getElementById('completeLoad').addEventListener('click', async () => {
+    if (!load.bolStatus) { showError(new Error('Mark the BOL result first — tap Clean BOL or Wrong BOL.')); return; }
     if (!confirm('Mark this load complete?')) return;
+    const body = {};
     try {
-      await api('/api/driver/loads/' + load.id + '/complete', { method: 'POST', body: JSON.stringify({}) });
+      const pos = await new Promise((resolve) => {
+        if (!navigator.geolocation) return resolve(null);
+        navigator.geolocation.getCurrentPosition((p) => resolve(p), () => resolve(null), { timeout: 8000, maximumAge: 60000 });
+      });
+      if (pos) { body.latitude = pos.coords.latitude; body.longitude = pos.coords.longitude; }
+    } catch { /* complete without coords — the server falls back to the last reported location */ }
+    try {
+      await api('/api/driver/loads/' + load.id + '/complete', { method: 'POST', body: JSON.stringify(body) });
       toast('Load completed.', 'ok');
       renderDriverView('loads');
     } catch (err) { showError(err); }
