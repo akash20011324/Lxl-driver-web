@@ -793,7 +793,7 @@ async function viewDispatch(main) {
       const thread = document.getElementById('dispatchThread');
       if (thread) thread.innerHTML = list.length ? list.map(m =>
         '<div class="msg' + (m.sender === 'dispatch' ? ' mine' : '') + '">' + esc(m.body) +
-        '<div class="meta">' + esc(m.sender === 'dispatch' ? 'Dispatch' : (d ? d.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + '</div></div>').join('')
+        '<div class="meta">' + esc(m.sender === 'dispatch' ? (m.senderName || 'Dispatch') : (d ? d.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + '</div></div>').join('')
         : '<p class="empty">No messages yet.</p>';
     } catch (e) { /* keep the old thread visible on a transient failure */ }
   };
@@ -1242,7 +1242,7 @@ async function viewDriverDispatch(main) {
       const thread = document.getElementById('driverThread');
       if (thread) thread.innerHTML = list.length ? list.map(m =>
         '<div class="msg' + (m.sender === 'driver' ? ' mine' : '') + '">' + esc(m.body) +
-        '<div class="meta">' + esc(m.sender === 'driver' ? 'You' : 'Dispatch') + ' · ' + fmtDate(m.createdAt) + '</div></div>').join('')
+        '<div class="meta">' + esc(m.sender === 'driver' ? 'You' : (m.senderName || 'Dispatch')) + ' · ' + fmtDate(m.createdAt) + '</div></div>').join('')
         : '<p class="empty">No messages yet. Say hello to dispatch.</p>';
     } catch (e) { /* keep old thread on transient failure */ }
   };

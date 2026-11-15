@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   driverId INTEGER NOT NULL REFERENCES users(id),
   sender TEXT NOT NULL CHECK (sender IN ('driver', 'dispatch')),
+  senderName TEXT,
   body TEXT NOT NULL,
   createdAt TEXT NOT NULL,
   read INTEGER NOT NULL DEFAULT 0
@@ -237,6 +238,13 @@ export function openDb(dataDir) {
   }
   if (!loadColumns.some((c) => c.name === 'deliveryWarehouse')) {
     db.exec('ALTER TABLE loads ADD COLUMN deliveryWarehouse TEXT');
+  }
+  // Migrate databases created before sender names: record who sent each
+  // message (the admin's name — Akash, Ali, …) so the driver sees who is
+  // chatting with them (fresh databases get it from the schema above).
+  const msgColumns = db.prepare('PRAGMA table_info(messages)').all();
+  if (!msgColumns.some((c) => c.name === 'senderName')) {
+    db.exec('ALTER TABLE messages ADD COLUMN senderName TEXT');
   }
   db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('demo_active', '0')").run();
   return db;

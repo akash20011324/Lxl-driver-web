@@ -171,6 +171,7 @@ function serializeMessage(m) {
     id: m.id,
     driverId: m.driverId,
     sender: m.sender,
+    senderName: m.senderName ?? null,
     body: m.body,
     createdAt: m.createdAt,
     read: !!m.read,
@@ -553,8 +554,8 @@ driver.post('/messages', (req, res) => {
   const { body } = req.body || {};
   if (!body || !String(body).trim()) return err(res, 400, 'body is required');
   const id = db
-    .prepare("INSERT INTO messages (driverId, sender, body, createdAt, read) VALUES (?, 'driver', ?, ?, 0)")
-    .run(req.user.id, String(body).trim(), now()).lastInsertRowid;
+    .prepare("INSERT INTO messages (driverId, sender, senderName, body, createdAt, read) VALUES (?, 'driver', ?, ?, ?, 0)")
+    .run(req.user.id, req.user.name, String(body).trim(), now()).lastInsertRowid;
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
 });
 
@@ -1159,9 +1160,9 @@ admin.post('/messages/:driverId', (req, res) => {
   const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.driverId);
   if (!driverUser) return err(res, 404, 'Driver not found');
   const id = db
-    .prepare("INSERT INTO messages (driverId, sender, body, createdAt, read) VALUES (?, 'dispatch', ?, ?, 0)")
-    .run(driverUser.id, String(body).trim(), now()).lastInsertRowid;
-  notifyDriver(db, driverUser.id, 'dispatch_message', 'Message from dispatch', String(body).trim()).catch(() => {});
+    .prepare("INSERT INTO messages (driverId, sender, senderName, body, createdAt, read) VALUES (?, 'dispatch', ?, ?, ?, 0)")
+    .run(driverUser.id, req.user.name, String(body).trim(), now()).lastInsertRowid;
+  notifyDriver(db, driverUser.id, 'dispatch_message', `Message from ${req.user.name}`, String(body).trim()).catch(() => {});
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
 });
 
