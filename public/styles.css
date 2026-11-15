@@ -190,31 +190,34 @@ p { margin: 0 0 10px; }
 
 /* ---------- rate confirmations ---------- */
 /* Full-page Liquid Glass: the money photo (stacks of $100 bills) covers
-   the whole viewport behind everything — body.rc-bg is added by
-   viewRateCons and removed on any view switch or sign-out. The top bar
-   and sidebar turn to glass too, so the photo shows through everywhere;
-   .rc-page itself is now just a transparent container, and the cards
-   inside are the glass layers. Text shadow keeps it readable. */
-body.rc-bg {
-  background-color: #05070d;
+   the whole viewport behind everything. It lives on a real fixed layer
+   (#rcBgLayer, created by viewRateCons) — not on the body background,
+   which glass can't reliably see (and iOS Safari ignores
+   background-attachment: fixed). body.rc-bg just marks the view so the
+   top bar and sidebar turn to glass; the layer is removed on any view
+   switch or sign-out. Text shadow keeps it readable. */
+body.rc-bg { background-color: #05070d; }
+#rcBgLayer {
+  position: fixed; inset: 0; z-index: 0;
   background-image:
-    linear-gradient(rgba(3, 6, 14, 0.45), rgba(3, 6, 14, 0.6)),
+    linear-gradient(rgba(3, 6, 14, 0.35), rgba(3, 6, 14, 0.5)),
     url('assets/money-bg.jpg');
   background-size: cover;
   background-position: center 30%;
   background-repeat: no-repeat;
-  background-attachment: fixed;
+  pointer-events: none;
 }
+.admin-layout { position: relative; z-index: 1; }
 body.rc-bg .topbar {
-  background: rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(12px) saturate(150%);
-  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
   border-bottom: 1px solid rgba(255, 255, 255, 0.14);
 }
 body.rc-bg .sidebar {
-  background: rgba(0, 0, 0, 0.25);
-  backdrop-filter: blur(12px) saturate(150%);
-  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  background: rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
   border-right: 1px solid rgba(255, 255, 255, 0.14);
 }
 body.rc-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }

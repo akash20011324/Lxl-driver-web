@@ -144,6 +144,7 @@ function saveSession(user, token) {
 async function boot() {
   clearTimers();
   document.body.classList.remove('rc-bg');
+  removeRcBgLayer();
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page"><p class="muted">Loading…</p></div>';
   // If we already have a token, try to resume the session.
@@ -312,6 +313,7 @@ function renderAdminSidebar(pendingRequests) {
 async function renderAdminView(view) {
   clearTimers();
   document.body.classList.remove('rc-bg');
+  removeRcBgLayer();
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -894,9 +896,26 @@ async function viewLocations(main) {
 }
 
 /* ---------- Rate Cons ---------- */
+/* The RC full-page background is a real fixed layer (not a body
+   background): body backgrounds are unreliable for glass — backdrop
+   filters don't always see them, and iOS Safari ignores
+   background-attachment: fixed. A fixed div paints behind everything
+   and the glass blurs it properly. */
+function ensureRcBgLayer() {
+  if (!document.getElementById('rcBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'rcBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeRcBgLayer() {
+  const layer = document.getElementById('rcBgLayer');
+  if (layer) layer.remove();
+}
 async function viewRateCons(main) {
   state.rcOutlook = null;
   document.body.classList.add('rc-bg'); // full-page money background + glass (removed on view switch)
+  ensureRcBgLayer();
   const [rcs, loads, outlook] = await Promise.all([
     api('/api/admin/rate-confirmations'),
     api('/api/admin/loads').catch(() => []),
