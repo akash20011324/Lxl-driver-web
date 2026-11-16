@@ -4437,6 +4437,145 @@ async function adjudicateRateCons6() {
   } catch (e) { console.error('rc adjudication6 failed', e); }
 }
 
+// One-time adjudication round 7 (2026-11-16): final fixes after the
+// Ali-mailbox sweep. Deletes the two duplicates the sweep re-imported
+// (same misread copies as round 6 removed), pins broker/rate values
+// read off the actual documents for the Scotlynn, Watco and Uber rows
+// the upload parser could not read, repairs IEL load pickup cities
+// and the LXL-2998288 route from the verified document reads, clears
+// the $100 GPS-fine figure the import took as the rate on IEL
+// LXL-3127767 (same proven pattern as LXL-3020150 / LXL-3012815),
+// fixes the Corcoran delivery date (document: Mon 2026-11-02), and
+// restores the LXL-1882819 load that disappeared during the sweep.
+async function adjudicateRateCons7() {
+  try {
+    const marker = 'rc-adjudication7-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication7: ' + m);
+    const deleteRcFully = (row, why) => {
+      db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(row.id);
+      if (row.fileId) {
+        const usedElsewhere = db.prepare('SELECT id FROM rate_confirmations WHERE fileId = ? LIMIT 1').get(row.fileId)
+          || db.prepare('SELECT id FROM documents WHERE fileId = ? LIMIT 1').get(row.fileId);
+        if (!usedElsewhere) {
+          const f = db.prepare('SELECT storedFilename FROM files WHERE id = ?').get(row.fileId);
+          db.prepare('DELETE FROM files WHERE id = ?').run(row.fileId);
+          if (f && f.storedFilename) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename)); } catch { /* already gone */ } }
+        }
+      }
+      log('deleted rate con ' + row.reference + ' (id ' + row.id + ') — ' + why);
+    };
+    // 1. SPT-691666 duplicate AGAIN (keep the verified SPI TX->NJ $5,700 row)
+    {
+      const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'SPT-691666'").all();
+      const keep = rows.find((r) => r.deliveryState === 'NJ') || rows.find((r) => r.rateCents === 570000) || rows[0];
+      for (const r of rows) if (!keep || r.id !== keep.id) deleteRcFully(r, 'sweep duplicate of the verified SPI row (came back in the Ali sweep)');
+    }
+    // 2. LXL-183569 duplicate AGAIN (keep the verified DeGroot $1,928 row)
+    {
+      const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-183569'").all();
+      const keep = rows.find((r) => r.rateCents === 192800) || rows[0];
+      for (const r of rows) if (!keep || r.id !== keep.id) deleteRcFully(r, 'sweep duplicate of the verified DeGroot row (came back in the Ali sweep)');
+    }
+    // 3. Scotlynn LXL-1557524: values from the verified read of the
+    // document (Lebanon IN -> Boca Raton FL, $5,700, driver Akash);
+    // the upload parser could read neither broker nor rate.
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'Scotlynn USA Division', rateCents = 570000 WHERE reference = 'LXL-1557524'").run();
+      if (u.changes) log('LXL-1557524: broker -> Scotlynn USA Division, rate -> $5,700 (per the document)');
+      const l = db.prepare("UPDATE loads SET status = 'completed', completedAt = deliveryAt WHERE reference = 'LXL-1557524' AND status = 'active'").run();
+      if (l.changes) log('LXL-1557524: load marked completed');
+    }
+    // 4. Watco LXL-2321747: broker name from the document (the upload
+    // read the letterhead 'Supply Chain Services, LLC'); delivered
+    // 2026-11-16, so the load is completed.
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'Watco Logistics' WHERE reference = 'LXL-2321747'").run();
+      if (u.changes) log('LXL-2321747: broker -> Watco Logistics');
+      const l = db.prepare("UPDATE loads SET status = 'completed', completedAt = deliveryAt WHERE reference = 'LXL-2321747' AND status = 'active'").run();
+      if (l.changes) log('LXL-2321747: load marked completed');
+    }
+    // 5. Uber LXL-5010292603: broker string cleanup (the upload read
+    // 'Commodity FREIGHT' off the real confirmation).
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'Uber Freight' WHERE reference = 'LXL-5010292603'").run();
+      if (u.changes) log('LXL-5010292603: broker -> Uber Freight');
+    }
+    // 6. LXL-3845: full broker name from the document; link to its load.
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'American Freight Movers' WHERE reference = 'LXL-3845'").run();
+      if (u.changes) log('LXL-3845: broker -> American Freight Movers');
+      const rc = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-3845'").get();
+      const load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-3845'").get();
+      if (rc && load && rc.loadId !== load.id) {
+        db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(load.id, rc.id);
+        log('LXL-3845: rate con linked to its load');
+      }
+    }
+    // 7. LXL-2998288: the sweep restored the row with the OLD wrong
+    // extraction (OH, 6/11 -> 6/11). Document-verified: Lake City, GA
+    // 2026-06-12 -> Rancho Cucamonga, CA 2026-06-16, $5,000, Akash.
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET pickupState = 'GA', deliveryState = 'CA', pickupDate = '2026-06-12', deliveryDate = '2026-06-16' WHERE reference = 'LXL-2998288'").run();
+      if (u.changes) log('LXL-2998288: rate con -> GA->CA, 2026-06-12 -> 2026-06-16 (per the document)');
+      const l = db.prepare("UPDATE loads SET pickupLocation = 'Lake City, GA 30260', pickupAt = '2026-06-12T09:00:00', deliveryAt = '2026-06-16T17:00:00', completedAt = '2026-06-16T17:00:00', pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE reference = 'LXL-2998288'").run();
+      if (l.changes) log('LXL-2998288: load route -> Lake City, GA 30260 -> Rancho Cucamonga, CA');
+    }
+    // 8+9. IEL load pickup cities: the import used the IEL letterhead
+    // (Cincinnati, OH). Documents say Laurel, MS (2996825) and
+    // Mount Pleasant, TX (2999658).
+    {
+      const a = db.prepare("UPDATE loads SET pickupLocation = 'Laurel, MS 39440', pickupLat = NULL, pickupLng = NULL WHERE reference = 'LXL-2996825'").run();
+      if (a.changes) log('LXL-2996825: load pickup -> Laurel, MS 39440 (per the document)');
+      const b = db.prepare("UPDATE loads SET pickupLocation = 'Mount Pleasant, TX 75455', pickupLat = NULL, pickupLng = NULL WHERE reference = 'LXL-2999658'").run();
+      if (b.changes) log('LXL-2999658: load pickup -> Mount Pleasant, TX 75455 (per the document)');
+    }
+    // 10. Corcoran LXL-127657: delivery date from the document
+    // (pickup Sat 2026-10-31, delivery Mon 2026-11-02; the import
+    // stored the 10/29 signature date as the delivery date).
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET deliveryDate = '2026-11-02' WHERE reference = 'LXL-127657'").run();
+      if (u.changes) log('LXL-127657: deliveryDate -> 2026-11-02 (per the document)');
+    }
+    // 11. IEL LXL-3127767: $100 is the GPS-fine figure on IEL dispatch
+    // sheets, not a rate (proven on LXL-3020150 and LXL-3012815,
+    // which print no rate at all). Clear it.
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET rateCents = NULL WHERE reference = 'LXL-3127767' AND rateCents = 10000").run();
+      if (u.changes) log('LXL-3127767: cleared the $100 GPS-fine figure (no rate on the IEL sheet)');
+    }
+    // 12. Restore load LXL-1882819 (D&L, Lebanon IN -> Victorville CA,
+    // 2026-06-02 -> 2026-06-05, $3,900, Akash) — created by hand on
+    // 2026-11-16, verified completed, then disappeared during the
+    // Ali sweep. Re-create it completed and re-link its rate con.
+    {
+      const akash = db.prepare("SELECT id FROM users WHERE role = 'driver' AND name LIKE '%akash%' ORDER BY id LIMIT 1").get();
+      let load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-1882819'").get();
+      if (!load && akash) {
+        const info = db.prepare("INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES ('LXL-1882819', ?, 'Lebanon, IN 46052', '2026-06-02T09:00:00', 'America/Indiana/Indianapolis', 'Victorville, CA 92395', '2026-06-05T17:00:00', 'America/Indiana/Indianapolis', 'Restored — created from the D & L rate confirmation on 2026-11-16; the load disappeared during the Ali mailbox sweep', 'completed', '2026-06-05T17:00:00', ?)").run(akash.id, new Date().toISOString());
+        load = db.prepare('SELECT * FROM loads WHERE id = ?').get(info.lastInsertRowid);
+        log('LXL-1882819: load restored (completed, Akash)');
+      }
+      const rc = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-1882819'").get();
+      if (load && rc && rc.loadId !== load.id) {
+        db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(load.id, rc.id);
+        log('LXL-1882819: rate con linked to its load');
+      }
+    }
+    // 13. Uber LXL-4771874926 (hand-filed from the real confirmation:
+    // Lebanon IN 2026-09-10 -> Riverside CA 2026-09-14, $5,300,
+    // Truck 1301 = Akash): pin broker/rate and complete the load.
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'Uber Freight', rateCents = 530000 WHERE reference = 'LXL-4771874926'").run();
+      if (u.changes) log('LXL-4771874926: broker -> Uber Freight, rate -> $5,300 (per the document)');
+      const l = db.prepare("UPDATE loads SET status = 'completed', completedAt = deliveryAt WHERE reference = 'LXL-4771874926' AND status = 'active'").run();
+      if (l.changes) log('LXL-4771874926: load marked completed');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication7 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -6025,7 +6164,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
