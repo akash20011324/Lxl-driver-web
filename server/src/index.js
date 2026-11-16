@@ -3705,7 +3705,7 @@ function saveRcImportRun(run) {
   db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes, cursor, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null, run.epoch || RC_IMPORT_EPOCH);
 }
-const RC_IMPORT_EPOCH = 'gateoff-2026-11-16';
+const RC_IMPORT_EPOCH = 'diag2-2026-11-16';
 function rcImportRun(runId) {
   if (!runId) {
     const latest = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
@@ -3768,6 +3768,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         mailboxErrors: run.mailboxErrors,
         schedules: run.schedules,
         schedulesSeen: run.schedulesSeen || 0,
+        lastSkip: run.lastSkip || '',
         paidLoads: run.paidRefs.size,
         nextCursor,
         done,
@@ -3932,13 +3933,15 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
                 else { db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id); counts.imported += 1; if (!onSchedule) counts.unverified = (counts.unverified || 0) + 1; }
               } else {
                 counts.skipped += 1;
-                if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject);
+                run.lastSkip = subject + ' (text=' + text.length + ' places=' + f.places.length + ' dates=' + f.dates.length + ')';
+                if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(run.lastSkip);
               }
               break;
             }
             if (!handled) counts.notRc += 1;
           } catch (e) {
             counts.skipped += 1;
+            run.lastSkip = subject + ' (error: ' + String((e && e.message) || e).slice(0, 90) + ')';
             console.error('rc import skip:', subject, '-', e && e.message);
             if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject + ' (error: ' + String((e && e.message) || e).slice(0, 90) + ')');
           }

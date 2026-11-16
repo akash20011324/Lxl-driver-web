@@ -3983,10 +3983,11 @@ async function viewRateCons(main) {
     let schedules = 0;
     let paidLoads = 0;
     let lastPhase = 'sched';
+    let lastSkip = '';
     let finished = false;
     try {
       for (let round = 0; round < 5000; round++) {
-        if (status) status.textContent = 'Working… ' + ({ sched: 'reading OTR schedules to build the paid-load list', rc: 'importing rate confirmations', bol: 'filing BOLs into the loads' }[lastPhase] || lastPhase) + '. So far: ' + tot.imported + ' imported, ' + tot.loadsCreated + ' loads created, ' + tot.heldOut + ' held out, ' + tot.bolsAdded + ' BOLs filed. Paid loads found: ' + paidLoads + '.';
+        if (status) status.textContent = 'Working… ' + ({ sched: 'reading OTR schedules to build the paid-load list', rc: 'importing rate confirmations', bol: 'filing BOLs into the loads' }[lastPhase] || lastPhase) + '. So far: ' + tot.imported + ' imported, ' + tot.loadsCreated + ' loads created, ' + tot.heldOut + ' held out, ' + tot.bolsAdded + ' BOLs filed. Paid loads found: ' + paidLoads + '.' + (lastSkip ? ' Last skipped: ' + lastSkip : '');
         const r = await api('/api/admin/rate-confirmations/import-all', { method: 'POST', body: JSON.stringify({ cursor }) });
         tot.imported += r.imported || 0;
         tot.loadsCreated += r.loadsCreated || 0;
@@ -4006,6 +4007,7 @@ async function viewRateCons(main) {
         if (typeof r.paidLoads === 'number') paidLoads = r.paidLoads;
         cursor = r.nextCursor;
         if (r.phase) lastPhase = r.phase;
+        if (r.lastSkip) lastSkip = r.lastSkip;
         if (r.done || !cursor) { finished = true; break; }
       }
       if (!finished) {
