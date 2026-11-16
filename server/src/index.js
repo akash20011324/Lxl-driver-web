@@ -4338,6 +4338,105 @@ async function adjudicateRateCons5() {
   } catch (e) { console.error('rc adjudication5 failed', e); }
 }
 
+// Adjudication round 6 (2026-11-16): fixes from the full read-back
+// after the Aisha-mailbox sweep. The sweep re-imported two loads
+// that were already filed, creating duplicate rows with wrong data
+// (SPT-691666 as TX->TX $5,500 no broker; LXL-183569 as "LOGISTICS"
+// $1,700) — the verified rows (SPI $5,700 TX->NJ; DeGroot $1,928)
+// are kept and the duplicates deleted. The Werner row for
+// LXL-0311311324 keeps the real rate confirmation the owner
+// supplied (Route #2004576602, $2,100) and drops the bill-of-lading
+// row. The Uber row LXL-5010292603 still holds a Tyson BOL — the
+// real confirmation's upload was turned away by the duplicate
+// check (same reference + rate + dates), so the BOL row is removed
+// here and the real confirmation is filed right after this deploy.
+// The three D&L Victorville loads (created by hand in the portal)
+// are marked completed.
+async function adjudicateRateCons6() {
+  try {
+    const marker = 'rc-adjudication6-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication6: ' + m);
+    const deleteRcFully = (row, why) => {
+      db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(row.id);
+      if (row.fileId) {
+        const usedElsewhere = db.prepare('SELECT id FROM rate_confirmations WHERE fileId = ? LIMIT 1').get(row.fileId)
+          || db.prepare('SELECT id FROM documents WHERE fileId = ? LIMIT 1').get(row.fileId);
+        if (!usedElsewhere) {
+          const f = db.prepare('SELECT storedFilename FROM files WHERE id = ?').get(row.fileId);
+          db.prepare('DELETE FROM files WHERE id = ?').run(row.fileId);
+          if (f && f.storedFilename) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename)); } catch { /* already gone */ } }
+        }
+      }
+      log('deleted rate con ' + row.reference + ' (id ' + row.id + ') — ' + why);
+    };
+    // 1. SPT-691666 duplicate (keep the verified SPI TX->NJ $5,700 row)
+    {
+      const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'SPT-691666'").all();
+      const keep = rows.find((r) => r.deliveryState === 'NJ') || rows[0];
+      for (const r of rows) if (!keep || r.id !== keep.id) deleteRcFully(r, 'sweep duplicate of the verified SPI row');
+    }
+    // 2. LXL-183569 duplicate (keep the verified DeGroot $1,928 row)
+    {
+      const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-183569'").all();
+      const keep = rows.find((r) => r.rateCents === 192800) || rows[0];
+      for (const r of rows) if (!keep || r.id !== keep.id) deleteRcFully(r, 'sweep duplicate of the verified DeGroot row');
+    }
+    // 3. Werner LXL-0311311324: keep the real confirmation, drop the BOL row
+    {
+      const WERNER_HASH = '6906e102f93224914739281f0168c9cb86f252decface722d2bb2630507eae99';
+      const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-0311311324'").all();
+      const keep = rows.find((r) => r.fileHash === WERNER_HASH) || rows.find((r) => r.rateCents === 210000);
+      if (keep) {
+        db.prepare("UPDATE rate_confirmations SET broker = 'Werner Enterprises', rateCents = 210000, pickupState = 'FL', deliveryState = 'IL', pickupDate = '2026-09-25', deliveryDate = '2026-09-27' WHERE id = ?").run(keep.id);
+        log('LXL-0311311324: kept the real Werner confirmation ($2,100, pickup 2026-09-25 per the document)');
+        for (const r of rows) if (r.id !== keep.id) deleteRcFully(r, 'bill of lading filed as the rate confirmation');
+      } else log('LXL-0311311324: WARNING — no Werner confirmation row found');
+    }
+    // 4. Uber LXL-5010292603: remove the BOL row so the real confirmation can be filed
+    {
+      const UBER_HASH = 'e5dcad9a6af498a0aedced002ce859c4555ee6c8072c7332191257d4293eac96';
+      const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-5010292603'").all();
+      for (const r of rows) if (r.fileHash !== UBER_HASH) deleteRcFully(r, 'Tyson BOL filed as the rate confirmation — real Uber confirmation is filed after this deploy');
+    }
+    // 5. The three hand-created D&L Victorville loads are completed trips
+    {
+      const u = db.prepare("UPDATE loads SET status = 'completed', completedAt = deliveryAt WHERE reference IN ('LXL-1882819', 'LXL-1891120', 'LXL-1891143') AND status = 'active'").run();
+      if (u.changes) log('marked ' + u.changes + ' D&L Victorville load(s) completed');
+    }
+    // 6. SPT-738485 (from Aisha's mailbox) is an SPI Logistics load
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'SPI Logistics' WHERE reference = 'SPT-738485' AND (broker IS NULL OR broker = '')").run();
+      if (u.changes) log('SPT-738485: broker -> SPI Logistics');
+    }
+
+    // 7. SPT-738485: create the live load for Arsh from the SPI
+    // document (owner's instruction — the tender names the carrier
+    // contact, but the owner assigns this load to Arshdeep) and
+    // link the rate con row to it. Pickup Sylacauga, AL 35151
+    // (Harrell's Fertilizer) 2026-11-16, delivery Sewell, NJ 08080
+    // (Scott Farm Nursery) 2026-11-17, $2,600 — read off the
+    // document itself.
+    {
+      const arsh = db.prepare("SELECT id FROM users WHERE role = 'driver' AND name LIKE '%arsh%' ORDER BY id LIMIT 1").get();
+      const rc = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'SPT-738485'").get();
+      let load = db.prepare("SELECT * FROM loads WHERE reference = 'SPT-738485'").get();
+      if (!load && arsh) {
+        const info = db.prepare("INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES ('SPT-738485', ?, 'Sylacauga, AL 35151', '2026-11-16T09:00:00', 'America/Indiana/Indianapolis', 'Sewell, NJ 08080', '2026-11-17T17:00:00', 'America/Indiana/Indianapolis', 'Added from the SPI rate confirmation (owner assigned to Arshdeep)', 'active', NULL, ?)").run(arsh.id, new Date().toISOString());
+        load = db.prepare('SELECT * FROM loads WHERE id = ?').get(info.lastInsertRowid);
+        log('SPT-738485: created ACTIVE load for Arshdeep — Sylacauga, AL 35151 -> Sewell, NJ 08080');
+        notifyDriver(db, arsh.id, 'load_assigned', 'New load assigned', 'Load SPT-738485: Sylacauga, AL → Sewell, NJ.').catch(() => {});
+      }
+      if (load && rc && rc.loadId !== load.id) {
+        db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(load.id, rc.id);
+        log('SPT-738485: rate con linked to its load');
+      }
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication6 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -5926,7 +6025,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
