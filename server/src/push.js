@@ -33,7 +33,7 @@ export async function notifyDriver(db, driverId, type, title, body) {
   if (!token || !Expo.isExpoPushToken(token)) return;
 
   try {
-    const chunks = expo.chunkPushNotifications([{ to: token, title, body, data: { type } }]);
+    const chunks = expo.chunkPushNotifications([{ to: token, title, body, sound: 'default', priority: 'high', channelId: 'lxl-default', data: { type } }]);
     for (const chunk of chunks) {
       await expo.sendPushNotificationsAsync(chunk);
     }
