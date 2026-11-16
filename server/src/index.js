@@ -1621,6 +1621,27 @@ function cashMergedEntries() {
   return { entries, advanceRows, all: [...entries, ...advances] };
 }
 
+// Aggregates (totals, monthly groups, per-truck months) must cover EVERY
+// entry since May 2026 — the display list is capped at 200 rows, and
+// summing the capped list silently drops the oldest entries.
+function cashAllEntries() {
+  const entryRows = db.prepare('SELECT direction, date, category, amountCents, truckId, loadId FROM cash_entries').all();
+  const entries = entryRows.map((e) => ({
+    direction: e.direction, date: e.date, category: e.category, amountCents: e.amountCents,
+    truckId: e.truckId ?? null, loadId: e.loadId ?? null,
+  }));
+  const advanceRows = db.prepare(
+    `SELECT r.id, r.amountCents, r.decidedAt, r.driverId, u.name AS driverName FROM requests r
+     LEFT JOIN users u ON u.id = r.driverId
+     WHERE r.type = 'advance' AND r.status = 'approved' AND r.amountCents IS NOT NULL`,
+  ).all();
+  const advances = advanceRows.map((a) => ({
+    direction: 'out', date: String(a.decidedAt || '').slice(0, 10), category: 'Driver advance',
+    amountCents: a.amountCents, truckId: null, loadId: null, driverId: a.driverId,
+  }));
+  return { entries, advanceRows, all: [...entries, ...advances] };
+}
+
 // Per-truck monthly profit: revenue from rate cons booked that month,
 // minus fuel (the company's Pilot weekly total for the month, split by
 // each truck's share of the month's loads — the weekly bill has no
@@ -1684,8 +1705,9 @@ admin.get('/cashflow', (req, res) => {
     source: 'advance', url: null, virtual: true,
   }));
   const all = [...entries, ...advances].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  const receivedCents = entries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amountCents, 0);
-  const outCents = all.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amountCents, 0);
+  const agg = cashAllEntries();
+  const receivedCents = agg.entries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amountCents, 0);
+  const outCents = agg.all.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amountCents, 0);
   const weekly = [];
   const todayD = new Date();
   for (let i = 7; i >= 0; i--) {
@@ -1695,8 +1717,8 @@ admin.get('/cashflow', (req, res) => {
     const eStr = end.toISOString().slice(0, 10);
     weekly.push({
       weekStart: sStr,
-      inCents: all.filter((e) => e.direction === 'in' && e.date >= sStr && e.date <= eStr).reduce((s, e) => s + e.amountCents, 0),
-      outCents: all.filter((e) => e.direction === 'out' && e.date >= sStr && e.date <= eStr).reduce((s, e) => s + e.amountCents, 0),
+      inCents: agg.all.filter((e) => e.direction === 'in' && e.date >= sStr && e.date <= eStr).reduce((s, e) => s + e.amountCents, 0),
+      outCents: agg.all.filter((e) => e.direction === 'out' && e.date >= sStr && e.date <= eStr).reduce((s, e) => s + e.amountCents, 0),
     });
   }
   // Fixed monthly payments (owner's fixed costs) — counted in the monthly
@@ -1710,8 +1732,8 @@ admin.get('/cashflow', (req, res) => {
     for (const e of list) m.set(e.category, (m.get(e.category) || 0) + e.amountCents);
     return [...m.entries()].map(([category, amountCents]) => ({ category, amountCents })).sort((a, b) => b.amountCents - a.amountCents);
   };
-  const monthIn = groupBy(all.filter((e) => e.direction === 'in' && inMonth(e)));
-  const monthOut = groupBy(all.filter((e) => e.direction === 'out' && inMonth(e)));
+  const monthIn = groupBy(agg.all.filter((e) => e.direction === 'in' && inMonth(e)));
+  const monthOut = groupBy(agg.all.filter((e) => e.direction === 'out' && inMonth(e)));
   for (const f of fixed) monthOut.push({ category: f.category, amountCents: f.amountCents, fixed: true });
   const monthInTotal = monthIn.reduce((s, x) => s + x.amountCents, 0);
   const monthOutTotal = monthOut.reduce((s, x) => s + x.amountCents, 0);
@@ -1745,8 +1767,8 @@ admin.get('/cashflow', (req, res) => {
       profitCents: revenueCents - costs,
     };
   });
-  const totals = { inGroups: groupBy(all.filter((e) => e.direction === 'in')), outGroups: groupBy(all.filter((e) => e.direction === 'out')) };
-  const tm = truckMonthlyFor(monthParam, entries, advanceRows);
+  const totals = { inGroups: groupBy(agg.all.filter((e) => e.direction === 'in')), outGroups: groupBy(agg.all.filter((e) => e.direction === 'out')) };
+  const tm = truckMonthlyFor(monthParam, agg.entries, advanceRows);
   const loads = db.prepare(
     `SELECT l.id, l.reference, u.name AS driverName FROM loads l
      LEFT JOIN users u ON u.id = l.driverId ORDER BY l.id DESC LIMIT 50`,
@@ -1763,7 +1785,7 @@ admin.get('/cashflow', (req, res) => {
 admin.get('/cashflow/report.csv', (req, res) => {
   const section = ['total', 'monthly', 'trucks'].includes(req.query.section) ? req.query.section : 'monthly';
   const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
-  const { entries, advanceRows, all } = cashMergedEntries();
+  const { entries, advanceRows, all } = cashAllEntries();
   const fixed = db.prepare('SELECT * FROM fixed_payments WHERE active = 1 ORDER BY category').all();
   const money = (c) => (Number(c || 0) / 100).toFixed(2);
   const q = (s) => '"' + String(s ?? '').replace(/"/g, '""') + '"';
@@ -3676,14 +3698,31 @@ function refKey(ref) {
 // set of PAID load numbers; phase 2 imports only the rate
 // confirmations whose load number is in that set. A cancelled load is
 // never on a schedule, so its rate confirmation is held out.
-const rcImportRuns = new Map();
+// Import runs live in SQLite: a full mailbox scan can take far longer
+// than any in-memory TTL, and a server restart must not lose the paid
+// list or restart the scan from zero.
+function saveRcImportRun(run) {
+  db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes));
+}
 function rcImportRun(runId) {
-  const nowMs = Date.now();
-  for (const [k, v] of rcImportRuns) if (nowMs - v.startedAt > 30 * 60 * 1000) rcImportRuns.delete(k);
-  if (runId && rcImportRuns.has(runId)) return rcImportRuns.get(runId);
+  if (runId) {
+    const row = db.prepare('SELECT * FROM rc_import_runs WHERE id = ?').get(runId);
+    if (row) {
+      return {
+        id: row.id, startedAt: row.startedAt,
+        paidRefs: new Set(JSON.parse(row.paidRefs || '[]')),
+        scheduleHashes: new Set(JSON.parse(row.scheduleHashes || '[]')),
+        examined: new Set(JSON.parse(row.examined || '[]')),
+        schedules: row.schedules || 0,
+        mailboxes: JSON.parse(row.mailboxes || '[]'),
+        mailboxErrors: JSON.parse(row.mailboxErrors || '[]'),
+      };
+    }
+  }
   const run = {
     id: crypto.randomBytes(8).toString('hex'),
-    startedAt: nowMs,
+    startedAt: Date.now(),
     paidRefs: new Set(),
     scheduleHashes: new Set(),
     examined: new Set(),
@@ -3691,7 +3730,7 @@ function rcImportRun(runId) {
     mailboxes: db.prepare('SELECT id, name, outlookEmail FROM users WHERE outlookRefreshToken IS NOT NULL ORDER BY isMainAdmin DESC, id ASC').all(),
     mailboxErrors: [],
   };
-  rcImportRuns.set(run.id, run);
+  saveRcImportRun(run);
   return run;
 }
 
@@ -3710,7 +3749,8 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
     let processed = 0;
     const finish = (done) => {
       const nextCursor = done ? null : Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
-      if (done) rcImportRuns.delete(run.id);
+      if (done) db.prepare('DELETE FROM rc_import_runs WHERE id = ?').run(run.id);
+      else saveRcImportRun(run);
       res.json({
         ...counts,
         phase: state.phase,
@@ -3762,7 +3802,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
           processed += 1;
           try {
             const atts = attsCache ? { value: attsCache } : await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
-            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')));
+            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')) && (a.size || 0) < 12000000);
             if (!files.length) continue;
             const namesText = files.map((a) => a.name || '').join(' ');
             const f = extractRcLoadFields(namesText, subject);
@@ -3808,7 +3848,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
           try {
             const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
             for (const a of (atts.value || [])) {
-              if (!a.id || !((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || ''))) continue;
+              if (!a.id || (a.size || 0) >= 12000000 || !((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || ''))) continue;
               const { fileBuffer } = await outlookAttachmentBuffer(mbUser, m.id, a.id);
               if (!fileBuffer || !fileBuffer.length) continue;
               const h = crypto.createHash('sha256').update(fileBuffer).digest('hex');
@@ -3822,12 +3862,13 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         } else {
           if (!m.hasAttachments) continue;
           if (run.examined.has(exKey)) continue;
+          if (!/rate|confirm|load|tender|booking|signed|agreement|\d{5,}/i.test(subject)) { run.examined.add(exKey); counts.notRc += 1; continue; }
           run.examined.add(exKey);
           if (db.prepare('SELECT id FROM rate_confirmations WHERE outlookMessageId = ?').get(m.id)) { counts.alreadyHave += 1; continue; }
           processed += 1;
           try {
             const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
-            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')));
+            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')) && (a.size || 0) < 12000000);
             let handled = false;
             for (const att of files) {
               const { fileBuffer } = await outlookAttachmentBuffer(mbUser, m.id, att.id);

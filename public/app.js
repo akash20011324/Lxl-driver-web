@@ -2819,6 +2819,7 @@ async function viewMaintenance(main) {
 /* ---------- Cash Flow (admin) ---------- */
 let cfOutlookPick = null; // { messageId, attachmentId, subject } while an Outlook import is staged
 
+let rcImportDoneMsg = ''; // last import result, kept visible across re-renders
 let cfMonthKey = ''; // YYYY-MM shown in the monthly P&L; '' = current month
 
 async function cfDownload(section) {
@@ -3966,6 +3967,8 @@ async function viewRateCons(main) {
   });
   const outlookPick = document.getElementById('outlookPick');
   if (outlookPick) outlookPick.addEventListener('click', () => loadOutlookMessages(''));
+  const rcStatusEl = document.getElementById('rcImportStatus');
+  if (rcStatusEl && rcImportDoneMsg) rcStatusEl.textContent = rcImportDoneMsg;
   const rcImportAll = document.getElementById('rcImportAll');
   if (rcImportAll) rcImportAll.addEventListener('click', async () => {
     const status = document.getElementById('rcImportStatus');
@@ -3978,9 +3981,11 @@ async function viewRateCons(main) {
     let mailboxes = [];
     let schedules = 0;
     let paidLoads = 0;
+    let lastPhase = 'sched';
+    let finished = false;
     try {
-      for (let round = 0; round < 300; round++) {
-        if (status) status.textContent = 'Working… first every OTR schedule is read to build the paid-load list, then only rate confirmations on that list come in. ' + tot.imported + ' imported so far (this reads whole mailboxes — it can take a few minutes).';
+      for (let round = 0; round < 5000; round++) {
+        if (status) status.textContent = 'Working… ' + ({ sched: 'reading OTR schedules to build the paid-load list', rc: 'importing rate confirmations', bol: 'filing BOLs into the loads' }[lastPhase] || lastPhase) + '. So far: ' + tot.imported + ' imported, ' + tot.loadsCreated + ' loads created, ' + tot.heldOut + ' held out, ' + tot.bolsAdded + ' BOLs filed. Paid loads found: ' + paidLoads + '.';
         const r = await api('/api/admin/rate-confirmations/import-all', { method: 'POST', body: JSON.stringify({ cursor }) });
         tot.imported += r.imported || 0;
         tot.loadsCreated += r.loadsCreated || 0;
@@ -3998,7 +4003,13 @@ async function viewRateCons(main) {
         if (typeof r.schedules === 'number') schedules = r.schedules;
         if (typeof r.paidLoads === 'number') paidLoads = r.paidLoads;
         cursor = r.nextCursor;
-        if (r.done || !cursor) break;
+        if (r.phase) lastPhase = r.phase;
+        if (r.done || !cursor) { finished = true; break; }
+      }
+      if (!finished) {
+        if (status) status.textContent = 'Still working — the import is not finished yet. Click "Import ALL rate confirmations" again and it continues where it left off (nothing is ever imported twice). Progress so far: ' + tot.imported + ' imported, ' + tot.loadsCreated + ' loads created, ' + tot.heldOut + ' held out, ' + tot.bolsAdded + ' BOLs filed.';
+        rcImportAll.disabled = false;
+        return;
       }
       if (status) status.textContent = 'Done — scanned mailbox(es): ' + (mailboxes.join(', ') || 'none connected') + '. ' +
         'Found ' + schedules + ' OTR schedules covering ' + paidLoads + ' paid loads. ' +
@@ -4008,6 +4019,7 @@ async function viewRateCons(main) {
         tot.notRc + ' emails were not rate confirmations.' +
         (tot.bolsAdded || tot.bolsUnmatched ? ' Added ' + tot.bolsAdded + ' BOLs into the loads\' Documents' + (tot.bolsDuplicate ? ' (' + tot.bolsDuplicate + ' duplicate BOLs skipped)' : '') + (tot.bolsUnmatched ? '; ' + tot.bolsUnmatched + ' BOL emails could not be matched to an imported load' + (bolsUnmatchedSubjects.length ? ': ' + bolsUnmatchedSubjects.join(' · ') : '') : '') + '. ' : '') +
         (tot.skipped ? ' ' + tot.skipped + ' could not be read fully' + (skippedSubjects.length ? ': ' + skippedSubjects.join(' · ') : '') + '.' : '');
+      rcImportDoneMsg = status ? status.textContent : '';
       toast('Import finished: ' + tot.imported + ' rate confirmations, ' + tot.loadsCreated + ' loads created, ' + tot.heldOut + ' held out.', 'ok');
       setTimeout(() => renderAdminView('ratecons'), 2500);
     } catch (err) { showError(err); if (status) status.textContent = 'Import stopped — you can run it again, already-imported ones are skipped.'; }
