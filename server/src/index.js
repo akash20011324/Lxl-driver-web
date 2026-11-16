@@ -3763,6 +3763,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         mailboxes: run.mailboxes.map((u) => u.outlookEmail || u.name),
         mailboxErrors: run.mailboxErrors,
         schedules: run.schedules,
+        schedulesSeen: run.schedulesSeen || 0,
         paidLoads: run.paidRefs.size,
         nextCursor,
         done,
@@ -3851,6 +3852,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
           if (run.examined.has(exKey)) continue;
           run.examined.add(exKey);
           processed += 1;
+          run.schedulesSeen = (run.schedulesSeen || 0) + 1;
           try {
             const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
             for (const a of (atts.value || [])) {
@@ -3932,7 +3934,8 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
             if (!handled) counts.notRc += 1;
           } catch (e) {
             counts.skipped += 1;
-            if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject + ' (error)');
+            console.error('rc import skip:', subject, '-', e && e.message);
+            if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject + ' (error: ' + String((e && e.message) || e).slice(0, 90) + ')');
           }
         }
       }
