@@ -2853,7 +2853,7 @@ async function viewCashflow(main) {
   const bankCats = (dir, name) => {
     const opts = dir === 'in'
       ? ['Factoring payment', 'Broker payment', 'Other']
-      : ['Fuel (Pilot weekly)', 'Tolls', 'Maintenance', 'Repairs', 'Driver pay', 'Dispatch pay', 'Truck payment', 'Insurance', 'Office expenses', 'Other'];
+      : ['Fuel (Pilot weekly)', 'Tolls', 'Parking', 'Maintenance', 'Repairs', 'Driver pay', 'Dispatch pay', 'Truck payment', 'Insurance', 'Office expenses', 'Other'];
     const sel = bankSuggest(name, dir);
     return opts.map((o) => '<option' + (o === sel ? ' selected' : '') + '>' + o + '</option>').join('');
   };
@@ -2890,7 +2890,8 @@ async function viewCashflow(main) {
     (outlook.connected
       ? '<p class="small muted">Connected: ' + esc(outlook.email || '') + ' — pick the factoring payment, toll bill or Pilot weekly email; the amount is read from its attachment and you confirm it before saving.</p>' +
         '<div class="form-actions"><input id="cfMailSearch" placeholder="Search — pilot, toll, factoring…"> <button class="btn btn-sm" id="cfMailSearchBtn">Search</button></div>' +
-        '<div id="cfMailList"><p class="small muted">Loading emails…</p></div>'
+        '<div id="cfMailList"><p class="small muted">Loading emails…</p></div>' +
+        '<div id="cfOutlookPreview"></div>'
       : '<p class="small muted">Connect the Outlook mailbox to import factoring payments, toll bills and the Pilot weekly fuel report.</p>' +
         '<div class="form-actions"><button class="btn btn-sm" id="cfOutlookConnect">Connect Outlook</button></div>') +
     '</section>' +
@@ -2898,7 +2899,7 @@ async function viewCashflow(main) {
     '<p class="small muted hidden" id="cfFromOutlookNote"></p>' +
     '<form id="cfEntryForm"><div class="form-grid">' +
     '<label>In / Out <select name="direction"><option value="out">Money out</option><option value="in">Money in</option></select></label>' +
-    '<label>Category <select name="category"><option>Fuel (Pilot weekly)</option><option>Tolls</option><option>Maintenance</option><option>Repairs</option><option>Driver pay</option><option>Dispatch pay</option><option>Truck payment</option><option>Insurance</option><option>Office expenses</option><option>Factoring payment</option><option>Broker payment</option><option>Other</option></select></label>' +
+    '<label>Category <select name="category"><option>Fuel (Pilot weekly)</option><option>Tolls</option><option>Parking</option><option>Maintenance</option><option>Repairs</option><option>Driver pay</option><option>Dispatch pay</option><option>Truck payment</option><option>Insurance</option><option>Office expenses</option><option>Factoring payment</option><option>Broker payment</option><option>Other</option></select></label>' +
     '<label>Amount $ <input name="amount" type="number" min="0" step="0.01" required placeholder="0.00"></label>' +
     '<label>Date <input name="date" type="date" required></label>' +
     '<label>Truck <select name="truckId">' + truckOpts + '</select></label>' +
@@ -2997,23 +2998,42 @@ async function viewCashflow(main) {
           const files = (atts || []).filter((a) => a.id);
           if (!files.length) { toast('That email has no file attachment.', 'error'); return; }
           const att = files[0];
+          const prevBox = main.querySelector('#cfOutlookPreview');
+          if (prevBox) prevBox.innerHTML = '<p class="small muted">Reading the file…</p>';
           const prev = await api('/api/admin/cashflow/outlook-preview', { method: 'POST', body: JSON.stringify({ messageId: b.dataset.cfmail, attachmentId: att.id }) });
-          cfOutlookPick = { messageId: b.dataset.cfmail, attachmentId: att.id };
-          form.elements.direction.value = prev.direction || 'out';
-          if (prev.category) form.elements.category.value = prev.category;
-          if (prev.amountCents) form.elements.amount.value = (prev.amountCents / 100).toFixed(2);
-          if (prev.date) form.elements.date.value = prev.date;
-          const note = main.querySelector('#cfFromOutlookNote');
-          note.textContent = 'From Outlook: “' + (prev.subject || b.dataset.subject || '') + '” — check the amount, then Save. The email attachment is saved with the entry.';
-          note.classList.remove('hidden');
-          main.querySelector('#cfFormTitle').textContent = 'Confirm import';
-          const fl = main.querySelector('#cfFileLabel');
-          if (fl) fl.classList.add('hidden');
-          addCard.classList.remove('hidden');
-          addCard.style.display = '';
-          outlookCard.classList.add('hidden');
-          outlookCard.style.display = 'none';
-          addCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          if (prevBox) {
+            prevBox.innerHTML = '<div class="cf-preview"><h4>Preview — check this is the right file</h4>' +
+              '<p><strong>' + esc(prev.fileName || 'attachment') + '</strong> <span class="muted">· from ' + esc(prev.from || '') + ' · ' + esc(prev.date || '') + '</span></p>' +
+              '<p class="small muted">' + esc(prev.subject || '') + '</p>' +
+              (prev.imageDataUri
+                ? '<img class="cf-preview-img" src="' + prev.imageDataUri + '" alt="Attachment preview">'
+                : (prev.textPreview ? '<div class="cf-preview-text">' + esc(prev.textPreview) + '…</div>' : '<p class="small muted">No readable text in this file.</p>')) +
+              '<p>Detected: <strong>' + (prev.amountCents ? fmtMoney(prev.amountCents) : 'no amount found') + '</strong> · looks like <strong>' + esc(prev.category || 'Other') + '</strong> (' + (prev.direction === 'in' ? 'money in' : 'money out') + ')</p>' +
+              '<div class="form-actions"><button class="btn btn-sm" id="cfPreviewUse">Use this file</button> ' +
+              '<button class="btn-ghost btn-sm" id="cfPreviewCancel">Choose a different file</button></div></div>';
+            prevBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const useBtn = prevBox.querySelector('#cfPreviewUse');
+            if (useBtn) useBtn.addEventListener('click', () => {
+              cfOutlookPick = { messageId: b.dataset.cfmail, attachmentId: att.id };
+              form.elements.direction.value = prev.direction || 'out';
+              if (prev.category) form.elements.category.value = prev.category;
+              if (prev.amountCents) form.elements.amount.value = (prev.amountCents / 100).toFixed(2);
+              if (prev.date) form.elements.date.value = prev.date;
+              const note = main.querySelector('#cfFromOutlookNote');
+              note.textContent = 'From Outlook: “' + (prev.subject || b.dataset.subject || '') + '” — check the amount, then Save. The email attachment is saved with the entry.';
+              note.classList.remove('hidden');
+              main.querySelector('#cfFormTitle').textContent = 'Confirm import';
+              const fl = main.querySelector('#cfFileLabel');
+              if (fl) fl.classList.add('hidden');
+              addCard.classList.remove('hidden');
+              addCard.style.display = '';
+              outlookCard.classList.add('hidden');
+              outlookCard.style.display = 'none';
+              addCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            });
+            const cancelBtn = prevBox.querySelector('#cfPreviewCancel');
+            if (cancelBtn) cancelBtn.addEventListener('click', () => { prevBox.innerHTML = ''; });
+          }
         } catch (err) { showError(err); }
       }));
     } catch (err) { box.innerHTML = '<p class="small muted">Could not load emails.</p>'; }

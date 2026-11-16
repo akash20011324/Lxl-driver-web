@@ -1752,6 +1752,7 @@ function suggestCashKind(subject, from) {
   const s = `${subject || ''} ${from || ''}`.toLowerCase();
   if (s.includes('pilot')) return { direction: 'out', category: 'Fuel (Pilot weekly)' };
   if (/toll|e-zpass|ezpass|prepass|bestpass|pay by plate/.test(s)) return { direction: 'out', category: 'Tolls' };
+  if (/parking|park/.test(s)) return { direction: 'out', category: 'Parking' };
   if (/factor|remittance|payment advice|funding|settlement/.test(s)) return { direction: 'in', category: 'Factoring payment' };
   return { direction: 'out', category: 'Other' };
 }
@@ -1795,6 +1796,7 @@ function builtinBankCategory(name, direction, amountCents) {
   }
   if (s.includes('PILOT') && amountCents >= 50000) return 'Fuel (Pilot weekly)';
   if (s.includes('PREPASS') || s.includes('EZPASS') || s.includes('E-ZPASS') || s.includes('TOLL')) return 'Tolls';
+  if (s.includes('PARK')) return 'Parking';
   if (s.includes('ZELLE') && (s.includes('AKASHDEEP') || s.includes('ARSH'))) return 'Driver pay';
   if (s.includes('WIRE TRANSFER FEE') || s.includes('SERVICE CHARGE') || s.includes('MONTHLY FEE') || s.includes('RINGCENTRAL')) return 'Office expenses';
   return null;
@@ -1838,7 +1840,30 @@ app.post('/api/sync/bank', (req, res) => {
     if (r.changes) added += 1;
   }
   const autoCategorized = sweepBankPending();
-  res.json({ ok: true, added, autoCategorized });
+  const unknowns = db.prepare("SELECT id, name, date, amountCents, direction FROM bank_transactions WHERE status = 'pending' ORDER BY date DESC, id DESC LIMIT 25").all();
+  res.json({ ok: true, added, autoCategorized, unknowns });
+});
+
+app.post('/api/sync/bank/categorize', (req, res) => {
+  const key = process.env.BANK_SYNC_KEY;
+  if (!key) return err(res, 503, 'Bank sync is not configured');
+  if (req.get('x-sync-key') !== key) return err(res, 401, 'Bad sync key');
+  const decisions = (req.body && req.body.decisions) || [];
+  let done = 0;
+  for (const d of decisions) {
+    if (!d || !d.id || !d.category) continue;
+    const tx = db.prepare("SELECT * FROM bank_transactions WHERE id = ? AND status = 'pending'").get(d.id);
+    if (!tx) continue;
+    const r = db.prepare('INSERT INTO cash_entries (direction, date, category, amountCents, truckId, note, source, loadId, createdAt) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?)')
+      .run(tx.direction, tx.date, String(d.category), tx.amountCents, tx.name, 'bank', now());
+    db.prepare("UPDATE bank_transactions SET status = 'categorized', entryId = ? WHERE id = ?").run(r.lastInsertRowid, tx.id);
+    for (const k of bankKeys(tx.name))
+      db.prepare('INSERT OR IGNORE INTO bank_rules (pattern, direction, category, createdAt) VALUES (?, ?, ?, ?)')
+        .run(k, tx.direction, String(d.category), now());
+    done += 1;
+  }
+  sweepBankPending();
+  res.json({ ok: true, done });
 });
 
 admin.post('/cashflow/bank/:id/categorize', (req, res) => {
@@ -1877,13 +1902,19 @@ admin.post('/cashflow/outlook-preview', async (req, res) => {
     const accessToken = await outlookAccessToken(user);
     const msg = await outlookGraph(accessToken,
       `/me/messages/${encodeURIComponent(messageId)}?$select=subject,from,receivedDateTime`);
-    const { fileBuffer } = await outlookAttachmentBuffer(user, messageId, attachmentId);
+    const { att, fileBuffer } = await outlookAttachmentBuffer(user, messageId, attachmentId);
     let amountCents = null;
-    try { amountCents = detectCashAmountCents(await extractFileText(fileBuffer)); } catch { /* detection is best-effort */ }
+    let text = '';
+    try { text = await extractFileText(fileBuffer); amountCents = detectCashAmountCents(text); } catch { /* detection is best-effort */ }
     const from = (msg.from && msg.from.emailAddress && (msg.from.emailAddress.name || msg.from.emailAddress.address)) || '';
+    const contentType = att.contentType || '';
     res.json({
       amountCents, subject: msg.subject ?? '', from,
       date: msg.receivedDateTime ? String(msg.receivedDateTime).slice(0, 10) : new Date().toISOString().slice(0, 10),
+      fileName: att.name || 'attachment',
+      textPreview: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 700),
+      imageDataUri: contentType.startsWith('image/') && fileBuffer.length <= 2500000
+        ? `data:${contentType};base64,${fileBuffer.toString('base64')}` : null,
       ...suggestCashKind(msg.subject, from),
     });
   } catch (e) {
