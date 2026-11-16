@@ -1524,8 +1524,11 @@ admin.patch('/maintenance/items/:id', (req, res) => {
   }
   if (lastDoneMi !== undefined) {
     updates.lastDoneMi = lastDoneMi === null || lastDoneMi === '' ? null : Math.round(Number(lastDoneMi));
-    updates.lastDoneAt = updates.lastDoneMi === null ? null : now();
     updates.alertLevel = 'none';
+    if (req.body.lastDoneAt !== undefined)
+      updates.lastDoneAt = req.body.lastDoneAt || null;
+    else if (updates.lastDoneMi === null)
+      updates.lastDoneAt = null;
   }
   const keys = Object.keys(updates);
   if (keys.length) {
@@ -1565,6 +1568,20 @@ admin.post('/maintenance/items/:id/done', upload.single('file'), (req, res) => {
         `${item.name} — Truck ${truck ? truck.unitNumber : ''}${req.body && req.body.shop ? ' · ' + req.body.shop : ''}`, fileId, 'maintenance', now());
   }
   res.json(serializeMaintItem(db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(item.id), truck));
+});
+
+admin.post('/maintenance/items/:id/remind', (req, res) => {
+  const item = db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(req.params.id);
+  if (!item) return err(res, 404, 'Service not found');
+  const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(item.truckId);
+  if (!truck || !truck.driverId) return err(res, 400, 'No driver is assigned to that truck');
+  const c = maintComputed(item, truck);
+  const when = c.remainingMi === null ? 'due now'
+    : c.remainingMi <= 0 ? `${Math.abs(c.remainingMi).toLocaleString('en-US')} mi OVERDUE`
+    : `due in ${c.remainingMi.toLocaleString('en-US')} mi`;
+  notifyDriver(db, truck.driverId, 'maintenance', `${item.name} is needed`,
+    `Truck ${truck.unitNumber} — ${item.name} is ${when}.`).catch(() => {});
+  res.json({ ok: true });
 });
 
 // --- Cash Flow ---

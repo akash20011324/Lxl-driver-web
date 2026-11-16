@@ -2685,7 +2685,8 @@ async function viewMaintenance(main) {
       (it.drivenMi !== null && it.drivenMi !== undefined ? ' · Driven since: ' + fmtMi(it.drivenMi) + ' mi' : '') + '</div>' +
       '<div class="maint-actions">' +
       '<button class="btn btn-sm" data-done="' + it.id + '">Mark done</button> ' +
-      '<button class="btn-ghost btn-sm" data-setlast="' + it.id + '" data-name="' + esc(it.name) + '">Set last done</button> ' +
+      '<button class="btn-ghost btn-sm" data-setlast="' + it.id + '">Set last done</button> ' +
+      '<button class="btn-ghost btn-sm" data-remind="' + it.id + '" data-name="' + esc(it.name) + '">Remind driver</button> ' +
       '<button class="btn-ghost btn-sm" data-delitem="' + it.id + '" data-name="' + esc(it.name) + '">Delete</button></div>' +
       '<form class="maint-done-form hidden" data-doneform="' + it.id + '">' +
       '<div class="form-grid">' +
@@ -2697,6 +2698,13 @@ async function viewMaintenance(main) {
       '<div class="form-actions"><button class="btn btn-sm" type="submit">Save — service done</button> ' +
       '<button class="btn-ghost btn-sm" type="button" data-donecancel="' + it.id + '">Cancel</button></div>' +
       '<p class="small muted">Saving restarts the counter from the truck\'s current miles (' + fmtMi(t.odometerMi) + ') and adds the cost to Cash Flow.</p></form>' +
+      '<form class="maint-done-form hidden" data-lastform="' + it.id + '">' +
+      '<div class="form-grid">' +
+      '<label>Last done at (miles) <input name="lastDoneMi" type="number" min="0" step="any" required placeholder="e.g. 543400"></label>' +
+      '<label>Date (optional) <input name="lastDoneDate" type="date"></label>' +
+      '</div>' +
+      '<div class="form-actions"><button class="btn btn-sm" type="submit">Save</button> ' +
+      '<button class="btn-ghost btn-sm" type="button" data-lastcancel="' + it.id + '">Cancel</button></div></form>' +
       '</div>';
   };
   const truckPanel = (t) => '<section class="maint-panel">' +
@@ -2733,15 +2741,32 @@ async function viewMaintenance(main) {
       renderAdminView('maintenance');
     } catch (err) { showError(err); }
   }));
-  main.querySelectorAll('[data-setlast]').forEach((b) => b.addEventListener('click', async () => {
-    const v = prompt('At how many miles was "' + b.dataset.name + '" last done? (odometer reading)');
-    if (v === null) return;
-    const mi = Number(String(v).replace(/[^0-9.]/g, ''));
+  main.querySelectorAll('[data-setlast]').forEach((b) => b.addEventListener('click', () => {
+    const f = main.querySelector('[data-lastform="' + b.dataset.setlast + '"]');
+    if (f) { f.classList.toggle('hidden'); const inp = f.querySelector('[name="lastDoneMi"]'); if (inp) inp.focus(); }
+  }));
+  main.querySelectorAll('[data-lastcancel]').forEach((b) => b.addEventListener('click', () => {
+    const f = main.querySelector('[data-lastform="' + b.dataset.lastcancel + '"]');
+    if (f) { f.reset(); f.classList.add('hidden'); }
+  }));
+  main.querySelectorAll('[data-lastform]').forEach((f) => f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(f);
+    const mi = Number(fd.get('lastDoneMi'));
     if (!Number.isFinite(mi) || mi < 0) { toast('Enter the miles as a number.', 'error'); return; }
+    const body = { lastDoneMi: Math.round(mi) };
+    const dt = fd.get('lastDoneDate');
+    if (dt) body.lastDoneAt = dt;
     try {
-      await api('/api/admin/maintenance/items/' + b.dataset.setlast, { method: 'PATCH', body: JSON.stringify({ lastDoneMi: Math.round(mi) }) });
+      await api('/api/admin/maintenance/items/' + f.dataset.lastform, { method: 'PATCH', body: JSON.stringify(body) });
       toast('Last done saved.', 'ok');
       renderAdminView('maintenance');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-remind]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/maintenance/items/' + b.dataset.remind + '/remind', { method: 'POST', body: JSON.stringify({}) });
+      toast('Reminder sent to the driver.', 'ok');
     } catch (err) { showError(err); }
   }));
   main.querySelectorAll('[data-delitem]').forEach((b) => b.addEventListener('click', async () => {
@@ -2900,10 +2925,20 @@ async function viewCashflow(main) {
   const addCard = main.querySelector('#cfAddCard');
   const outlookCard = main.querySelector('#cfOutlookCard');
   const form = main.querySelector('#cfEntryForm');
-  form.elements.date.value = new Date().toISOString().slice(0, 10);
-  main.querySelector('#cfAddToggle').addEventListener('click', () => addCard.classList.toggle('hidden'));
-  main.querySelector('#cfOutlookBtn').addEventListener('click', () => outlookCard.classList.toggle('hidden'));
-  main.querySelector('#cfAddCancel').addEventListener('click', () => { cfOutlookPick = null; form.reset(); addCard.classList.add('hidden'); });
+  const toggleCard = (card) => {
+    if (!card) return;
+    const opening = card.classList.contains('hidden');
+    card.classList.toggle('hidden');
+    card.style.display = opening ? '' : 'none';
+    if (opening) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const addToggleBtn = main.querySelector('#cfAddToggle');
+  if (addToggleBtn) addToggleBtn.addEventListener('click', () => toggleCard(addCard));
+  const outlookBtn = main.querySelector('#cfOutlookBtn');
+  if (outlookBtn) outlookBtn.addEventListener('click', () => toggleCard(outlookCard));
+  const dateInput = form ? form.querySelector('[name="date"]') : null;
+  if (dateInput) dateInput.value = new Date().toISOString().slice(0, 10);
+  main.querySelector('#cfAddCancel').addEventListener('click', () => { cfOutlookPick = null; form.reset(); addCard.classList.add('hidden'); addCard.style.display = 'none'; });
   main.querySelector('#cfMonthGo').addEventListener('click', () => {
     const v = main.querySelector('#cfMonthInput').value;
     if (v) { cfMonthKey = v; renderAdminView('cashflow'); }
@@ -2975,7 +3010,9 @@ async function viewCashflow(main) {
           const fl = main.querySelector('#cfFileLabel');
           if (fl) fl.classList.add('hidden');
           addCard.classList.remove('hidden');
+          addCard.style.display = '';
           outlookCard.classList.add('hidden');
+          outlookCard.style.display = 'none';
           addCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } catch (err) { showError(err); }
       }));
