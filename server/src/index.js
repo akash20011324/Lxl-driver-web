@@ -4812,7 +4812,7 @@ async function backfillDocDates() {
     // dates are corrected to what the document itself says — including
     // clearing a wrong expiry on NO EXPIRY documents. Detection that
     // finds nothing leaves hand-entered dates untouched.
-    const marker = 'doc-dates-recheck-2026-11-16-v2';
+    const marker = 'doc-dates-recheck-2026-11-16-v3';
     if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
     const log = (m) => console.log('doc dates recheck: ' + m);
     const jobs = [
@@ -4824,11 +4824,10 @@ async function backfillDocDates() {
         'SELECT d.id, d.expiryDate, d.issuedDate, f.storedFilename FROM ' + table + ' d JOIN files f ON f.id = d.fileId'
       ).all();
       for (const r of rows) {
-        let text = '';
-        try { text = await extractFileText(fs.readFileSync(path.join(UPLOADS_DIR, r.storedFilename))); } catch { /* unreadable file: keep stored dates */ }
-        if (!text) { log(label + ' ' + r.id + ': no readable text — stored dates kept'); continue; }
-        const found = detectDocDates(text);
-        const noExpiry = /no\s+expir\w*/i.test(text);
+        let buf = null;
+        try { buf = fs.readFileSync(path.join(UPLOADS_DIR, r.storedFilename)); } catch { /* missing file: keep stored dates */ }
+        if (!buf) { log(label + ' ' + r.id + ': file unreadable — stored dates kept'); continue; }
+        const { found, noExpiry } = await detectDocDatesFull(buf);
         if (!found.issuedDate && !found.expiryDate && !noExpiry) { log(label + ' ' + r.id + ': no dates in document — stored dates kept'); continue; }
         let newIssued = r.issuedDate, newExpiry = r.expiryDate;
         if (found.issuedDate) newIssued = found.issuedDate;
@@ -6061,12 +6060,35 @@ function detectDocDates(text) {
   if (expiry) out.expiryDate = expiry;
   return out;
 }
+async function detectDocDatesFull(buf) {
+  // { found, noExpiry } for a document buffer. First pass: the text
+  // layer. Second pass (PDFs only, when the first found no dates): OCR
+  // the page images — filled-form PDFs such as ACORD insurance
+  // certificates keep their values in the image layer, not the text
+  // layer, so the text pass sees the blank form and finds nothing.
+  let text = '';
+  try { text = await extractFileText(buf); } catch { /* keep empty */ }
+  let found = detectDocDates(text);
+  let noExpiry = /no\s+expir\w*/i.test(text);
+  const isPdf = buf.length >= 4 && buf.subarray(0, 4).toString('ascii') === '%PDF';
+  if (!found.issuedDate && !found.expiryDate && isPdf) {
+    try {
+      const ocrText = cleanRateText(await ocrPdfImagesQueued(buf));
+      const ocrFound = detectDocDates(ocrText);
+      if (ocrFound.issuedDate || ocrFound.expiryDate) {
+        found = ocrFound;
+        noExpiry = /no\s+expir\w*/i.test(ocrText);
+        console.log('doc dates: OCR pass found dates', found);
+      }
+    } catch (e) { console.error('doc dates OCR pass failed', e); }
+  }
+  return { found, noExpiry };
+}
 async function detectDatesForFile(filePath) {
   try {
     const buf = fs.readFileSync(filePath);
-    const text = await extractFileText(buf);
-    const found = detectDocDates(text);
-    console.log('equipment-doc dates', { bytes: buf.length, textLen: text.length, ...found });
+    const { found } = await detectDocDatesFull(buf);
+    console.log('equipment-doc dates', { bytes: buf.length, ...found });
     return found;
   } catch (e) {
     console.error('equipment-doc date detection failed', e);
