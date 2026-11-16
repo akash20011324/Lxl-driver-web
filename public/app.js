@@ -3974,7 +3974,7 @@ async function viewRateCons(main) {
   if (rcImportAll) rcImportAll.addEventListener('click', async () => {
     const status = document.getElementById('rcImportStatus');
     rcImportAll.disabled = true;
-    const tot = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0 };
+    const tot = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, unverified: 0, bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0 };
     const skippedSubjects = [];
     const heldOutSubjects = [];
     const bolsUnmatchedSubjects = [];
@@ -3994,6 +3994,7 @@ async function viewRateCons(main) {
         tot.notRc += r.notRc || 0;
         tot.skipped += r.skipped || 0;
         tot.heldOut += r.heldOut || 0;
+        tot.unverified += r.unverified || 0;
         tot.bolsAdded += r.bolsAdded || 0;
         tot.bolsDuplicate += r.bolsDuplicate || 0;
         tot.bolsUnmatched += r.bolsUnmatched || 0;
@@ -4015,8 +4016,9 @@ async function viewRateCons(main) {
       if (status) status.textContent = 'Done — scanned mailbox(es): ' + (mailboxes.join(', ') || 'none connected') + '. ' +
         'Found ' + schedules + ' OTR schedules covering ' + paidLoads + ' paid loads. ' +
         'Imported ' + tot.imported + ' rate confirmations and created ' + tot.loadsCreated + ' past loads (completed, assigned to their drivers). ' +
+        (tot.unverified ? tot.unverified + ' of them were not on any OTR schedule (imported on your say-so — a cancelled one can be deleted from its load). ' : '') +
         tot.alreadyHave + ' were already there (a duplicate is never imported twice). ' +
-        (tot.heldOut ? tot.heldOut + ' rate confirmations were LEFT OUT — their load is not on any OTR schedule (cancelled or not paid yet)' + (heldOutSubjects.length ? ': ' + heldOutSubjects.join(' · ') : '') + '. ' : '') +
+        (tot.heldOut ? tot.heldOut + ' rate confirmations were LEFT OUT — no load number could be read from them' + (heldOutSubjects.length ? ': ' + heldOutSubjects.join(' · ') : '') + '. ' : '') +
         tot.notRc + ' emails were not rate confirmations.' +
         (tot.bolsAdded || tot.bolsUnmatched ? ' Added ' + tot.bolsAdded + ' BOLs into the loads\' Documents' + (tot.bolsDuplicate ? ' (' + tot.bolsDuplicate + ' duplicate BOLs skipped)' : '') + (tot.bolsUnmatched ? '; ' + tot.bolsUnmatched + ' BOL emails could not be matched to an imported load' + (bolsUnmatchedSubjects.length ? ': ' + bolsUnmatchedSubjects.join(' · ') : '') : '') + '. ' : '') +
         (tot.skipped ? ' ' + tot.skipped + ' could not be read fully' + (skippedSubjects.length ? ': ' + skippedSubjects.join(' · ') : '') + '.' : '');

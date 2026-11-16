@@ -3702,9 +3702,10 @@ function refKey(ref) {
 // than any in-memory TTL, and a server restart must not lose the paid
 // list or restart the scan from zero.
 function saveRcImportRun(run) {
-  db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes, cursor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null);
+  db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes, cursor, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null, run.epoch || RC_IMPORT_EPOCH);
 }
+const RC_IMPORT_EPOCH = 'gateoff-2026-11-16';
 function rcImportRun(runId) {
   if (!runId) {
     const latest = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
@@ -3712,7 +3713,8 @@ function rcImportRun(runId) {
   }
   if (runId) {
     const row = db.prepare('SELECT * FROM rc_import_runs WHERE id = ?').get(runId);
-    if (row) {
+    if (row && row.epoch !== RC_IMPORT_EPOCH) db.prepare('DELETE FROM rc_import_runs WHERE id = ?').run(runId);
+    else if (row) {
       return {
         id: row.id, startedAt: row.startedAt,
         paidRefs: new Set(JSON.parse(row.paidRefs || '[]')),
@@ -3722,6 +3724,7 @@ function rcImportRun(runId) {
         mailboxes: JSON.parse(row.mailboxes || '[]'),
         mailboxErrors: JSON.parse(row.mailboxErrors || '[]'),
         savedCursor: row.cursor ? JSON.parse(row.cursor) : null,
+        epoch: row.epoch || null,
       };
     }
   }
@@ -3735,6 +3738,7 @@ function rcImportRun(runId) {
     mailboxes: db.prepare('SELECT id, name, outlookEmail FROM users WHERE outlookRefreshToken IS NOT NULL ORDER BY isMainAdmin DESC, id ASC').all(),
     mailboxErrors: [],
   };
+  run.epoch = RC_IMPORT_EPOCH;
   saveRcImportRun(run);
   return run;
 }
@@ -3888,9 +3892,10 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
               handled = true;
               const f = extractRcLoadFields(text, subject);
               const key = refKey(f.loadRef) || refKey(f.lxlRef);
-              if (!key || !run.paidRefs.has(key)) {
+              const onSchedule = !!key && run.paidRefs.has(key);
+              if (!key) {
                 counts.heldOut += 1;
-                if (counts.heldOutSubjects.length < 10) counts.heldOutSubjects.push(subject);
+                if (counts.heldOutSubjects.length < 10) counts.heldOutSubjects.push(subject + ' (no load number found)');
                 break;
               }
               let load = null;
@@ -3918,13 +3923,13 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
                 if (db.prepare('SELECT id FROM rate_confirmations WHERE loadId = ?').get(load.id)) { counts.alreadyHave += 1; break; }
                 const row = await createRateCon({ loadId: load.id, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
                 if (row.duplicate) counts.alreadyHave += 1;
-                else { db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id); counts.imported += 1; }
+                else { db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id); counts.imported += 1; if (!onSchedule) counts.unverified = (counts.unverified || 0) + 1; }
               } else if ((f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
                 const p = f.places[0];
                 const d = f.places[f.places.length - 1];
                 const row = await createRateCon({ reference: f.lxlRef || f.loadRef, pickupState: p.state, deliveryState: d.state, pickupDate: f.dates[0], deliveryDate: f.dates[f.dates.length - 1] || f.dates[0], fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
                 if (row.duplicate) counts.alreadyHave += 1;
-                else { db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id); counts.imported += 1; }
+                else { db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id); counts.imported += 1; if (!onSchedule) counts.unverified = (counts.unverified || 0) + 1; }
               } else {
                 counts.skipped += 1;
                 if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject);
