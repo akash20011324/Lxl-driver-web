@@ -3923,6 +3923,33 @@ async function cleanupRateCons() {
   }
 }
 
+// One-off (owner, 2026-11-16): the Scotlynn load LXL-1580304 was
+// CANCELLED the morning it was booked — "don't upload it". The bulk
+// import created a load card for it (with a garbage route) before the
+// cancellation was known. Delete that load card; no RC row was ever
+// filed for it. Guarded: only when it has no documents attached.
+async function removeCancelledScotlynnLoad() {
+  try {
+    const marker = 'remove-cancelled-1580304-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const load = db.prepare('SELECT id FROM loads WHERE reference = ?').get('LXL-1580304');
+    if (load) {
+      const docs = db.prepare('SELECT COUNT(*) AS c FROM documents WHERE loadId = ?').get(load.id).c;
+      if (!docs) {
+        db.prepare('DELETE FROM loads WHERE id = ?').run(load.id);
+        console.log('cleanup: deleted cancelled Scotlynn load LXL-1580304 (id ' + load.id + ')');
+      } else {
+        console.log('cleanup: LXL-1580304 has ' + docs + ' documents — NOT deleted');
+      }
+    } else {
+      console.log('cleanup: LXL-1580304 load not present — nothing to delete');
+    }
+    const rc = db.prepare('SELECT id FROM rate_confirmations WHERE reference = ?').get('LXL-1580304');
+    if (rc) console.log('cleanup: an RC row for LXL-1580304 exists (id ' + rc.id + ') — left for manual review');
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+  } catch (e) { console.error('remove cancelled load failed:', e.message); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -4118,6 +4145,9 @@ function extractRcDates(text) {
   while ((m = re2.exec(text))) push(rcNormDate(m[3], months[m[1].slice(0, 3).toLowerCase()], m[2]));
   return out;
 }
+// Words that are never a city — instruction/label text the place
+// scanner must not mistake for a pickup or delivery city.
+const JUNK_CITIES = new Set(['REMOVE', 'DELETE', 'VOID', 'TOTAL', 'AMOUNT', 'INVOICE', 'PAGE', 'COPY', 'ORIGINAL']);
 const US_STATE_CODES = new Set(['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY']);
 const US_STATE_NAMES = { ALABAMA: 'AL', ALASKA: 'AK', ARIZONA: 'AZ', ARKANSAS: 'AR', CALIFORNIA: 'CA', COLORADO: 'CO', CONNECTICUT: 'CT', DELAWARE: 'DE', FLORIDA: 'FL', GEORGIA: 'GA', HAWAII: 'HI', IDAHO: 'ID', ILLINOIS: 'IL', INDIANA: 'IN', IOWA: 'IA', KANSAS: 'KS', KENTUCKY: 'KY', LOUISIANA: 'LA', MAINE: 'ME', MARYLAND: 'MD', MASSACHUSETTS: 'MA', MICHIGAN: 'MI', MINNESOTA: 'MN', MISSISSIPPI: 'MS', MISSOURI: 'MO', MONTANA: 'MT', NEBRASKA: 'NE', NEVADA: 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', OHIO: 'OH', OKLAHOMA: 'OK', OREGON: 'OR', PENNSYLVANIA: 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC', 'SOUTH DAKOTA': 'SD', TENNESSEE: 'TN', TEXAS: 'TX', UTAH: 'UT', VERMONT: 'VT', VIRGINIA: 'VA', WASHINGTON: 'WA', 'WEST VIRGINIA': 'WV', WISCONSIN: 'WI', WYOMING: 'WY', 'DISTRICT OF COLUMBIA': 'DC' };
 // ZIP-prefix rescue: OCR (and the odd broker typo) can garble the
@@ -4140,6 +4170,7 @@ function scanRcPlaces(t, base) {
   const add = (city, state, zip, idx) => {
     const c = cleanCityName(city);
     if (!c || !US_STATE_CODES.has(state)) return;
+    if (JUNK_CITIES.has(c.toUpperCase())) return;
     if (!found.some((p) => p.city === c && p.state === state)) found.push({ city: c, state, zip: zip || '', idx });
   };
   if (!t) return found;
@@ -5501,7 +5532,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
