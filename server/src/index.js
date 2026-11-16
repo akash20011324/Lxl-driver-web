@@ -3702,10 +3702,14 @@ function refKey(ref) {
 // than any in-memory TTL, and a server restart must not lose the paid
 // list or restart the scan from zero.
 function saveRcImportRun(run) {
-  db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes));
+  db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes, cursor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null);
 }
 function rcImportRun(runId) {
+  if (!runId) {
+    const latest = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
+    if (latest) runId = latest.id;
+  }
   if (runId) {
     const row = db.prepare('SELECT * FROM rc_import_runs WHERE id = ?').get(runId);
     if (row) {
@@ -3717,6 +3721,7 @@ function rcImportRun(runId) {
         schedules: row.schedules || 0,
         mailboxes: JSON.parse(row.mailboxes || '[]'),
         mailboxErrors: JSON.parse(row.mailboxErrors || '[]'),
+        savedCursor: row.cursor ? JSON.parse(row.cursor) : null,
       };
     }
   }
@@ -3743,6 +3748,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
     }
     if (!state || typeof state !== 'object' || !state.phase) state = { runId: null, phase: 'sched', m: 0, link: null };
     const run = rcImportRun(state.runId);
+    if (!body.cursor && run.savedCursor && run.savedCursor.phase) state = { ...run.savedCursor, runId: run.id };
     state.runId = run.id;
     const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [], bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0, bolsUnmatchedSubjects: [] };
     const deadline = Date.now() + 40000;
@@ -3750,7 +3756,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
     const finish = (done) => {
       const nextCursor = done ? null : Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
       if (done) db.prepare('DELETE FROM rc_import_runs WHERE id = ?').run(run.id);
-      else saveRcImportRun(run);
+      else { run.cursorJson = JSON.stringify(state); saveRcImportRun(run); }
       res.json({
         ...counts,
         phase: state.phase,

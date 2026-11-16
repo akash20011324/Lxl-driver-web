@@ -338,7 +338,8 @@ export function openDb(dataDir) {
       db.exec('ALTER TABLE rate_confirmations ADD COLUMN fileHash TEXT');
   } catch { /* table may not exist yet on a brand-new database */ }
   // Bulk RC import runs persist across restarts and long scans.
-  try { db.exec('CREATE TABLE IF NOT EXISTS rc_import_runs (id TEXT PRIMARY KEY, startedAt INTEGER, paidRefs TEXT, scheduleHashes TEXT, examined TEXT, schedules INTEGER DEFAULT 0, mailboxErrors TEXT, mailboxes TEXT)'); } catch { /* created by schema on fresh databases */ }
+  try { db.exec('CREATE TABLE IF NOT EXISTS rc_import_runs (id TEXT PRIMARY KEY, startedAt INTEGER, paidRefs TEXT, scheduleHashes TEXT, examined TEXT, schedules INTEGER DEFAULT 0, mailboxErrors TEXT, mailboxes TEXT, cursor TEXT)'); } catch { /* created by schema on fresh databases */ }
+  try { db.exec('ALTER TABLE rc_import_runs ADD COLUMN cursor TEXT'); } catch { /* column already there */ }
   // Load numbers always carry the company prefix: LXL-<broker number>.
   // Rows imported before the rule get prefixed once, here at boot.
   try {
