@@ -2193,7 +2193,10 @@ admin.post('/trailers/:id/yard-status', (req, res) => {
 });
 
 admin.get('/loads', (_req, res) => {
-  const rows = db.prepare("SELECT * FROM loads ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END, createdAt DESC, id DESC").all();
+  // Active loads first; within each group the most RECENT trip on
+  // top (by pickup date, not by when the row happened to be created
+  // — imported history would otherwise bury today's loads).
+  const rows = db.prepare("SELECT * FROM loads ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END, pickupAt DESC, createdAt DESC, id DESC").all();
   // Fill any missing route coords in the background so the progress %
   // appears on the next refresh.
   for (const l of rows) {
