@@ -1473,6 +1473,220 @@ admin.get('/locations', (_req, res) => {
   );
 });
 
+// The public broker tracking page (no login — the link token is the
+// key). Self-contained: polls /api/track/<token> every 30 seconds and
+// draws the driver's live position plus the load's route and progress.
+function trackPageHtml(mapsKey) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load Tracking — Lubana Xpress LLC</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; background: #05070d; color: #eef2f8; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 18px 14px 40px; }
+  .brand { display: flex; align-items: baseline; gap: 10px; border-bottom: 2px solid #F2B705; padding-bottom: 10px; }
+  .brand .lxl { font-size: 30px; font-weight: 800; letter-spacing: 1px; color: #fff; }
+  .brand .lxl span { color: #F2B705; }
+  .brand .co { color: #9fb0c9; font-size: 14px; }
+  .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; margin-top: 14px; }
+  .ref { font-size: 22px; font-weight: 700; color: #4DA3FF; }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; background: #1E40AF; color: #fff; margin-left: 8px; vertical-align: middle; }
+  .pill.done { background: #b8860b; }
+  .route { display: flex; gap: 12px; margin-top: 12px; }
+  .route .end { flex: 1; }
+  .route .lab { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #F2B705; }
+  .route .addr { font-size: 15px; margin-top: 3px; }
+  .route .when { color: #9fb0c9; font-size: 13px; margin-top: 2px; }
+  .route .arrow { align-self: center; color: #4DA3FF; font-size: 20px; }
+  .track { height: 10px; background: rgba(255,255,255,0.12); border-radius: 999px; margin-top: 16px; position: relative; }
+  .fill { height: 100%; background: linear-gradient(90deg, #1E40AF, #F2B705); border-radius: 999px; width: 0%; transition: width 0.6s; }
+  .pct { color: #F2B705; font-weight: 700; margin-top: 6px; font-size: 14px; }
+  #map { height: 340px; border-radius: 14px; margin-top: 14px; border: 1px solid rgba(255,255,255,0.12); }
+  .driver { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 15px; }
+  .driver b { color: #fff; }
+  .muted { color: #9fb0c9; font-size: 13px; }
+  .banner { background: rgba(242,183,5,0.15); border: 1px solid #F2B705; color: #ffd94d; border-radius: 12px; padding: 12px 14px; margin-top: 14px; font-weight: 600; }
+  .dead { text-align: center; padding: 60px 20px; color: #9fb0c9; }
+  .foot { text-align: center; color: #5f7089; font-size: 12px; margin-top: 22px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><div class="lxl">LXL <span>&#8599;</span></div><div class="co">Lubana Xpress LLC &middot; Live load tracking</div></div>
+  <div id="app"><p class="muted" style="padding:20px 4px">Loading tracking&hellip;</p></div>
+  <div class="foot">Tracking provided by Lubana Xpress LLC &middot; This page refreshes automatically</div>
+</div>
+<script>
+  var token = location.pathname.split('/').pop();
+  var map = null, driverMarker = null, mapReady = false, timer = null;
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function fmt(dt) { if (!dt) return ''; try { return new Date(dt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  function ago(dt) { if (!dt) return ''; var m = Math.max(0, Math.round((Date.now() - new Date(dt).getTime()) / 60000)); if (m < 1) return 'just now'; if (m < 60) return m + ' min ago'; return Math.round(m / 60) + ' hr ago'; }
+  function initMap() { mapReady = true; if (window.__pending) render(window.__pending); }
+  function drawMap(d) {
+    if (!mapReady || !window.google || !d.location) return;
+    var pos = { lat: d.location.lat, lng: d.location.lng };
+    if (!map) {
+      map = new google.maps.Map(document.getElementById('map'), { center: pos, zoom: 9, mapTypeId: 'hybrid' });
+      new google.maps.TrafficLayer().setMap(map);
+      driverMarker = new google.maps.Marker({ map: map, title: d.driverName });
+      if (d.load && d.load.pickupLat != null) new google.maps.Marker({ map: map, position: { lat: d.load.pickupLat, lng: d.load.pickupLng }, label: 'P', title: 'Pickup' });
+      if (d.load && d.load.deliveryLat != null) new google.maps.Marker({ map: map, position: { lat: d.load.deliveryLat, lng: d.load.deliveryLng }, label: 'D', title: 'Delivery' });
+    }
+    driverMarker.setPosition(pos);
+    map.setCenter(pos);
+  }
+  function render(d) {
+    window.__pending = d;
+    var el = document.getElementById('app');
+    if (!d.load) { el.innerHTML = '<div class="card">Your load is being prepared. Tracking will appear here once the driver is assigned.</div>'; return; }
+    var L = d.load;
+    var done = L.status === 'completed';
+    var html = '';
+    if (done) html += '<div class="banner">Delivered &mdash; this load is complete. Tracking has ended.</div>';
+    html += '<div class="card"><span class="ref">' + esc(L.reference) + '</span><span class="pill' + (done ? ' done' : '') + '">' + (done ? 'Completed' : 'In transit') + '</span>';
+    html += '<div class="route"><div class="end"><div class="lab">Pickup</div><div class="addr">' + esc(L.pickupWarehouse ? L.pickupWarehouse + ' &middot; ' : '') + esc(L.pickupLocation) + '</div><div class="when">' + fmt(L.pickupAt) + '</div></div><div class="arrow">&#8594;</div>';
+    html += '<div class="end"><div class="lab">Delivery</div><div class="addr">' + esc(L.deliveryWarehouse ? L.deliveryWarehouse + ' &middot; ' : '') + esc(L.deliveryLocation) + '</div><div class="when">' + fmt(L.deliveryAt) + '</div></div></div>';
+    if (L.progress != null) html += '<div class="track"><div class="fill" style="width:' + L.progress + '%"></div></div><div class="pct">' + L.progress + '% of the route covered</div>';
+    html += '</div>';
+    html += '<div id="map"></div>';
+    html += '<div class="card"><div class="driver"><div>Driver: <b>' + esc(d.driverName) + '</b></div>';
+    if (d.truckUnit) html += '<div>Truck: <b>' + esc(d.truckUnit) + '</b></div>';
+    if (d.trailerUnit) html += '<div>Trailer: <b>' + esc(d.trailerUnit) + '</b></div>';
+    if (d.location) html += '<div>Speed: <b>' + (d.location.speedMph != null ? Math.round(d.location.speedMph) + ' mph' : '&mdash;') + '</b></div>';
+    html += '</div>';
+    html += '<p class="muted" style="margin:10px 0 0">' + (d.location ? 'Last location update ' + ago(d.location.updatedAt) : 'Waiting for the driver&rsquo;s first location update&hellip;') + '</p></div>';
+    el.innerHTML = html;
+    drawMap(d);
+    if (done && timer) { clearInterval(timer); timer = null; }
+  }
+  function load() {
+    fetch('/api/track/' + token).then(function (r) {
+      if (!r.ok) throw new Error('dead');
+      return r.json();
+    }).then(render).catch(function () {
+      document.getElementById('app').innerHTML = '<div class="dead"><h2>This tracking link is no longer active</h2><p>Please contact Lubana Xpress LLC for an update on your load.</p></div>';
+      if (timer) { clearInterval(timer); timer = null; }
+    });
+  }
+  load();
+  timer = setInterval(load, 30000);
+</script>
+${mapsKey ? '<script async src="https://maps.googleapis.com/maps/api/js?key=' + mapsKey + '&callback=initMap"></script>' : ''}
+</body>
+</html>`;
+}
+
+/* ---------- Broker tracking access ---------- */
+// A broker gets a private link that shows ONE driver's live location
+// for ONE load — nothing else in the portal. Admins create and revoke
+// accesses on the Tracking page; an access also ends on its own when
+// its load is completed (the public payload reports the completed
+// status and the page stops tracking).
+function serializeBrokerAccess(a) {
+  const load = a.loadId ? db.prepare('SELECT reference, status FROM loads WHERE id = ?').get(a.loadId) : null;
+  return {
+    id: a.id,
+    brokerName: a.brokerName,
+    brokerCompany: a.brokerCompany || null,
+    driverId: a.driverId,
+    driverName: getDriverName(a.driverId),
+    loadId: a.loadId,
+    loadReference: load ? load.reference : null,
+    loadStatus: load ? load.status : null,
+    url: `/track/${a.token}`,
+    createdAt: a.createdAt,
+    lastViewedAt: a.lastViewedAt || null,
+  };
+}
+
+admin.get('/broker-access', (_req, res) => {
+  const rows = db.prepare('SELECT * FROM broker_access WHERE revokedAt IS NULL ORDER BY createdAt DESC').all();
+  res.json(rows.map(serializeBrokerAccess));
+});
+
+admin.post('/broker-access', (req, res) => {
+  const { brokerName, brokerCompany, driverId, loadId } = req.body || {};
+  const name = String(brokerName || '').trim();
+  if (!name) return err(res, 400, 'Give the broker a name');
+  const driver = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'driver'").get(Number(driverId));
+  if (!driver) return err(res, 400, 'Pick a driver');
+  let load = null;
+  if (loadId) {
+    load = db.prepare('SELECT id, driverId FROM loads WHERE id = ?').get(Number(loadId));
+    if (!load || load.driverId !== driver.id) return err(res, 400, 'That load is not assigned to this driver');
+  } else {
+    load = db.prepare("SELECT id FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC").get(driver.id);
+  }
+  const token = crypto.randomBytes(24).toString('base64url');
+  const info = db.prepare(
+    'INSERT INTO broker_access (token, brokerName, brokerCompany, driverId, loadId, createdBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(token, name, String(brokerCompany || '').trim() || null, driver.id, load ? load.id : null, req.user.id, new Date().toISOString());
+  res.json(serializeBrokerAccess(db.prepare('SELECT * FROM broker_access WHERE id = ?').get(info.lastInsertRowid)));
+});
+
+admin.delete('/broker-access/:id', (req, res) => {
+  const info = db.prepare('UPDATE broker_access SET revokedAt = ? WHERE id = ? AND revokedAt IS NULL')
+    .run(new Date().toISOString(), Number(req.params.id));
+  if (!info.changes) return err(res, 404, 'That access is already gone');
+  res.json({ ok: true });
+});
+
+// The public tracking payload: only what a broker needs for their one
+// load. No other drivers, no documents, no rates, no admin data.
+function brokerTrackPayload(token) {
+  const a = db.prepare('SELECT * FROM broker_access WHERE token = ? AND revokedAt IS NULL').get(String(token));
+  if (!a) return null;
+  if (!a.lastViewedAt || Date.now() - new Date(a.lastViewedAt).getTime() > 60000) {
+    db.prepare('UPDATE broker_access SET lastViewedAt = ? WHERE id = ?').run(new Date().toISOString(), a.id);
+  }
+  const driver = getUserById(a.driverId);
+  const truck = db.prepare('SELECT unitNumber FROM trucks WHERE driverId = ?').get(a.driverId);
+  const trailer = db.prepare('SELECT unitNumber FROM trailers WHERE driverId = ?').get(a.driverId);
+  const loc = db.prepare('SELECT * FROM locations WHERE driverId = ? ORDER BY updatedAt DESC').get(a.driverId);
+  let loadRow = a.loadId ? db.prepare('SELECT * FROM loads WHERE id = ?').get(a.loadId) : null;
+  if (!loadRow) {
+    loadRow = db.prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC").get(a.driverId);
+  }
+  const s = loadRow ? serializeLoad(loadRow) : null;
+  return {
+    brokerName: a.brokerName,
+    brokerCompany: a.brokerCompany || null,
+    driverName: driver ? driver.name : 'Driver',
+    truckUnit: truck ? truck.unitNumber : null,
+    trailerUnit: trailer ? trailer.unitNumber : null,
+    location: loc ? { lat: loc.lat, lng: loc.lng, speedMph: loc.speedMph, heading: loc.heading, updatedAt: loc.updatedAt } : null,
+    load: s ? {
+      reference: s.reference,
+      status: s.status,
+      progress: s.progress,
+      pickupLocation: s.pickupLocation,
+      pickupWarehouse: s.pickupWarehouse,
+      pickupAt: s.pickupAt,
+      deliveryLocation: s.deliveryLocation,
+      deliveryWarehouse: s.deliveryWarehouse,
+      deliveryAt: s.deliveryAt,
+      pickupLat: loadRow.pickupLat ?? null,
+      pickupLng: loadRow.pickupLng ?? null,
+      deliveryLat: loadRow.deliveryLat ?? null,
+      deliveryLng: loadRow.deliveryLng ?? null,
+    } : null,
+  };
+}
+
+app.get('/api/track/:token', (req, res) => {
+  const payload = brokerTrackPayload(req.params.token);
+  if (!payload) return err(res, 404, 'This tracking link is no longer active');
+  res.json(payload);
+});
+
+app.get('/track/:token', (_req, res) => {
+  res.type('html').send(trackPageHtml(process.env.GOOGLE_MAPS_API_KEY || ''));
+});
+
 // Google Maps browser key for the admin portal maps (Dashboard + Locations).
 // Admin-only; the key itself is referrer-restricted to the portal domains.
 admin.get('/maps-config', (_req, res) => {

@@ -563,7 +563,32 @@ body.loc-bg .sidebar button { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7); }
 body.loc-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .loc-page { padding: 4px 0 0; }
 .loc-page .muted { color: #d3dae6; }
+.loc-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
 .loc-head h1 { padding-bottom: 10px; border-bottom: 2px solid var(--gold); }
+.loc-add-broker { white-space: nowrap; margin-top: 4px; }
+.loc-brokers { margin-top: 22px; }
+.loc-brokers-title { font-size: 20px; padding-bottom: 8px; border-bottom: 2px solid var(--gold); }
+.broker-card {
+  display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: rgba(10, 18, 36, 0.55); border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px; padding: 12px 14px; margin-top: 10px;
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.broker-main { min-width: 240px; flex: 1; }
+.broker-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.broker-link {
+  width: 290px; max-width: 100%; background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15); color: #cfe0ff;
+  border-radius: 8px; padding: 8px 10px; font-size: 12px;
+}
+.broker-live { color: #4ade80; font-weight: 700; }
+.broker-ended { color: var(--gold); font-weight: 700; }
+.broker-form label { display: block; margin-top: 10px; font-size: 13px; color: #c9d6ea; }
+.broker-form input, .broker-form select {
+  width: 100%; margin-top: 4px; padding: 9px 10px; border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(0, 0, 0, 0.35); color: #fff; font: inherit;
+}
+.broker-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 /* Flow layout: the map panel is placed in the left column spanning two
    rows and the search bar in the right column's first row; the driver
    cards then auto-flow in API order — card 1 beside the map, cards 2+

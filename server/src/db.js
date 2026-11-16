@@ -205,6 +205,18 @@ CREATE TABLE IF NOT EXISTS notifications (
   createdAt TEXT NOT NULL,
   read INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS broker_access (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token TEXT NOT NULL UNIQUE,
+  brokerName TEXT NOT NULL,
+  brokerCompany TEXT,
+  driverId INTEGER NOT NULL REFERENCES users(id),
+  loadId INTEGER REFERENCES loads(id),
+  createdBy INTEGER REFERENCES users(id),
+  createdAt TEXT NOT NULL,
+  lastViewedAt TEXT,
+  revokedAt TEXT
+);
 `;
 
 export function openDb(dataDir) {

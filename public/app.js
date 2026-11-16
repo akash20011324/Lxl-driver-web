@@ -1788,13 +1788,15 @@ async function viewLocations(main) {
   document.body.classList.add('loc-bg'); // daytime highway photo + liquid glass (removed on view switch)
   ensureLocBgLayer();
   main.innerHTML = '<div class="loc-page">' +
-    '<div class="loc-head"><h1>Tracking</h1><p class="muted">Live locations of your drivers — last known position shows even after a driver signs out. Refreshes every 10 seconds. The road colours on the map are live traffic.</p></div>' +
+    '<div class="loc-head"><div class="loc-head-text"><h1>Tracking</h1><p class="muted">Live locations of your drivers — last known position shows even after a driver signs out. Refreshes every 10 seconds. The road colours on the map are live traffic.</p></div>' +
+    '<button class="btn loc-add-broker" id="addBrokerBtn" type="button">+ Add broker</button></div>' +
     '<div class="loc-layout" id="locLayout">' +
       '<div class="loc-map-panel"><div id="map"></div><p class="small loc-map-note" id="locMapNote" style="display:none"></p></div>' +
       '<div class="loc-search"><input id="locSearch" type="search" placeholder="Search driver — name, truck, trailer or city" autocomplete="off"></div>' +
       '<p class="loc-nomatch" id="locNoMatch" style="display:none">No driver matches that search.</p>' +
       '<p class="empty loc-empty" id="locEmpty" style="display:none">No driver locations yet — a location appears once a driver signs in and shares theirs.</p>' +
-    '</div></div>';
+    '</div>' +
+    '<div class="loc-brokers" id="locBrokers"></div></div>';
   state.locMap = null;
   state.locMapMarkers = [];
   state.locTraffic = null;
@@ -1997,8 +1999,116 @@ async function viewLocations(main) {
   });
   const searchInput = document.getElementById('locSearch');
   if (searchInput) searchInput.addEventListener('input', () => { searchQuery = searchInput.value || ''; applyFilter(); });
+  const addBrokerBtn = document.getElementById('addBrokerBtn');
+  if (addBrokerBtn) addBrokerBtn.addEventListener('click', () => openBrokerModal());
+  renderBrokerAccesses();
   await loadLocs();
   addTimer(loadLocs, 10000);
+}
+
+/* ---------- Broker tracking access (Tracking page) ---------- */
+// The list under the map: every live broker link, with copy + delete.
+// Access ends on its own when the load completes; Delete ends it now.
+async function renderBrokerAccesses() {
+  const host = document.getElementById('locBrokers');
+  if (!host) return;
+  let rows = [];
+  try { rows = await api('/api/admin/broker-access'); } catch { host.innerHTML = ''; return; }
+  if (!rows.length) {
+    host.innerHTML = '<h2 class="loc-brokers-title">Broker access</h2>' +
+      '<p class="muted">No broker has tracking access right now. Use <strong>+ Add broker</strong> to give a broker a link that shows only their driver&rsquo;s live location for their load.</p>';
+    return;
+  }
+  host.innerHTML = '<h2 class="loc-brokers-title">Broker access</h2>' + rows.map((a) => {
+    const full = location.origin + a.url;
+    const ended = a.loadStatus === 'completed';
+    return '<div class="broker-card">' +
+      '<div class="broker-main"><strong>' + esc(a.brokerName) + '</strong>' +
+      (a.brokerCompany ? ' <span class="muted">&middot; ' + esc(a.brokerCompany) + '</span>' : '') +
+      '<div class="muted small">Driver: ' + esc(a.driverName || '') + (a.loadReference ? ' &middot; Load ' + esc(a.loadReference) : ' &middot; driver&rsquo;s active load') +
+      (ended ? ' &middot; <span class="broker-ended">Load completed &mdash; tracking ended</span>' : ' &middot; <span class="broker-live">Live</span>') + '</div>' +
+      '<div class="muted small">Created ' + esc(fmtDate(a.createdAt)) + (a.lastViewedAt ? ' &middot; Last opened ' + esc(fmtDate(a.lastViewedAt)) : ' &middot; Not opened yet') + '</div></div>' +
+      '<div class="broker-actions"><input class="broker-link" readonly value="' + esc(full) + '">' +
+      '<button class="btn small" data-copy-broker="' + a.id + '" type="button">Copy link</button>' +
+      '<button class="btn danger small" data-delete-broker="' + a.id + '" type="button">Delete</button></div>' +
+      '</div>';
+  }).join('') +
+    '<p class="muted small">Access ends on its own when the load is completed. Deleting ends it right away &mdash; the broker&rsquo;s link stops working immediately.</p>';
+  host.querySelectorAll('[data-copy-broker]').forEach((btn) => btn.addEventListener('click', async () => {
+    const input = btn.parentElement.querySelector('.broker-link');
+    try { await navigator.clipboard.writeText(input.value); } catch { input.select(); document.execCommand('copy'); }
+    toast('Tracking link copied.', 'ok');
+  }));
+  host.querySelectorAll('[data-delete-broker]').forEach((btn) => btn.addEventListener('click', async () => {
+    const a = rows.find((r) => r.id === Number(btn.dataset.deleteBroker));
+    if (!confirm('Delete tracking access for ' + (a ? a.brokerName : 'this broker') + '? Their link stops working right away.')) return;
+    try {
+      await api('/api/admin/broker-access/' + btn.dataset.deleteBroker, { method: 'DELETE' });
+      toast('Broker access deleted.', 'ok');
+      renderBrokerAccesses();
+    } catch (e) { showError(e); }
+  }));
+}
+
+function closeBrokerModal() { const m = document.getElementById('brokerModal'); if (m) m.remove(); }
+
+async function openBrokerModal() {
+  closeBrokerModal();
+  let drivers = [], loads = [];
+  try {
+    [drivers, loads] = await Promise.all([api('/api/admin/drivers'), api('/api/admin/loads')]);
+  } catch (e) { showError(e); return; }
+  const modal = document.createElement('div');
+  modal.id = 'brokerModal';
+  modal.className = 'docs-modal-backdrop';
+  modal.innerHTML = '<div class="docs-modal broker-modal"><div class="docs-modal-head"><strong>Give a broker tracking access</strong>' +
+    '<button class="icon-btn" id="brokerClose" type="button" aria-label="Close">&#10005;</button></div>' +
+    '<p class="muted small" style="margin:0 0 10px">The broker gets a private link showing only this driver&rsquo;s live location for this load &mdash; no login, nothing else in the portal. Access ends on its own when the load completes; you can delete it anytime.</p>' +
+    '<form id="brokerForm" class="broker-form">' +
+    '<label>Broker name<input id="brokerName" required placeholder="e.g. Sonja Ross"></label>' +
+    '<label>Company <span class="muted">(optional)</span><input id="brokerCompany" placeholder="e.g. D &amp; L Transport"></label>' +
+    '<label>Driver<select id="brokerDriver" required>' + drivers.map((d) => '<option value="' + d.id + '">' + esc(d.name) + '</option>').join('') + '</select></label>' +
+    '<label>Load<select id="brokerLoad"></select></label>' +
+    '<p class="error" id="brokerError" style="display:none"></p>' +
+    '<div class="broker-form-actions"><button class="btn btn-ghost" id="brokerCancel" type="button">Cancel</button>' +
+    '<button class="btn" type="submit">Create access</button></div></form></div>';
+  document.body.appendChild(modal);
+  const loadSel = modal.querySelector('#brokerLoad');
+  const fillLoads = () => {
+    const did = Number(modal.querySelector('#brokerDriver').value);
+    const mine = loads.filter((l) => l.driverId === did);
+    const active = mine.filter((l) => l.status === 'active');
+    const rest = mine.filter((l) => l.status !== 'active');
+    loadSel.innerHTML = '<option value="">Driver&rsquo;s active load (automatic)</option>' +
+      active.map((l) => '<option value="' + l.id + '">' + esc(l.reference) + ' &mdash; active</option>').join('') +
+      rest.map((l) => '<option value="' + l.id + '">' + esc(l.reference) + ' &mdash; ' + esc(l.status) + '</option>').join('');
+  };
+  fillLoads();
+  modal.querySelector('#brokerDriver').addEventListener('change', fillLoads);
+  modal.querySelector('#brokerClose').addEventListener('click', closeBrokerModal);
+  modal.querySelector('#brokerCancel').addEventListener('click', closeBrokerModal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeBrokerModal(); });
+  modal.querySelector('#brokerForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errEl = modal.querySelector('#brokerError');
+    try {
+      await api('/api/admin/broker-access', {
+        method: 'POST',
+        body: JSON.stringify({
+          brokerName: modal.querySelector('#brokerName').value,
+          brokerCompany: modal.querySelector('#brokerCompany').value,
+          driverId: Number(modal.querySelector('#brokerDriver').value),
+          loadId: loadSel.value ? Number(loadSel.value) : null,
+        }),
+      });
+      closeBrokerModal();
+      toast('Broker access created &mdash; copy the link from the list below.', 'ok');
+      renderBrokerAccesses();
+    } catch (err2) {
+      errEl.textContent = err2.message || 'Could not create access';
+      errEl.style.display = 'block';
+    }
+  });
 }
 
 /* ---------- Rate Cons ---------- */
