@@ -1135,8 +1135,8 @@ async function viewDashboard(main) {
     '</div>' +
     '<div class="dash-track">' +
     '<div class="glass-panel"><h2 style="margin-top:0"><span class="live-dot off" id="dashLiveDot"></span>Live tracking</h2><div id="dashMap" class="dash-map"></div><p class="small muted" id="dashMapNote" style="display:none"></p></div>' +
-    '<div class="glass-panel mt" id="dashFleet"></div>' +
     '<div class="glass-panel mt"><h2 style="margin-top:0">Cash flow — this month</h2>' + (cfDonutHtml || '<p class="empty">No cash flow recorded yet this month.</p>') + '</div>' +
+    '<div class="glass-panel mt" id="dashFleet"></div>' +
     '</div></div>';
   renderAdminSidebar(pendingReq);
   fillCitySlots();
