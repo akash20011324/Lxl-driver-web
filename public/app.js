@@ -153,6 +153,8 @@ async function boot() {
   removeLocBgLayer();
   document.body.classList.remove('loads-bg');
   removeLoadsBgLayer();
+  document.body.classList.remove('chat-bg');
+  removeChatBgLayer();
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page"><p class="muted">Loading…</p></div>';
   // If we already have a token, try to resume the session.
@@ -621,6 +623,8 @@ async function renderAdminView(view) {
   removeLocBgLayer();
   document.body.classList.remove('loads-bg');
   removeLoadsBgLayer();
+  document.body.classList.remove('chat-bg');
+  removeChatBgLayer();
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -1066,6 +1070,18 @@ function ensureLoadsBgLayer() {
 }
 function removeLoadsBgLayer() {
   const layer = document.getElementById('loadsBgLayer');
+  if (layer) layer.remove();
+}
+/* The Chat background is a real fixed layer too — same pattern. */
+function ensureChatBgLayer() {
+  if (!document.getElementById('chatBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'chatBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeChatBgLayer() {
+  const layer = document.getElementById('chatBgLayer');
   if (layer) layer.remove();
 }
 
@@ -1635,8 +1651,9 @@ async function viewDocuments(main) {
   const selected = new Set();
   const shortPlace = (a) => (a || '').split(',').pop().replace(/\s*\d{5}(-\d{4})?\s*$/, '').trim();
   const typeDocs = (loadId, t) => (byLoad.get(loadId) || []).filter(d => KINDS[t].kinds.includes(d.kind));
-  // First load starts with its Pickup BOLs open.
-  const openKey = shown.length ? shown[0].id + ':pickup' : null;
+  // Nothing opens by itself — every panel stays closed until its
+  // type button is tapped (owner's rule, 2026-11-15).
+  const openKey = null;
 
   const docRow = (d) => {
     const meta = [d.driverName || null, d.amountCents != null ? fmtMoney(d.amountCents) : null, fmtDate(d.createdAt)].filter(Boolean).join(' • ');
@@ -1882,6 +1899,8 @@ async function viewRequests(main) {
 
 /* ---------- Dispatch (admin) ---------- */
 async function viewDispatch(main) {
+  document.body.classList.add('chat-bg');
+  ensureChatBgLayer();
   main.innerHTML = '<div class="chat-page"><h1>Chat</h1>' +
     '<div class="chat-layout">' +
       '<div class="chat-convos" id="chatConvos"><p class="muted">Loading…</p></div>' +
@@ -1922,7 +1941,7 @@ async function viewDispatch(main) {
     const convos = state.chatConvos || [];
     el.innerHTML = convos.length ? convos.map(c =>
       '<button class="convo-row' + (c.driver.id === state.dispatchDriverId ? ' active' : '') + '" type="button" data-convo="' + c.driver.id + '">' +
-      '<span class="chat-avatar">' + esc(initials(c.driver.name)) + '</span>' +
+      '<span class="chat-avatar" style="background:' + driverColor(c.driver.id) + '">' + esc(initials(c.driver.name)) + '</span>' +
       '<span class="convo-mid"><span class="convo-name">' + esc(c.driver.name) + '</span>' +
       '<span class="convo-last">' + esc(attPreview(c.lastMessage)) + '</span></span>' +
       '<span class="convo-side">' + (c.lastMessage ? '<span class="convo-time">' + timeAgo(c.lastMessage.createdAt) + '</span>' : '') +
@@ -1950,7 +1969,7 @@ async function viewDispatch(main) {
     if (!el) return;
     const c = selected();
     if (!c) { el.innerHTML = ''; return; }
-    el.innerHTML = '<span class="chat-avatar lg">' + esc(initials(c.driver.name)) + '</span>' +
+    el.innerHTML = '<span class="chat-avatar lg" style="background:' + driverColor(c.driver.id) + '">' + esc(initials(c.driver.name)) + '</span>' +
       '<span class="chat-head-texts"><span class="chat-head-name">' + esc(c.driver.name) + '</span>' +
       '<span class="chat-head-sub">' + esc(statusLine(c)) + '</span></span>' +
       '<span class="chat-head-unit">' + (c.truck ? 'Truck ' + esc(c.truck.unitNumber) : '') +
