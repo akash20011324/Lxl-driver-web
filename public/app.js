@@ -2813,9 +2813,34 @@ async function viewCashflow(main) {
       '<span class="cf-amt ' + (trip.profitCents >= 0 ? 'in' : 'out') + '">' + (trip.profitCents >= 0 ? '+' : '−') + fmtMoney(Math.abs(trip.profitCents)) + '</span></div>').join('')
       : '<p class="empty">No trips with a rate con yet for this truck.</p>') +
     '</section>').join('');
+  const bankPending = d.bankPending || [];
+  const bankSuggest = (name, dir) => {
+    const s = String(name || '').toLowerCase();
+    if (dir === 'in') return /otr|factor|bolt/.test(s) ? 'Factoring payment' : 'Other';
+    if (s.includes('pilot')) return 'Fuel (Pilot weekly)';
+    if (/prepass|e-zpass|ezpass|toll/.test(s)) return 'Tolls';
+    if (/zelle/.test(s)) return 'Driver pay';
+    if (/intuit|ringcentral|google|apple/.test(s)) return 'Office expenses';
+    if (/insurance|geico|progressive/.test(s)) return 'Insurance';
+    if (/leasing|lease|payment.*truck|truck.*payment/.test(s)) return 'Truck payment';
+    return 'Other';
+  };
+  const bankCats = (dir, name) => {
+    const opts = dir === 'in'
+      ? ['Factoring payment', 'Broker payment', 'Other']
+      : ['Fuel (Pilot weekly)', 'Tolls', 'Maintenance', 'Repairs', 'Driver pay', 'Dispatch pay', 'Truck payment', 'Insurance', 'Office expenses', 'Other'];
+    const sel = bankSuggest(name, dir);
+    return opts.map((o) => '<option' + (o === sel ? ' selected' : '') + '>' + o + '</option>').join('');
+  };
+  const bankRow = (t) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(t.name) + '</strong></div>' +
+    '<span class="muted">' + esc(t.date) + '</span>' +
+    '<span class="cf-amt ' + (t.direction === 'in' ? 'in' : 'out') + '">' + (t.direction === 'in' ? '+' : '−') + fmtMoney(t.amountCents) + '</span>' +
+    '<select id="bankcat-' + t.id + '">' + bankCats(t.direction, t.name) + '</select>' +
+    '<button class="btn btn-sm" data-bankcat="' + t.id + '">Categorize</button> ' +
+    '<button class="btn-ghost btn-sm" data-bankignore="' + t.id + '">Ignore</button></div>';
   const entryRow = (e) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(e.category) + '</strong> ' +
     '<span class="muted">' + (e.truckUnit ? '· Truck ' + esc(e.truckUnit) + ' ' : '') + (e.note ? '· ' + esc(e.note) : '') + '</span></div>' +
-    '<span class="cf-src">' + esc(e.source === 'outlook' ? 'Outlook' : e.source === 'maintenance' ? 'Maintenance' : e.source === 'advance' ? 'Advance' : 'Manual') + '</span>' +
+    '<span class="cf-src">' + esc(e.source === 'outlook' ? 'Outlook' : e.source === 'maintenance' ? 'Maintenance' : e.source === 'advance' ? 'Advance' : e.source === 'bank' ? 'Bank' : 'Manual') + '</span>' +
     '<span class="muted">' + esc(e.date || '') + '</span>' +
     '<span class="cf-amt ' + (e.direction === 'in' ? 'in' : 'out') + '">' + (e.direction === 'in' ? '+' : '−') + fmtMoney(e.amountCents) + '</span>' +
     (e.url ? '<a class="btn-ghost btn-sm" href="' + e.url + '" target="_blank" rel="noopener">File</a>' : '') +
@@ -2865,6 +2890,9 @@ async function viewCashflow(main) {
     '<input name="amount" type="number" min="0" step="0.01" placeholder="Amount $ / month" required> ' +
     '<input name="note" placeholder="Note — e.g. Truck 1301"> ' +
     '<button class="btn-ghost btn-sm" type="submit">+ Add fixed payment</button></form>' +
+    '<h2 class="cf-h2">Bank transactions — categorize</h2>' +
+    '<p class="small muted">Straight from your bank account. Nothing here counts until you categorize it — your profit comes from the categorized books, never from the bank total. Personal stuff: just Ignore it.</p>' +
+    (bankPending.length ? bankPending.map(bankRow).join('') : '<p class="empty">Nothing waiting — every bank transaction is handled.</p>') +
     '<h2 class="cf-h2">Per truck</h2>' + (truckPanels || '<p class="empty">No trucks yet.</p>') +
     '<h2 class="cf-h2">Entries</h2>' +
     (entries.length ? entries.map(entryRow).join('') : '<p class="empty">No entries yet — import from Outlook or add the first one.</p>') +
@@ -2893,6 +2921,20 @@ async function viewCashflow(main) {
     if (!confirm('Remove this fixed payment?')) return;
     try {
       await api('/api/admin/cashflow/fixed/' + b.dataset.delfixed, { method: 'DELETE' });
+      renderAdminView('cashflow');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-bankcat]').forEach((b) => b.addEventListener('click', async () => {
+    const sel = main.querySelector('#bankcat-' + b.dataset.bankcat);
+    try {
+      await api('/api/admin/cashflow/bank/' + b.dataset.bankcat + '/categorize', { method: 'POST', body: JSON.stringify({ category: sel ? sel.value : 'Other' }) });
+      toast('Categorized — it counts now.', 'ok');
+      renderAdminView('cashflow');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-bankignore]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/cashflow/bank/' + b.dataset.bankignore + '/ignore', { method: 'POST', body: JSON.stringify({}) });
       renderAdminView('cashflow');
     } catch (err) { showError(err); }
   }));

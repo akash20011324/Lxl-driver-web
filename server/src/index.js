@@ -1666,6 +1666,8 @@ admin.get('/cashflow', (req, res) => {
   res.json({
     bookedCents: rcTotal, receivedCents, outCents, netCents: receivedCents - outCents, weekly,
     entries: all.slice(0, 60), fixed,
+    bankPending: db.prepare("SELECT * FROM bank_transactions WHERE status = 'pending' ORDER BY date DESC, id DESC LIMIT 40").all()
+      .map((t) => ({ id: t.id, date: t.date, name: t.name, amountCents: t.amountCents, direction: t.direction })),
     month: { key: monthParam, inGroups: monthIn, outGroups: monthOut, inTotalCents: monthInTotal, outTotalCents: monthOutTotal, profitCents: monthInTotal - monthOutTotal },
     trucks: trucksOut, loads,
   });
@@ -1746,6 +1748,52 @@ async function outlookAttachmentBuffer(user, messageId, attachmentId) {
   if (!fileBuffer.length) throw Object.assign(new Error('That attachment is empty.'), { status: 400 });
   return { att, fileBuffer, accessToken };
 }
+
+// --- Bank transactions inbox (Cash Flow) -----------------------------------
+// The bank (Plaid) talks to Muse, not to this server: a sync on Muse's side
+// posts new transactions here with a shared key. They land as 'pending' and
+// count for NOTHING until an admin categorizes one — categorizing creates
+// the cash entry. Profit always comes from the categorized books, never
+// from raw bank totals (owner's rule, 2026-11-16).
+app.post('/api/sync/bank', (req, res) => {
+  const key = process.env.BANK_SYNC_KEY;
+  if (!key) return err(res, 503, 'Bank sync is not configured');
+  if (req.get('x-sync-key') !== key) return err(res, 401, 'Bad sync key');
+  const list = (req.body && req.body.transactions) || [];
+  let added = 0;
+  const ins = db.prepare(
+    `INSERT OR IGNORE INTO bank_transactions (plaidTxId, date, name, amountCents, direction, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  for (const t of list) {
+    if (!t || !t.id || !t.date || !Number.isFinite(Number(t.amountCents))) continue;
+    const r = ins.run(String(t.id), String(t.date).slice(0, 10), String(t.name || '').slice(0, 200),
+      Math.round(Number(t.amountCents)), t.direction === 'in' ? 'in' : 'out', now());
+    if (r.changes) added += 1;
+  }
+  res.json({ ok: true, added });
+});
+
+admin.post('/cashflow/bank/:id/categorize', (req, res) => {
+  const tx = db.prepare('SELECT * FROM bank_transactions WHERE id = ?').get(req.params.id);
+  if (!tx) return err(res, 404, 'Bank transaction not found');
+  if (tx.status !== 'pending') return err(res, 400, 'That transaction is already handled');
+  const { category, truckId, loadId, note } = req.body || {};
+  if (!category || !String(category).trim()) return err(res, 400, 'category is required');
+  const r = db.prepare('INSERT INTO cash_entries (direction, date, category, amountCents, truckId, note, source, loadId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(tx.direction, tx.date, String(category).trim(), tx.amountCents,
+      truckId ? Number(truckId) : null, note ? String(note) : tx.name, 'bank',
+      loadId ? Number(loadId) : null, now());
+  db.prepare("UPDATE bank_transactions SET status = 'categorized', entryId = ? WHERE id = ?").run(r.lastInsertRowid, tx.id);
+  res.json({ ok: true, entryId: r.lastInsertRowid });
+});
+
+admin.post('/cashflow/bank/:id/ignore', (req, res) => {
+  const tx = db.prepare('SELECT * FROM bank_transactions WHERE id = ?').get(req.params.id);
+  if (!tx) return err(res, 404, 'Bank transaction not found');
+  db.prepare("UPDATE bank_transactions SET status = 'ignored' WHERE id = ?").run(tx.id);
+  res.json({ ok: true });
+});
 
 admin.post('/cashflow/outlook-preview', async (req, res) => {
   try {

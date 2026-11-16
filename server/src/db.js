@@ -282,6 +282,18 @@ CREATE TABLE IF NOT EXISTS cash_entries (
   createdAt TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS bank_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plaidTxId TEXT NOT NULL UNIQUE,
+  date TEXT NOT NULL,
+  name TEXT NOT NULL,
+  amountCents INTEGER NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'categorized', 'ignored')),
+  entryId INTEGER REFERENCES cash_entries(id),
+  createdAt TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS fixed_payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   category TEXT NOT NULL,
