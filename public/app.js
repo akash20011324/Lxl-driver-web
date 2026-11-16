@@ -1282,7 +1282,8 @@ function loadCardHtml(l) {
   return '<div class="load-card">' +
     '<div class="lc-top"><div class="lc-cities">' + headline + '</div>' +
     '<span class="pill ' + pillCls + '">' + esc(l.status) + '</span></div>' +
-    '<div class="lc-refrow"><span class="lc-ref">' + esc(l.reference) + '</span></div>' +
+    '<div class="lc-refrow"><span class="lc-ref">' + esc(l.reference) + '</span>' +
+    '<span class="lc-bol">BOL: ' + esc(l.bolStatus ? (l.bolStatus === 'clean' ? 'Clean' : 'Wrong') : '—') + '</span></div>' +
     '<div class="lc-route">' +
       '<div class="lc-end"><div class="lc-tag">PICKUP</div><div class="lc-wh">' + esc(l.pickupWarehouse || l.pickupLocation) + '</div>' +
       (l.pickupWarehouse ? '<div class="lc-addr">' + esc(l.pickupLocation) + '</div>' : '') +
