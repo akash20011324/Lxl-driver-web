@@ -1474,7 +1474,7 @@ admin.get('/locations', (_req, res) => {
 });
 
 // The public broker tracking page (no login — the link token is the
-// key). Self-contained: polls /api/track/<token> every 30 seconds and
+// key). Self-contained: polls /api/track/<token> every 13 seconds and
 // draws the driver's live position plus the load's route and progress.
 function trackPageHtml(mapsKey) {
   return `<!DOCTYPE html>
@@ -1526,13 +1526,17 @@ function trackPageHtml(mapsKey) {
   function fmt(dt) { if (!dt) return ''; try { return new Date(dt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
   function ago(dt) { if (!dt) return ''; var m = Math.max(0, Math.round((Date.now() - new Date(dt).getTime()) / 60000)); if (m < 1) return 'just now'; if (m < 60) return m + ' min ago'; return Math.round(m / 60) + ' hr ago'; }
   function initMap() { mapReady = true; if (window.__pending) render(window.__pending); }
+  function truckIcon() {
+    var svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><circle cx='24' cy='24' r='21' fill='#1E40AF' stroke='#F2B705' stroke-width='3'/><g fill='#ffffff'><rect x='9' y='17' width='17' height='11' rx='1'/><path d='M27 21h5.2L36 25v3h-9z'/><circle cx='14.5' cy='30' r='2.7'/><circle cx='24' cy='30' r='2.7'/><circle cx='33' cy='30' r='2.7'/></g></svg>";
+    return { url: 'data:image/svg+xml;utf8,' + encodeURIComponent(svg), scaledSize: new google.maps.Size(46, 46), anchor: new google.maps.Point(23, 23) };
+  }
   function drawMap(d) {
     if (!mapReady || !window.google || !d.location) return;
     var pos = { lat: d.location.lat, lng: d.location.lng };
     if (!map) {
       map = new google.maps.Map(document.getElementById('map'), { center: pos, zoom: 9, mapTypeId: 'hybrid' });
       new google.maps.TrafficLayer().setMap(map);
-      driverMarker = new google.maps.Marker({ map: map, title: d.driverName });
+      driverMarker = new google.maps.Marker({ map: map, title: d.driverName, icon: truckIcon(), zIndex: 10 });
       if (d.load && d.load.pickupLat != null) new google.maps.Marker({ map: map, position: { lat: d.load.pickupLat, lng: d.load.pickupLng }, label: 'P', title: 'Pickup' });
       if (d.load && d.load.deliveryLat != null) new google.maps.Marker({ map: map, position: { lat: d.load.deliveryLat, lng: d.load.deliveryLng }, label: 'D', title: 'Delivery' });
     }
@@ -1548,8 +1552,8 @@ function trackPageHtml(mapsKey) {
     var html = '';
     if (done) html += '<div class="banner">Delivered &mdash; this load is complete. Tracking has ended.</div>';
     html += '<div class="card"><span class="ref">' + esc(L.reference) + '</span><span class="pill' + (done ? ' done' : '') + '">' + (done ? 'Completed' : 'In transit') + '</span>';
-    html += '<div class="route"><div class="end"><div class="lab">Pickup</div><div class="addr">' + esc(L.pickupWarehouse ? L.pickupWarehouse + ' &middot; ' : '') + esc(L.pickupLocation) + '</div><div class="when">' + fmt(L.pickupAt) + '</div></div><div class="arrow">&#8594;</div>';
-    html += '<div class="end"><div class="lab">Delivery</div><div class="addr">' + esc(L.deliveryWarehouse ? L.deliveryWarehouse + ' &middot; ' : '') + esc(L.deliveryLocation) + '</div><div class="when">' + fmt(L.deliveryAt) + '</div></div></div>';
+    html += '<div class="route"><div class="end"><div class="lab">Pickup</div><div class="addr">' + (L.pickupWarehouse ? esc(L.pickupWarehouse) + ' &middot; ' : '') + esc(L.pickupLocation) + '</div><div class="when">' + fmt(L.pickupAt) + '</div></div><div class="arrow">&#8594;</div>';
+    html += '<div class="end"><div class="lab">Delivery</div><div class="addr">' + (L.deliveryWarehouse ? esc(L.deliveryWarehouse) + ' &middot; ' : '') + esc(L.deliveryLocation) + '</div><div class="when">' + fmt(L.deliveryAt) + '</div></div></div>';
     if (L.progress != null) html += '<div class="track"><div class="fill" style="width:' + L.progress + '%"></div></div><div class="pct">' + L.progress + '% of the route covered</div>';
     html += '</div>';
     html += '<div id="map"></div>';
@@ -1557,6 +1561,7 @@ function trackPageHtml(mapsKey) {
     if (d.truckUnit) html += '<div>Truck: <b>' + esc(d.truckUnit) + '</b></div>';
     if (d.trailerUnit) html += '<div>Trailer: <b>' + esc(d.trailerUnit) + '</b></div>';
     if (d.location) html += '<div>Speed: <b>' + (d.location.speedMph != null ? Math.round(d.location.speedMph) + ' mph' : '&mdash;') + '</b></div>';
+    if (d.location && d.location.place) html += '<div>Location: <b>' + esc(d.location.place) + '</b></div>';
     html += '</div>';
     html += '<p class="muted" style="margin:10px 0 0">' + (d.location ? 'Last location update ' + ago(d.location.updatedAt) : 'Waiting for the driver&rsquo;s first location update&hellip;') + '</p></div>';
     el.innerHTML = html;
@@ -1573,7 +1578,7 @@ function trackPageHtml(mapsKey) {
     });
   }
   load();
-  timer = setInterval(load, 30000);
+  timer = setInterval(load, 13000);
 </script>
 ${mapsKey ? '<script async src="https://maps.googleapis.com/maps/api/js?key=' + mapsKey + '&callback=initMap"></script>' : ''}
 </body>
@@ -1637,7 +1642,47 @@ admin.delete('/broker-access/:id', (req, res) => {
 
 // The public tracking payload: only what a broker needs for their one
 // load. No other drivers, no documents, no rates, no admin data.
-function brokerTrackPayload(token) {
+// "City, ST" for a position, for the public broker tracking page.
+// Google first, Nominatim fallback (same sources as the admin geocode
+// route), cached per ~1 km cell so the broker page's frequent polls
+// stay cheap.
+const placeCache = new Map();
+async function reversePlace(lat, lng) {
+  const ck = lat.toFixed(2) + ',' + lng.toFixed(2);
+  if (placeCache.has(ck)) return placeCache.get(ck);
+  let place = null;
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (key) {
+    try {
+      const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + lat + ',' + lng + '&key=' + encodeURIComponent(key), { headers: { Referer: 'https://app.lubanaxpress.com/' } });
+      const j = await r.json();
+      if (j.status === 'OK' && j.results && j.results.length) {
+        const comps = j.results[0].address_components || [];
+        const find = (t) => { const c = comps.find((x) => (x.types || []).includes(t)); return c ? c.short_name : null; };
+        const city = find('locality') || find('sublocality') || find('postal_town') || find('administrative_area_level_2');
+        const state = find('administrative_area_level_1');
+        place = city && state ? city + ', ' + state : city || state || null;
+      }
+    } catch { /* fall through to Nominatim */ }
+  }
+  if (!place) {
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&zoom=10&addressdetails=1', { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' } });
+      if (r.ok) {
+        const j = await r.json();
+        const a = j.address || {};
+        const city = a.city || a.town || a.village || a.municipality || a.county || null;
+        const iso = a['ISO3166-2-lvl4'] || '';
+        const state = (iso.indexOf('US-') === 0 ? iso.slice(3) : null) || a.state_code || a.state || null;
+        place = city && state ? city + ', ' + state : city || state || null;
+      }
+    } catch { /* place stays null */ }
+  }
+  if (place) placeCache.set(ck, place);
+  return place;
+}
+
+async function brokerTrackPayload(token) {
   const a = db.prepare('SELECT * FROM broker_access WHERE token = ? AND revokedAt IS NULL').get(String(token));
   if (!a) return null;
   if (!a.lastViewedAt || Date.now() - new Date(a.lastViewedAt).getTime() > 60000) {
@@ -1652,13 +1697,17 @@ function brokerTrackPayload(token) {
     loadRow = db.prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC").get(a.driverId);
   }
   const s = loadRow ? serializeLoad(loadRow) : null;
+  const location = loc ? { lat: loc.lat, lng: loc.lng, speedMph: loc.speedMph, heading: loc.heading, updatedAt: loc.updatedAt } : null;
+  if (location) {
+    try { location.place = await reversePlace(loc.lat, loc.lng); } catch { location.place = null; }
+  }
   return {
     brokerName: a.brokerName,
     brokerCompany: a.brokerCompany || null,
     driverName: driver ? driver.name : 'Driver',
     truckUnit: truck ? truck.unitNumber : null,
     trailerUnit: trailer ? trailer.unitNumber : null,
-    location: loc ? { lat: loc.lat, lng: loc.lng, speedMph: loc.speedMph, heading: loc.heading, updatedAt: loc.updatedAt } : null,
+    location,
     load: s ? {
       reference: s.reference,
       status: s.status,
@@ -1677,8 +1726,8 @@ function brokerTrackPayload(token) {
   };
 }
 
-app.get('/api/track/:token', (req, res) => {
-  const payload = brokerTrackPayload(req.params.token);
+app.get('/api/track/:token', async (req, res) => {
+  const payload = await brokerTrackPayload(req.params.token);
   if (!payload) return err(res, 404, 'This tracking link is no longer active');
   res.json(payload);
 });
