@@ -337,6 +337,18 @@ export function openDb(dataDir) {
     if (rcCols2.length && !rcCols2.some((c) => c.name === 'fileHash'))
       db.exec('ALTER TABLE rate_confirmations ADD COLUMN fileHash TEXT');
   } catch { /* table may not exist yet on a brand-new database */ }
+  // Load numbers always carry the company prefix: LXL-<broker number>.
+  // Rows imported before the rule get prefixed once, here at boot.
+  try {
+    db.exec("UPDATE loads SET reference = 'LXL-' || reference WHERE reference NOT LIKE 'LXL-%' AND substr(reference, 1, 1) GLOB '[0-9]' AND NOT EXISTS (SELECT 1 FROM loads l2 WHERE l2.reference = 'LXL-' || loads.reference)");
+    db.exec("UPDATE rate_confirmations SET reference = 'LXL-' || reference WHERE reference NOT LIKE 'LXL-%' AND substr(reference, 1, 1) GLOB '[0-9]' AND NOT EXISTS (SELECT 1 FROM rate_confirmations r2 WHERE r2.reference = 'LXL-' || rate_confirmations.reference)");
+  } catch { /* tables may not exist yet on a brand-new database */ }
+  // BOL import dedupe: email-imported files carry a sha256 fingerprint.
+  try {
+    const fCols = db.prepare('PRAGMA table_info(files)').all();
+    if (fCols.length && !fCols.some((c) => c.name === 'fileHash'))
+      db.exec('ALTER TABLE files ADD COLUMN fileHash TEXT');
+  } catch { /* table may not exist yet on a brand-new database */ }
   // Migrate databases created before phone sign-in: add the normalized
   // phone column (fresh databases get it from the schema above) and
   // backfill it from the stored display phone numbers.

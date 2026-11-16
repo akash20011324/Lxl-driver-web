@@ -1591,6 +1591,75 @@ function cashAmountFromBody(body) {
   return Math.round(dollars * 100);
 }
 
+function cashGroupBy(list) {
+  const m = new Map();
+  for (const e of list) m.set(e.category, (m.get(e.category) || 0) + e.amountCents);
+  return [...m.entries()].map(([category, amountCents]) => ({ category, amountCents })).sort((a, b) => b.amountCents - a.amountCents);
+}
+
+function cashMergedEntries() {
+  const entryRows = db.prepare(
+    `SELECT e.*, t.unitNumber AS truckUnit FROM cash_entries e
+     LEFT JOIN trucks t ON t.id = e.truckId ORDER BY e.date DESC, e.id DESC LIMIT 200`,
+  ).all();
+  const entries = entryRows.map((e) => ({
+    id: e.id, direction: e.direction, date: e.date, category: e.category, amountCents: e.amountCents,
+    truckId: e.truckId ?? null, truckUnit: e.truckUnit ?? null, note: e.note ?? null,
+    loadId: e.loadId ?? null, source: e.source, virtual: false,
+  }));
+  const advanceRows = db.prepare(
+    `SELECT r.id, r.amountCents, r.decidedAt, r.driverId, u.name AS driverName FROM requests r
+     LEFT JOIN users u ON u.id = r.driverId
+     WHERE r.type = 'advance' AND r.status = 'approved' AND r.amountCents IS NOT NULL`,
+  ).all();
+  const advances = advanceRows.map((a) => ({
+    id: 'adv-' + a.id, direction: 'out', date: String(a.decidedAt || '').slice(0, 10),
+    category: 'Driver advance', amountCents: a.amountCents, truckId: null, truckUnit: null,
+    driverId: a.driverId, note: a.driverName ? 'Advance — ' + a.driverName : 'Advance',
+    source: 'advance', virtual: true,
+  }));
+  return { entries, advanceRows, all: [...entries, ...advances] };
+}
+
+// Per-truck monthly profit: revenue from rate cons booked that month,
+// minus fuel (the company's Pilot weekly total for the month, split by
+// each truck's share of the month's loads — the weekly bill has no
+// truck tag), driver pay (tagged entries + that driver's advances),
+// maintenance/repairs and other tagged costs.
+function truckMonthlyFor(monthParam, entries, advanceRows) {
+  const inMonth = (e) => (e.date || '').startsWith(monthParam);
+  const truckRows = db.prepare('SELECT * FROM trucks ORDER BY unitNumber').all();
+  const monthFuelTotal = entries.filter((e) => e.direction === 'out' && e.category.startsWith('Fuel') && inMonth(e)).reduce((s, e) => s + e.amountCents, 0);
+  const loadsInMonth = truckRows.map((t) => (t.driverId ? db.prepare('SELECT COUNT(*) AS n FROM loads WHERE driverId = ? AND substr(pickupAt, 1, 7) = ?').get(t.driverId, monthParam).n : 0));
+  const totalLoadsMonth = loadsInMonth.reduce((s, n) => s + n, 0);
+  let fuelAssigned = 0;
+  const trucks = truckRows.map((t, ti) => {
+    const trips = t.driverId ? db.prepare(
+      `SELECT l.id AS loadId, l.reference AS reference, rc.rateCents AS rateCents FROM loads l
+       JOIN rate_confirmations rc ON rc.loadId = l.id
+       WHERE l.driverId = ? AND rc.rateCents IS NOT NULL AND substr(rc.pickupDate, 1, 7) = ? ORDER BY l.id DESC`,
+    ).all(t.driverId, monthParam).map((trip) => {
+      const exp = db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM cash_entries WHERE loadId = ? AND direction = 'out'").get(trip.loadId).s;
+      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, expensesCents: exp, profitCents: trip.rateCents - exp };
+    }) : [];
+    const sumCatM = (cats) => entries.filter((e) => e.direction === 'out' && e.truckId === t.id && inMonth(e) && cats.includes(e.category)).reduce((s, e) => s + e.amountCents, 0);
+    const revenueCents = trips.reduce((s, x) => s + x.rateCents, 0);
+    let fuelCents = 0;
+    if (monthFuelTotal > 0 && totalLoadsMonth > 0) {
+      fuelCents = ti === truckRows.length - 1 ? monthFuelTotal - fuelAssigned : Math.round((monthFuelTotal * loadsInMonth[ti]) / totalLoadsMonth);
+      fuelAssigned += fuelCents;
+    }
+    const driverPayCents = sumCatM(['Driver pay'])
+      + advanceRows.filter((a) => String(a.decidedAt || '').startsWith(monthParam) && (db.prepare('SELECT id FROM trucks WHERE driverId = ?').get(a.driverId) || {}).id === t.id).reduce((s, a) => s + a.amountCents, 0);
+    const maintCents = sumCatM(['Maintenance', 'Repairs']);
+    const knownM = new Set(['Driver pay', 'Maintenance', 'Repairs']);
+    const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && inMonth(e) && !knownM.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
+    const costs = fuelCents + driverPayCents + maintCents + otherCents;
+    return { truckId: t.id, unitNumber: t.unitNumber, trips, revenueCents, fuelCents, driverPayCents, maintCents, otherCents, profitCents: revenueCents - costs, loadsInMonth: loadsInMonth[ti] };
+  });
+  return { trucks, monthFuelTotalCents: monthFuelTotal, totalLoadsMonth };
+}
+
 admin.get('/cashflow', (req, res) => {
   const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
   const rcTotal = db.prepare('SELECT COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get().s;
@@ -1676,6 +1745,8 @@ admin.get('/cashflow', (req, res) => {
       profitCents: revenueCents - costs,
     };
   });
+  const totals = { inGroups: groupBy(all.filter((e) => e.direction === 'in')), outGroups: groupBy(all.filter((e) => e.direction === 'out')) };
+  const tm = truckMonthlyFor(monthParam, entries, advanceRows);
   const loads = db.prepare(
     `SELECT l.id, l.reference, u.name AS driverName FROM loads l
      LEFT JOIN users u ON u.id = l.driverId ORDER BY l.id DESC LIMIT 50`,
@@ -1686,9 +1757,63 @@ admin.get('/cashflow', (req, res) => {
     bankPending: db.prepare("SELECT * FROM bank_transactions WHERE status = 'pending' ORDER BY date DESC, id DESC LIMIT 40").all()
       .map((t) => ({ id: t.id, date: t.date, name: t.name, amountCents: t.amountCents, direction: t.direction })),
     month: { key: monthParam, inGroups: monthIn, outGroups: monthOut, inTotalCents: monthInTotal, outTotalCents: monthOutTotal, profitCents: monthInTotal - monthOutTotal },
-    trucks: trucksOut, loads,
+    trucks: trucksOut, loads, totals, truckMonthly: tm.trucks, monthFuelTotalCents: tm.monthFuelTotalCents,
   });
 });
+admin.get('/cashflow/report.csv', (req, res) => {
+  const section = ['total', 'monthly', 'trucks'].includes(req.query.section) ? req.query.section : 'monthly';
+  const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
+  const { entries, advanceRows, all } = cashMergedEntries();
+  const fixed = db.prepare('SELECT * FROM fixed_payments WHERE active = 1 ORDER BY category').all();
+  const money = (c) => (Number(c || 0) / 100).toFixed(2);
+  const q = (s) => '"' + String(s ?? '').replace(/"/g, '""') + '"';
+  const L = [];
+  if (section === 'total') {
+    const rcTotal = db.prepare('SELECT COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get().s;
+    const inT = all.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amountCents, 0);
+    const outT = all.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amountCents, 0);
+    L.push(q('LXL Cash Flow — Company total (since May 2026)'));
+    L.push(['Category', 'Money in', 'Money out'].map(q).join(','));
+    const cats = new Map();
+    for (const g of cashGroupBy(all.filter((e) => e.direction === 'in'))) cats.set(g.category, { i: g.amountCents, o: 0 });
+    for (const g of cashGroupBy(all.filter((e) => e.direction === 'out'))) { const c = cats.get(g.category) || { i: 0, o: 0 }; c.o = g.amountCents; cats.set(g.category, c); }
+    for (const [cat, v] of cats) L.push([cat, money(v.i), money(v.o)].map(q).join(','));
+    L.push(['TOTAL', money(inT), money(outT)].map(q).join(','));
+    L.push([q('Booked (rate cons)'), q(money(rcTotal))].join(','));
+    L.push([q('Net (received - out)'), q(money(inT - outT))].join(','));
+  } else if (section === 'monthly') {
+    const inMonth = (e) => (e.date || '').startsWith(monthParam);
+    const mIn = cashGroupBy(all.filter((e) => e.direction === 'in' && inMonth(e)));
+    const mOut = cashGroupBy(all.filter((e) => e.direction === 'out' && inMonth(e)));
+    for (const f of fixed) mOut.push({ category: f.category + ' (fixed)', amountCents: f.amountCents });
+    const inT = mIn.reduce((s, x) => s + x.amountCents, 0);
+    const outT = mOut.reduce((s, x) => s + x.amountCents, 0);
+    L.push(q('LXL Cash Flow — Monthly profit and loss — ' + monthParam));
+    L.push(q('Money in'));
+    L.push(['Category', 'Amount'].map(q).join(','));
+    for (const g of mIn) L.push([g.category, money(g.amountCents)].map(q).join(','));
+    L.push(['Total in', money(inT)].map(q).join(','));
+    L.push(q('Money out'));
+    L.push(['Category', 'Amount'].map(q).join(','));
+    for (const g of mOut) L.push([g.category, money(g.amountCents)].map(q).join(','));
+    L.push(['Total out', money(outT)].map(q).join(','));
+    L.push(['PROFIT', money(inT - outT)].map(q).join(','));
+  } else {
+    const tm = truckMonthlyFor(monthParam, entries, advanceRows);
+    L.push(q('LXL Cash Flow — Per-truck — ' + monthParam));
+    L.push(q('Fuel note: the Pilot weekly total for the month (' + money(tm.monthFuelTotalCents) + ') is split across trucks by their share of the month loads.'));
+    L.push(['Truck', 'Revenue', 'Fuel', 'Driver pay', 'Maintenance and repairs', 'Other', 'Profit'].map(q).join(','));
+    for (const t of tm.trucks) L.push(['Truck ' + t.unitNumber, money(t.revenueCents), money(t.fuelCents), money(t.driverPayCents), money(t.maintCents), money(t.otherCents), money(t.profitCents)].map(q).join(','));
+    L.push('');
+    L.push(q('Trips'));
+    L.push(['Truck', 'Load', 'Rate', 'Trip expenses', 'Trip profit'].map(q).join(','));
+    for (const t of tm.trucks) for (const trip of t.trips) L.push(['Truck ' + t.unitNumber, trip.reference, money(trip.rateCents), money(trip.expensesCents), money(trip.profitCents)].map(q).join(','));
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="lxl-cashflow-' + section + '-' + monthParam + '.csv"');
+  res.send(L.join('\n'));
+});
+
 
 admin.post('/cashflow/fixed', (req, res) => {
   const { category, note } = req.body || {};
@@ -2075,7 +2200,7 @@ admin.post('/loads', (req, res) => {
       "INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, deliveryNumber, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     )
     .run(
-      reference,
+      lxlLoadRef(reference),
       driverId,
       pickupLocation,
       pickupWarehouse ?? null,
@@ -3216,21 +3341,82 @@ function cleanBrokerName(s) {
   return String(s || '').replace(/\s+/g, ' ').replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9.)]+$/g, '').trim() || null;
 }
 
+function isCarrierName(name) {
+  // The carrier on every rate con is the owner's own company — it is
+  // NEVER the broker, whichever spelling the PDF uses.
+  return /LUBANA|LUBAN\b|\bLXL\b/i.test(String(name || ''));
+}
+
+function lxlLoadRef(ref) {
+  // Load numbers are always shown as LXL-<broker load number>.
+  const r = String(ref || '').trim().toUpperCase();
+  if (!r) return '';
+  if (r.startsWith('LXL-')) return r;
+  if (/^\d/.test(r)) return 'LXL-' + r;
+  return r;
+}
+
 function detectBroker(text, subject) {
-  // Email subject first: "Carrier Rate Confirmation Pro # 2038499 from
-  // D & L TRANSPORT, LLC" — the broker is everything after "from".
+  // The broker is read from the rate confirmation document itself: a
+  // labelled broker field first, then the issuing company in the
+  // letterhead — never the carrier block (that is Lubana Xpress).
+  const t = cleanRateText(text).replace(/\bAttn?\s*:?\s*[A-Z][A-Za-z]+/g, ' ');
+  const bad = (n) => !n || isCarrierName(n) || /OTR SOLUTIONS/i.test(n);
+  // 1) Labelled broker field: "Broker: Armstrong Transport Group".
+  const lm = t.match(/(?:Brokerage\s*:|Broker\s*:|Booked by\s*:?|Issued by\s*:?)\s*([A-Za-z0-9][A-Za-z0-9&'.,\- ]{2,70})/i);
+  if (lm) {
+    const cand = cleanBrokerName(lm[1].split(/\s+(?:MC|DOT|Phone|Tel|Fax|Email|Address|Load|Date|Ref|Pro)\b/i)[0]);
+    if (!bad(cand) && /^[A-Z0-9]/.test(cand) && !/^[A-Z]{1,3}[-\s]?\d/.test(cand) && /LLC|Inc|Ltd|Corp|Co\.|Group|Transport|Logistics|Freight|Express|Trucking/i.test(cand)) return cand;
+  }
+  // 2) Subject: "... from <broker>" at the end (the D & L pattern).
   if (subject) {
     const m = String(subject).match(/\bfrom\s+(.+?)\s*$/i);
-    if (m && m[1].trim().length > 1) return cleanBrokerName(m[1]);
+    if (m) { const c = cleanBrokerName(m[1]); if (!bad(c)) return c; }
   }
-  // PDF text: drop "Att: <name>" headers (they sit in front of the broker
-  // name), then take the first company-like name near the top.
-  const head = cleanRateText(text).slice(0, 2000).replace(/\bAttn?\s*:?\s*[A-Z][A-Za-z]+/g, '');
-  const m = head.match(/([A-Z][A-Za-z0-9&'.,\- ]{1,60}?(?:LLC|Inc\.?|Ltd\.?|Corp\.?|Co\.?))\b/);
-  if (m) return cleanBrokerName(m[1]);
-  const m2 = head.match(/([A-Z][A-Za-z0-9&'.,\- ]{1,60}?(?:TRANSPORT|LOGISTICS|FREIGHT|EXPRESS|TRUCKING))\b/);
-  if (m2) return cleanBrokerName(m2[1]);
-  return null;
+  // 3) Company-like names anywhere in the document, scored: a name the
+  //    email subject also mentions and the letterhead zone count most;
+  //    anything inside the carrier block is ignored.
+  const subjTokens = new Set(String(subject || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length >= 4));
+  const cz = t.search(/Carrier\s*:/i);
+  const scores = new Map();
+  const consider = (raw, idx) => {
+    const name = cleanBrokerName(raw);
+    if (bad(name)) return;
+    if (/^[A-Z]{1,3}[-\s]?\d/.test(name)) return; // "MC-1813953 ..." is an ID, not a name
+    if (cz >= 0 && idx > cz && idx < cz + 220) return;
+    let s = 1;
+    if (idx < 1600) s += 50;
+    const words = name.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length >= 4);
+    if (words.some((w) => subjTokens.has(w))) s += 100;
+    scores.set(name, (scores.get(name) || 0) + s);
+  };
+  // Every suffix (LLC, Inc, TRANSPORT, LOGISTICS...) anchors its own
+  // candidate: walk back up to 3 name tokens from the suffix. Anchoring
+  // per suffix means a rejected name (the carrier block) can never
+  // swallow the real broker's name the way a left-to-right scan can.
+  const STOP_TOK = /^(MC|DOT|REF|LOAD|DATE|PRO|RATE|CONFIRMATION|CARRIER|SHIPPER|RECEIVER|CONSIGNEE|TOTAL|PHONE|TEL|FAX|EMAIL|ADDRESS|INFORMATION|DETAILS|NUMBER|BILL|SIGNED|COPY)$/i;
+  const sufRe = /(LLC|Inc\.?|Ltd\.?|Corp\.?|Co\.?|TRANSPORT\w*|LOGISTICS|FREIGHT|EXPRESS|TRUCKING|GROUP)\b/g;
+  let sm;
+  while ((sm = sufRe.exec(t))) {
+    const end = sm.index + sm[0].length;
+    let nameEnd = end;
+    if (!/^(LLC|Inc|Ltd|Corp)/i.test(sm[0])) {
+      const tm = t.slice(end, end + 8).match(/^\s*,\s*(LLC|Inc\.?|Ltd\.?|Corp\.?)\b/i);
+      if (tm) nameEnd = end + tm[0].length;
+    }
+    const toks = t.slice(Math.max(0, sm.index - 120), sm.index).split(/\s+/).filter(Boolean);
+    const nameToks = [t.slice(sm.index, nameEnd)];
+    for (let i = toks.length - 1; i >= 0 && nameToks.length < 4; i--) {
+      const tok = toks[i];
+      if (!/^[A-Z&][A-Za-z0-9&'.,\-]*$/.test(tok)) break;
+      if (STOP_TOK.test(tok.replace(/[^A-Za-z]/g, ''))) break;
+      nameToks.unshift(tok);
+    }
+    consider(nameToks.join(' '), sm.index);
+  }
+  let best = null;
+  for (const [name, score] of scores) if (!best || score > best.score || (score === best.score && name.length > best.name.length)) best = { name, score };
+  return best ? best.name : null;
 }
 
 async function extractRateConDetails(fileBuffer, subject) {
@@ -3253,14 +3439,15 @@ async function backfillRateConDetails() {
       .prepare(
         `SELECT r.id, r.rateCents, r.broker, f.storedFilename FROM rate_confirmations r
          LEFT JOIN files f ON f.id = r.fileId
-         WHERE (r.rateCents IS NULL OR r.broker IS NULL) AND f.storedFilename IS NOT NULL`,
+         WHERE (r.rateCents IS NULL OR r.broker IS NULL OR r.broker LIKE '%LUBAN%') AND f.storedFilename IS NOT NULL`,
       )
       .all();
     for (const row of rows) {
       try {
         const buf = fs.readFileSync(path.join(UPLOADS_DIR, row.storedFilename));
         const d = await extractRateConDetails(buf);
-        const nb = row.broker ?? d.broker ?? null;
+        const curBad = !row.broker || isCarrierName(row.broker) || /OTR SOLUTIONS/i.test(row.broker);
+        const nb = curBad ? (d.broker ?? null) : row.broker;
         const nr = row.rateCents != null ? row.rateCents : (d.rateCents ?? null);
         if (nb !== row.broker || nr !== row.rateCents) {
           db.prepare('UPDATE rate_confirmations SET broker = ?, rateCents = ? WHERE id = ?').run(nb, nr, row.id);
@@ -3290,7 +3477,7 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
     load = db.prepare('SELECT * FROM loads WHERE id = ?').get(Number(loadId));
     if (!load) throw Object.assign(new Error('Load not found'), { status: 404 });
   }
-  const ref = reference || (load && load.reference);
+  const ref = lxlLoadRef(reference || (load && load.reference) || '');
   const pState = pickupState || (load && stateFromAddress(load.pickupLocation));
   const dState = deliveryState || (load && stateFromAddress(load.deliveryLocation));
   const pDate = pickupDate || (load && dateInZone(load.pickupAt, load.pickupTimezone));
@@ -3518,7 +3705,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
     if (!state || typeof state !== 'object' || !state.phase) state = { runId: null, phase: 'sched', m: 0, link: null };
     const run = rcImportRun(state.runId);
     state.runId = run.id;
-    const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [] };
+    const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [], bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0, bolsUnmatchedSubjects: [] };
     const deadline = Date.now() + 40000;
     let processed = 0;
     const finish = (done) => {
@@ -3538,6 +3725,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
     while (Date.now() < deadline) {
       if (state.m >= run.mailboxes.length) {
         if (state.phase === 'sched') { state.phase = 'rc'; state.m = 0; state.link = null; continue; }
+        if (state.phase === 'rc') { state.phase = 'bol'; state.m = 0; state.link = null; continue; }
         return finish(true);
       }
       const mbUser = getUserById(run.mailboxes[state.m].id);
@@ -3549,7 +3737,9 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         if (!run.mailboxErrors.includes(label)) run.mailboxErrors.push(label);
         state.m += 1; state.link = null; continue;
       }
-      const pageUrl = state.link || '/me/messages?$top=50&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,hasAttachments';
+      const pageUrl = state.link || (state.phase === 'bol'
+        ? '/me/mailFolders/sentitems/messages?$top=50&$orderby=sentDateTime%20desc&$select=id,subject,sentDateTime,hasAttachments'
+        : '/me/messages?$top=50&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,hasAttachments');
       const page = await outlookGraph(accessToken, pageUrl);
       const messages = page.value || [];
       let budgetHit = false;
@@ -3557,7 +3747,60 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         if (Date.now() >= deadline || processed >= 10) { budgetHit = true; break; }
         const subject = m.subject || '';
         const exKey = state.phase + ':' + state.m + ':' + m.id;
-        if (state.phase === 'sched') {
+        if (state.phase === 'bol') {
+          if (!m.hasAttachments) continue;
+          if (run.examined.has(exKey)) continue;
+          let attsCache = null;
+          if (!/bol|bill of lading|proof of delivery|\bpod\b/i.test(subject)) {
+            try {
+              const peek = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
+              attsCache = peek.value || [];
+            } catch { continue; }
+            if (!attsCache.some((a) => /bol|pod|lading/i.test(a.name || ''))) continue;
+          }
+          run.examined.add(exKey);
+          processed += 1;
+          try {
+            const atts = attsCache ? { value: attsCache } : await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
+            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')));
+            if (!files.length) continue;
+            const namesText = files.map((a) => a.name || '').join(' ');
+            const f = extractRcLoadFields(namesText, subject);
+            let ref = f.loadRef || f.lxlRef;
+            if (!ref) {
+              const bare = (subject + ' ' + namesText).match(/\b(\d{6,10}(?:-\d{1,3})?)\b/);
+              if (bare) ref = bare[1].toUpperCase();
+            }
+            let load = null;
+            if (f.lxlRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.lxlRef);
+            if (!load && ref) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(lxlLoadRef(ref));
+            if (!load && ref) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(ref);
+            if (!load) {
+              counts.bolsUnmatched += 1;
+              if (counts.bolsUnmatchedSubjects.length < 10) counts.bolsUnmatchedSubjects.push(subject);
+              continue;
+            }
+            for (const att of files) {
+              const { fileBuffer } = await outlookAttachmentBuffer(mbUser, m.id, att.id);
+              if (!fileBuffer || !fileBuffer.length) continue;
+              const h = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+              const dup = db.prepare('SELECT d.id FROM documents d JOIN files fl ON fl.id = d.fileId WHERE d.loadId = ? AND fl.fileHash = ?').get(load.id, h);
+              if (dup) { counts.bolsDuplicate += 1; continue; }
+              const kind = /deliver|proof|\bpod\b|signed|receipt/i.test(subject + ' ' + (att.name || '')) ? 'delivery_bol' : 'pickup_bol';
+              const ext = path.extname(att.name || '') || '.pdf';
+              const stored = crypto.randomBytes(16).toString('hex') + ext;
+              fs.writeFileSync(path.join(UPLOADS_DIR, stored), fileBuffer);
+              const fileId = db.prepare('INSERT INTO files (storedFilename, originalFilename, mimeType, ownerType, ownerId, driverId, fileHash, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                .run(stored, att.name || stored, att.contentType || 'application/octet-stream', 'document', null, load.driverId, h, now()).lastInsertRowid;
+              db.prepare('INSERT INTO documents (kind, loadId, category, label, amountCents, fileId, driverId, createdAt) VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?)')
+                .run(kind, load.id, fileId, load.driverId, now());
+              counts.bolsAdded += 1;
+            }
+          } catch (e) {
+            counts.skipped += 1;
+            if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject + ' (bol error)');
+          }
+        } else if (state.phase === 'sched') {
           if (!/schedule has posted/i.test(subject) || !m.hasAttachments) continue;
           if (run.examined.has(exKey)) continue;
           run.examined.add(exKey);
@@ -3603,6 +3846,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
               }
               let load = null;
               if (f.lxlRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.lxlRef);
+              if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(lxlLoadRef(f.loadRef));
               if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.loadRef);
               if (!load && (f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
                 const driverId = resolveImportedDriverId(f);
@@ -3613,7 +3857,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
                   const dDate = f.dates[f.dates.length - 1] || f.dates[0];
                   const id = db.prepare(
                     "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
-                  ).run(f.lxlRef || f.loadRef, driverId,
+                  ).run(lxlLoadRef(f.lxlRef || f.loadRef), driverId,
                     `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
                     `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
                     'Imported from a rate confirmation email', `${dDate}T17:00:00`, now()).lastInsertRowid;

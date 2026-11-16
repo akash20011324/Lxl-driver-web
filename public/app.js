@@ -1069,13 +1069,14 @@ async function viewDashboard(main) {
   state.dashMapFitted = false;
   document.body.classList.add('dash-bg'); // truck-sunset background + glass (removed on view switch)
   ensureDashBgLayer();
-  const [data, trucks, trailers, loads, rcs, locs] = await Promise.all([
+  const [data, trucks, trailers, loads, rcs, locs, cfData] = await Promise.all([
     api('/api/admin/overview'),
     api('/api/admin/trucks').catch(() => []),
     api('/api/admin/trailers').catch(() => []),
     api('/api/admin/loads').catch(() => []),
     api('/api/admin/rate-confirmations').catch(() => []),
     api('/api/admin/locations').catch(() => []),
+    api('/api/admin/cashflow').catch(() => null),
   ]);
   const drivers = data.drivers || data || [];
   const list = Array.isArray(drivers) ? drivers : [];
@@ -1095,6 +1096,30 @@ async function viewDashboard(main) {
   const LIVE_MS = 15 * 60 * 1000;
   const locFresh = (loc) => !!(loc && loc.updatedAt && (Date.now() - Date.parse(loc.updatedAt) < LIVE_MS));
   const isLive = (d) => d.active !== false && locFresh(locByDriver[d.id] || d.location);
+  const cfMonth = (cfData && cfData.month) || null;
+  let cfDonutHtml = '';
+  if (cfMonth && (cfMonth.outGroups || []).length) {
+    const groups = [...cfMonth.outGroups].sort((a, b) => b.amountCents - a.amountCents);
+    const top = groups.slice(0, 6);
+    const restAmt = groups.slice(6).reduce((sum, g) => sum + g.amountCents, 0);
+    if (restAmt > 0) top.push({ category: 'Other', amountCents: restAmt });
+    const totalOut = top.reduce((sum, g) => sum + g.amountCents, 0) || 1;
+    const colors = ['#F2B705', '#4DA3FF', '#4ade80', '#f87171', '#c084fc', '#facc15', '#94a3b8'];
+    const R = 54; const CC = 2 * Math.PI * R;
+    let acc = 0;
+    const segs = top.map((g, i) => {
+      const frac = g.amountCents / totalOut;
+      const seg = '<circle cx="70" cy="70" r="' + R + '" fill="none" stroke="' + colors[i % colors.length] + '" stroke-width="20" stroke-dasharray="' + (frac * CC).toFixed(2) + ' ' + (CC - frac * CC).toFixed(2) + '" stroke-dashoffset="' + (-acc * CC).toFixed(2) + '" transform="rotate(-90 70 70)"></circle>';
+      acc += frac;
+      return seg;
+    }).join('');
+    const legend = top.map((g, i) => '<div class="cf-donut-row"><span class="cf-donut-dot" style="background:' + colors[i % colors.length] + '"></span><span>' + esc(g.category) + '</span><strong>' + fmtMoney(g.amountCents) + '</strong></div>').join('');
+    const mName = new Date(cfMonth.key + '-15T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    cfDonutHtml = '<div class="cf-donut-wrap"><svg width="140" height="140" viewBox="0 0 140 140">' + segs +
+      '<text x="70" y="66" text-anchor="middle" fill="#F2B705" font-size="15" font-weight="700">' + fmtMoney(cfMonth.profitCents) + '</text>' +
+      '<text x="70" y="84" text-anchor="middle" fill="#cbd5e1" font-size="10">profit</text></svg>' +
+      '<div class="cf-donut-legend"><div class="small muted" style="margin-bottom:6px">Money out in ' + esc(mName) + ' — total ' + fmtMoney(cfMonth.outTotalCents) + ' · money in ' + fmtMoney(cfMonth.inTotalCents) + '</div>' + legend + '</div></div>';
+  }
   main.innerHTML = '<div class="dash-head"><h1 style="margin:0">Dashboard</h1><span class="status-pill live"><span class="dot"></span>Live</span></div>' +
     '<div class="dash-stats">' +
     '<div class="glass-panel dash-stat"><div class="stat-num">' + count('drivers', list.length) + '</div><div class="stat-label">Drivers</div></div>' +
@@ -1110,6 +1135,7 @@ async function viewDashboard(main) {
     '<div class="dash-track">' +
     '<div class="glass-panel"><h2 style="margin-top:0"><span class="live-dot off" id="dashLiveDot"></span>Live tracking</h2><div id="dashMap" class="dash-map"></div><p class="small muted" id="dashMapNote" style="display:none"></p></div>' +
     '<div class="glass-panel mt" id="dashFleet"></div>' +
+    '<div class="glass-panel mt"><h2 style="margin-top:0">Cash flow — this month</h2>' + (cfDonutHtml || '<p class="empty">No cash flow recorded yet this month.</p>') + '</div>' +
     '</div></div>';
   renderAdminSidebar(pendingReq);
   fillCitySlots();
@@ -2795,6 +2821,30 @@ let cfOutlookPick = null; // { messageId, attachmentId, subject } while an Outlo
 
 let cfMonthKey = ''; // YYYY-MM shown in the monthly P&L; '' = current month
 
+async function cfDownload(section) {
+  try {
+    const q = '/api/admin/cashflow/report.csv?section=' + section + (cfMonthKey ? '&month=' + cfMonthKey : '');
+    const r = await fetch(q, { headers: { Authorization: 'Bearer ' + (localStorage.getItem('lxl_token') || '') } });
+    if (!r.ok) throw new Error('download failed');
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'lxl-cashflow-' + section + (cfMonthKey ? '-' + cfMonthKey : '') + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  } catch (e) { toast('Could not download the report.', 'err'); }
+}
+
+function cfShiftMonth(delta) {
+  const base = cfMonthKey || new Date().toISOString().slice(0, 7);
+  const dt = new Date(base + '-15T12:00:00');
+  dt.setMonth(dt.getMonth() + delta);
+  cfMonthKey = dt.toISOString().slice(0, 7);
+  renderAdminView('cashflow');
+}
+
 async function viewCashflow(main) {
   document.body.classList.add('cashflow-bg'); // office desk photo + liquid glass (removed on view switch)
   ensureCashflowBgLayer();
@@ -2809,6 +2859,8 @@ async function viewCashflow(main) {
   const mo = d.month || { key: '', inGroups: [], outGroups: [], inTotalCents: 0, outTotalCents: 0, profitCents: 0 };
   const fixed = d.fixed || [];
   const truckStats = d.trucks || [];
+  const truckMonthStats = d.truckMonthly || [];
+  const totals = d.totals || { inGroups: [], outGroups: [] };
   const loads = d.loads || [];
   const maxW = Math.max(1, ...weekly.map((w) => Math.max(w.inCents, w.outCents)));
   const weekCols = weekly.map((w) => '<div class="cf-week">' +
@@ -2837,6 +2889,21 @@ async function viewCashflow(main) {
       '<span class="muted">Trip expenses −' + fmtMoney(trip.expensesCents) + '</span>' +
       '<span class="cf-amt ' + (trip.profitCents >= 0 ? 'in' : 'out') + '">' + (trip.profitCents >= 0 ? '+' : '−') + fmtMoney(Math.abs(trip.profitCents)) + '</span></div>').join('')
       : '<p class="empty">No trips with a rate con yet for this truck.</p>') +
+    '</section>').join('');
+  const truckMonthPanels = truckMonthStats.map((t) => '<section class="maint-panel">' +
+    '<div class="maint-panel-head"><div><span class="maint-unit">' + esc(t.unitNumber) + '</span></div>' +
+    '<div class="maint-odo">' + fmtMoney(t.profitCents) + ' <span>profit — ' + esc(monthName) + '</span></div></div>' +
+    '<div class="cf-truck-stats">' +
+    '<span>Made <strong>' + fmtMoney(t.revenueCents) + '</strong></span>' +
+    '<span>Fuel <strong>−' + fmtMoney(t.fuelCents) + '</strong></span>' +
+    '<span>Driver pay <strong>−' + fmtMoney(t.driverPayCents) + '</strong></span>' +
+    '<span>Maintenance <strong>−' + fmtMoney(t.maintCents) + '</strong></span>' +
+    '<span>Other <strong>−' + fmtMoney(t.otherCents) + '</strong></span></div>' +
+    (t.trips.length ? t.trips.map((trip) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(trip.reference) + '</strong></div>' +
+      '<span class="muted">Rate ' + fmtMoney(trip.rateCents) + '</span>' +
+      '<span class="muted">Trip expenses −' + fmtMoney(trip.expensesCents) + '</span>' +
+      '<span class="cf-amt ' + (trip.profitCents >= 0 ? 'in' : 'out') + '">' + (trip.profitCents >= 0 ? '+' : '−') + fmtMoney(Math.abs(trip.profitCents)) + '</span></div>').join('')
+      : '<p class="empty">No trips booked this month for this truck.</p>') +
     '</section>').join('');
   const bankPending = d.bankPending || [];
   const bankSuggest = (name, dir) => {
@@ -2873,18 +2940,23 @@ async function viewCashflow(main) {
   main.innerHTML = '<div class="rc-head"><h1>Cash Flow</h1><span>' +
     '<button class="btn-blue btn" id="cfOutlookBtn">Import from Outlook</button> ' +
     '<button class="btn-ghost btn" id="cfAddToggle">+ Add entry</button></span></div>' +
+    '<h2 class="cf-h2">1 · Company total — since May 2026</h2>' +
     '<div class="rc-stats">' +
     '<div class="rc-stat"><div class="num">' + fmtMoney(d.bookedCents || 0) + '</div><div class="lab">Booked (rate cons)</div></div>' +
     '<div class="rc-stat"><div class="num" style="color:#4ade80">' + fmtMoney(d.receivedCents || 0) + '</div><div class="lab">Received</div></div>' +
     '<div class="rc-stat"><div class="num" style="color:#f87171">' + fmtMoney(d.outCents || 0) + '</div><div class="lab">Money out</div></div>' +
     '<div class="rc-stat"><div class="num" style="color:#F2B705">' + fmtMoney(d.netCents || 0) + '</div><div class="lab">Net (received − out)</div></div></div>' +
-    '<section class="cf-panel"><div class="cf-panel-head"><h3>' + esc(monthName) + ' — profit</h3>' +
-    '<span><input type="month" id="cfMonthInput" value="' + esc(mo.key || '') + '"> <button class="btn-ghost btn-sm" id="cfMonthGo">Show month</button></span></div>' +
+    '<section class="cf-panel"><div class="cf-cols"><div><h4>Money in — by category</h4>' + groupRows(totals.inGroups, '+') + '</div>' +
+    '<div><h4>Money out — by category</h4>' + groupRows(totals.outGroups, '−') + '</div></div>' +
+    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTotal">⬇ Download total report (CSV)</button></div></section>' +
+    '<section class="cf-panel"><div class="cf-panel-head"><h3>2 · Monthly — ' + esc(monthName) + ' profit</h3>' +
+    '<span><button class="btn-ghost btn-sm" id="cfMonthPrev">‹ Prev</button> <input type="month" id="cfMonthInput" value="' + esc(mo.key || '') + '"> <button class="btn-ghost btn-sm" id="cfMonthGo">Show month</button> <button class="btn-ghost btn-sm" id="cfMonthNext">Next ›</button></span></div>' +
     '<div class="cf-cols"><div><h4>Money in</h4>' + groupRows(mo.inGroups, '+') +
     '<div class="cf-group total"><span>Total in</span><strong>+' + fmtMoney(mo.inTotalCents) + '</strong></div></div>' +
     '<div><h4>Money out</h4>' + groupRows(mo.outGroups, '−') +
     '<div class="cf-group total"><span>Total out</span><strong>−' + fmtMoney(mo.outTotalCents) + '</strong></div></div></div>' +
-    '<div class="cf-profit">Profit for ' + esc(monthName) + ': <strong style="color:' + (mo.profitCents >= 0 ? '#4ade80' : '#f87171') + '">' + fmtMoney(mo.profitCents) + '</strong></div></section>' +
+    '<div class="cf-profit">Profit for ' + esc(monthName) + ': <strong style="color:' + (mo.profitCents >= 0 ? '#4ade80' : '#f87171') + '">' + fmtMoney(mo.profitCents) + '</strong></div>' +
+    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlMonthly">⬇ Download ' + esc(monthName) + ' report (CSV)</button></div></section>' +
     '<div class="cf-chart"><div class="cf-chart-title">Last 8 weeks — <span style="color:#4ade80">money in</span> vs <span style="color:#f87171">money out</span></div><div class="cf-weeks">' + weekCols + '</div></div>' +
     '<section class="card hidden" id="cfOutlookCard"><h3>Import from Outlook</h3>' +
     (outlook.connected
@@ -2919,7 +2991,10 @@ async function viewCashflow(main) {
     '<h2 class="cf-h2">Bank transactions — categorize</h2>' +
     '<p class="small muted">Straight from your bank account — most of these categorize themselves (factoring money in, Pilot weekly to Fuel, tolls, driver Zelles to Driver pay). Only the ones the system cannot place wait here: categorize one once and it learns that pattern for next time. Your profit comes from the categorized books, never from the bank total.</p>' +
     (bankPending.length ? bankPending.map(bankRow).join('') : '<p class="empty">Nothing waiting — every bank transaction is handled.</p>') +
-    '<h2 class="cf-h2">Per truck</h2>' + (truckPanels || '<p class="empty">No trucks yet.</p>') +
+    '<h2 class="cf-h2">3 · Per truck — ' + esc(monthName) + '</h2>' +
+    '<p class="small muted">What each truck made this month: rate-con revenue minus fuel (the Pilot weekly total for the month, split by each truck\'s share of the month\'s loads), driver pay, maintenance and other tagged costs. Use the month switcher in section 2 to change the month.</p>' +
+    (truckMonthPanels || '<p class="empty">No trucks yet.</p>') +
+    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTrucks">⬇ Download per-truck ' + esc(monthName) + ' report (CSV)</button></div>' +
     '<h2 class="cf-h2">Entries</h2>' +
     (entries.length ? entries.map(entryRow).join('') : '<p class="empty">No entries yet — import from Outlook or add the first one.</p>') +
     '<p class="small muted">Driver fuel receipts stay with their loads and are NOT counted here — only the Pilot weekly bill counts as fuel. Approved driver advances are counted automatically.</p>';
@@ -2944,6 +3019,16 @@ async function viewCashflow(main) {
     const v = main.querySelector('#cfMonthInput').value;
     if (v) { cfMonthKey = v; renderAdminView('cashflow'); }
   });
+  const cfPrev = main.querySelector('#cfMonthPrev');
+  if (cfPrev) cfPrev.addEventListener('click', () => cfShiftMonth(-1));
+  const cfNext = main.querySelector('#cfMonthNext');
+  if (cfNext) cfNext.addEventListener('click', () => cfShiftMonth(1));
+  const cfDlT = main.querySelector('#cfDlTotal');
+  if (cfDlT) cfDlT.addEventListener('click', () => cfDownload('total'));
+  const cfDlM = main.querySelector('#cfDlMonthly');
+  if (cfDlM) cfDlM.addEventListener('click', () => cfDownload('monthly'));
+  const cfDlK = main.querySelector('#cfDlTrucks');
+  if (cfDlK) cfDlK.addEventListener('click', () => cfDownload('trucks'));
   main.querySelector('#cfFixedForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -3885,9 +3970,10 @@ async function viewRateCons(main) {
   if (rcImportAll) rcImportAll.addEventListener('click', async () => {
     const status = document.getElementById('rcImportStatus');
     rcImportAll.disabled = true;
-    const tot = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0 };
+    const tot = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0 };
     const skippedSubjects = [];
     const heldOutSubjects = [];
+    const bolsUnmatchedSubjects = [];
     let cursor = null;
     let mailboxes = [];
     let schedules = 0;
@@ -3902,6 +3988,10 @@ async function viewRateCons(main) {
         tot.notRc += r.notRc || 0;
         tot.skipped += r.skipped || 0;
         tot.heldOut += r.heldOut || 0;
+        tot.bolsAdded += r.bolsAdded || 0;
+        tot.bolsDuplicate += r.bolsDuplicate || 0;
+        tot.bolsUnmatched += r.bolsUnmatched || 0;
+        (r.bolsUnmatchedSubjects || []).forEach((x) => { if (bolsUnmatchedSubjects.length < 10) bolsUnmatchedSubjects.push(x); });
         (r.skippedSubjects || []).forEach((x) => { if (skippedSubjects.length < 10) skippedSubjects.push(x); });
         (r.heldOutSubjects || []).forEach((x) => { if (heldOutSubjects.length < 10) heldOutSubjects.push(x); });
         if (Array.isArray(r.mailboxes) && r.mailboxes.length) mailboxes = r.mailboxes;
@@ -3916,6 +4006,7 @@ async function viewRateCons(main) {
         tot.alreadyHave + ' were already there (a duplicate is never imported twice). ' +
         (tot.heldOut ? tot.heldOut + ' rate confirmations were LEFT OUT — their load is not on any OTR schedule (cancelled or not paid yet)' + (heldOutSubjects.length ? ': ' + heldOutSubjects.join(' · ') : '') + '. ' : '') +
         tot.notRc + ' emails were not rate confirmations.' +
+        (tot.bolsAdded || tot.bolsUnmatched ? ' Added ' + tot.bolsAdded + ' BOLs into the loads\' Documents' + (tot.bolsDuplicate ? ' (' + tot.bolsDuplicate + ' duplicate BOLs skipped)' : '') + (tot.bolsUnmatched ? '; ' + tot.bolsUnmatched + ' BOL emails could not be matched to an imported load' + (bolsUnmatchedSubjects.length ? ': ' + bolsUnmatchedSubjects.join(' · ') : '') : '') + '. ' : '') +
         (tot.skipped ? ' ' + tot.skipped + ' could not be read fully' + (skippedSubjects.length ? ': ' + skippedSubjects.join(' · ') : '') + '.' : '');
       toast('Import finished: ' + tot.imported + ' rate confirmations, ' + tot.loadsCreated + ' loads created, ' + tot.heldOut + ' held out.', 'ok');
       setTimeout(() => renderAdminView('ratecons'), 2500);

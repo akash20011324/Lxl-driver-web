@@ -1399,3 +1399,10 @@ body.maintenance-bg .sidebar { background: rgba(5, 9, 18, 0.45); backdrop-filter
 .cf-preview h4 { margin: 0 0 8px; }
 .cf-preview-img { max-width: 100%; max-height: 420px; border-radius: 8px; display: block; margin: 8px 0; }
 .cf-preview-text { font-size: 12px; line-height: 1.5; color: #cbd5e1; background: rgba(2,6,16,.6); border-radius: 8px; padding: 10px 12px; margin: 8px 0; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+
+/* Dashboard cash-flow donut */
+.cf-donut-wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.cf-donut-legend{flex:1;min-width:180px}
+.cf-donut-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px}
+.cf-donut-row strong{margin-left:auto}
+.cf-donut-dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
