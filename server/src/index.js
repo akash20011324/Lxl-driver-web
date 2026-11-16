@@ -2180,7 +2180,7 @@ admin.post('/trailers/:id/yard-status', (req, res) => {
 });
 
 admin.get('/loads', (_req, res) => {
-  const rows = db.prepare('SELECT * FROM loads ORDER BY createdAt DESC, id DESC').all();
+  const rows = db.prepare("SELECT * FROM loads ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END, createdAt DESC, id DESC").all();
   // Fill any missing route coords in the background so the progress %
   // appears on the next refresh.
   for (const l of rows) {
@@ -3602,8 +3602,59 @@ admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
 // everything in its place — and the RC on it feeds Cash Flow's booked total.
 function rcNormDate(y, mo, d) {
   const yy = Number(y) < 100 ? 2000 + Number(y) : Number(y);
+  const mm = Number(mo);
+  const dd = Number(d);
+  if (!yy || yy < 2024 || yy > 2028 || mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  const dt = new Date(yy, mm - 1, dd);
+  if (dt.getFullYear() !== yy || dt.getMonth() !== mm - 1 || dt.getDate() !== dd) return null;
   const p = (n) => String(n).padStart(2, '0');
-  return `${yy}-${p(mo)}-${p(d)}`;
+  return `${yy}-${p(mm)}-${p(dd)}`;
+}
+const RC_STREET_SUFFIX = /\b(STREET|ST|AVENUE|AVE|BOULEVARD|BLVD|ROAD|RD|DRIVE|DR|LANE|LN|COURT|CT|HIGHWAY|HWY|PARKWAY|PKWY|CIRCLE|CIR|PLACE|PL|TRAIL|TRL|WAY)\b/g;
+function cleanCityName(city) {
+  // Flattened RC text glues the street line onto the city ("TH STREET RANCHO
+  // CUCAMONGA, CA 91730"). Cut through the last street-suffix word so only the
+  // real city remains. A suffix as the FIRST word is left alone ("ST. LOUIS").
+  const c = String(city || '').trim().replace(/\s+/g, ' ');
+  const matches = [...c.matchAll(RC_STREET_SUFFIX)];
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const m = matches[i];
+    const before = c.slice(0, m.index).trim();
+    const after = c.slice(m.index + m[0].length).replace(/^[.\s]+/, '').trim();
+    if (before && after) return after;
+    if (!before) break;
+  }
+  return c;
+}
+function validDatePart(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || ''));
+  if (!m) return false;
+  const y = +m[1]; const mo = +m[2]; const d = +m[3];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(y, mo - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
+}
+function repairImportedLoadData() {
+  // One-time cleanup for loads the bulk import created with a garbage date or
+  // a street fragment in the city name. Only touches import-created loads.
+  try {
+    const loads = db.prepare("SELECT * FROM loads WHERE notes = 'Imported from a rate confirmation email'").all();
+    for (const l of loads) {
+      const upd = {};
+      for (const k of ['pickupLocation', 'deliveryLocation']) {
+        const v = String(l[k] || '');
+        const m = /^(.*),\s*([A-Z]{2})\s+(\d{5})/.exec(v);
+        if (m) { const nv = `${cleanCityName(m[1])}, ${m[2]} ${m[3]}`; if (nv !== v) upd[k] = nv; }
+      }
+      if (!validDatePart(l.pickupAt) || !validDatePart(l.deliveryAt)) {
+        const rc = db.prepare('SELECT pickupDate, deliveryDate FROM rate_confirmations WHERE loadId = ?').get(l.id);
+        if (!validDatePart(l.pickupAt)) upd.pickupAt = (rc && validDatePart(rc.pickupDate)) ? rc.pickupDate + 'T09:00:00' : (validDatePart(l.deliveryAt) ? String(l.deliveryAt).slice(0, 10) + 'T09:00:00' : String(l.createdAt || '').slice(0, 10) + 'T09:00:00');
+        if (!validDatePart(l.deliveryAt)) upd.deliveryAt = (rc && validDatePart(rc.deliveryDate)) ? rc.deliveryDate + 'T17:00:00' : String(upd.pickupAt || l.pickupAt).slice(0, 10) + 'T17:00:00';
+      }
+      const keys = Object.keys(upd);
+      if (keys.length) db.prepare(`UPDATE loads SET ${keys.map((k) => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map((k) => upd[k]), l.id);
+    }
+  } catch (e) { console.error('repairImportedLoadData', e); }
 }
 function extractRcDates(text) {
   const out = [];
@@ -3621,7 +3672,8 @@ function extractRcPlaces(text) {
   const re = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
   let m;
   while ((m = re.exec(text))) {
-    const city = m[1].trim().replace(/\s+/g, ' ');
+    const city = cleanCityName(m[1]);
+    if (!city) continue;
     const key = city + '|' + m[2];
     if (!out.some((p) => p.city + '|' + p.state === key)) out.push({ city, state: m[2], zip: m[3] });
   }
@@ -3705,7 +3757,7 @@ function saveRcImportRun(run) {
   db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes, cursor, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null, run.epoch || RC_IMPORT_EPOCH);
 }
-const RC_IMPORT_EPOCH = 'diag2-2026-11-16';
+const RC_IMPORT_EPOCH = 'fix3-2026-11-16';
 function rcImportRun(runId) {
   if (!runId) {
     const latest = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
@@ -4728,4 +4780,5 @@ const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
+  repairImportedLoadData();
 });
