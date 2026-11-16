@@ -4576,6 +4576,120 @@ async function adjudicateRateCons7() {
   } catch (e) { console.error('rc adjudication7 failed', e); }
 }
 
+// One-time adjudication round 8 (2026-11-16): the owner's decisions
+// on the cleanup report and on the 11 rate-cons-without-loads list.
+// (1) LXL-103455 rate goes by the OTR schedule: $2,100 (LXLD-51).
+// (2) The five hand-filed loads are completed. (3) RXO broker
+// normalized to the document header. (4) Cooke LXL-155408 pinned to
+// its document ($4,300, GA->TX, 2026-10-19 -> 2026-10-22; document
+// prints PRO 155408, names J&P Logistics as carrier — owner: it is
+// an LXL load, driver Arsh). (5) Miller LXL-0202782 rate con row
+// inserted from OTR schedule LXLD-22 ($11,000, paid; no file — the
+// confirmation is a scanned copy in a dispatcher's mailbox and the
+// Add RC form requires a file). (6) Loads created + linked for the
+// eight confirmations the owner verified as real with drivers:
+// 682545 Arsh, 569202874 Akash, SPT-691666 Akash, 34410 Akash,
+// 183569 Akash, 71142 Akash, 0105681 Arsh, 2991353 Akash,
+// SPT-724956 Arsh (routes and dates from the verified document
+// reads). (7) LXL-9841352 deleted —
+// owner: FAKE load. (8) LXL-127657 deleted — owner: load CANCELLED.
+// (All 11 list items received verdicts.)
+async function adjudicateRateCons8() {
+  try {
+    const marker = 'rc-adjudication8-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication8: ' + m);
+    const deleteRcFully = (row, why) => {
+      db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(row.id);
+      if (row.fileId) {
+        const usedElsewhere = db.prepare('SELECT id FROM rate_confirmations WHERE fileId = ? LIMIT 1').get(row.fileId)
+          || db.prepare('SELECT id FROM documents WHERE fileId = ? LIMIT 1').get(row.fileId);
+        if (!usedElsewhere) {
+          const f = db.prepare('SELECT storedFilename FROM files WHERE id = ?').get(row.fileId);
+          db.prepare('DELETE FROM files WHERE id = ?').run(row.fileId);
+          if (f && f.storedFilename) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename)); } catch { /* already gone */ } }
+        }
+      }
+      log('deleted rate con ' + row.reference + ' (id ' + row.id + ') — ' + why);
+    };
+    // 1. 103455 by OTR
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET rateCents = 210000 WHERE reference = 'LXL-103455'").run();
+      if (u.changes) log('LXL-103455: rate -> $2,100 (OTR schedule LXLD-51, per the owner)');
+    }
+    // 2. Complete the five hand-filed loads
+    {
+      const u = db.prepare("UPDATE loads SET status = 'completed', completedAt = deliveryAt WHERE reference IN ('LXL-1987085', 'LXL-24533992', 'LXL-31418-55364', 'LXL-0202782', 'LXL-155408') AND status = 'active'").run();
+      if (u.changes) log('marked ' + u.changes + ' hand-filed load(s) completed');
+    }
+    // 3. RXO broker string
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'RXO, Inc.' WHERE reference = 'LXL-24533992'").run();
+      if (u.changes) log('LXL-24533992: broker -> RXO, Inc.');
+    }
+    // 4. Cooke pins
+    {
+      const u = db.prepare("UPDATE rate_confirmations SET broker = 'Cooke Transportation Services, LLC', rateCents = 430000, pickupState = 'GA', deliveryState = 'TX', pickupDate = '2026-10-19', deliveryDate = '2026-10-22' WHERE reference = 'LXL-155408'").run();
+      if (u.changes) log('LXL-155408: pinned to the Cooke document ($4,300, GA->TX, 2026-10-19 -> 2026-10-22)');
+    }
+    // 5. Miller rate con row from the OTR schedule (no file)
+    {
+      const load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-0202782'").get();
+      const existing = db.prepare("SELECT id FROM rate_confirmations WHERE reference = 'LXL-0202782'").get();
+      if (load && !existing) {
+        db.prepare("INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId, createdAt) VALUES ('LXL-0202782', ?, 'Miller Brokerage Services LLC', 'CA', 'NJ', '2026-09-02', '2026-09-06', 1100000, NULL, ?)").run(load.id, new Date().toISOString());
+        log('LXL-0202782: rate con row created from OTR schedule LXLD-22 ($11,000, no file — confirmation is a scanned copy in a dispatcher mailbox)');
+      } else if (existing) {
+        log('LXL-0202782: rate con row already exists, left as is');
+      } else {
+        log('LXL-0202782: WARNING — load not found, rate con row not created');
+      }
+    }
+    // 6. Create the confirmed-real loads and link their rate cons
+    {
+      const akash = db.prepare("SELECT id FROM users WHERE role = 'driver' AND name LIKE '%akash%' ORDER BY id LIMIT 1").get();
+      const arsh = db.prepare("SELECT id FROM users WHERE role = 'driver' AND name LIKE '%arsh%' ORDER BY id LIMIT 1").get();
+      const jobs = [
+        { ref: 'LXL-682545', driver: arsh, from: 'Atlanta, GA', to: 'Greencastle, PA', p: '2026-10-28', d: '2026-10-29' },
+        { ref: 'LXL-569202874', driver: akash, from: 'Albany, GA 31705', to: 'Ypsilanti, MI 48198', p: '2026-09-30', d: '2026-10-02' },
+        { ref: 'SPT-691666', driver: akash, from: 'McAllen, TX', to: 'Passaic, NJ', p: '2026-08-03', d: '2026-08-07' },
+        { ref: 'LXL-34410', driver: akash, from: 'Pharr, TX', to: 'Houston, TX', p: '2026-08-01', d: '2026-08-02' },
+        { ref: 'LXL-183569', driver: akash, from: 'Philadelphia, PA', to: 'Greenwood, IN', p: '2026-07-06', d: '2026-07-07' },
+        { ref: 'LXL-71142', driver: akash, from: 'Elizabeth, NJ 07201', to: 'Cincinnati, OH 45241', p: '2026-08-26', d: '2026-08-27' },
+        { ref: 'LXL-0105681', driver: arsh, from: 'Eufaula, AL 36027', to: 'Assonet, MA 02702', p: '2026-10-30', d: '2026-11-01' },
+        { ref: 'LXL-2991353', driver: akash, from: 'Los Alamitos, CA', to: 'Brooklyn, NY', p: '2026-06-05', d: '2026-06-09' },
+        { ref: 'SPT-724956', driver: arsh, from: 'Vineland, NJ', to: 'Valdosta, GA', p: '2026-10-15', d: '2026-10-17' },
+      ];
+      for (const j of jobs) {
+        if (!j.driver) { log(j.ref + ': WARNING — driver not found, load not created'); continue; }
+        let load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(j.ref);
+        if (!load) {
+          const info = db.prepare("INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, 'America/Indiana/Indianapolis', ?, ?, 'America/Indiana/Indianapolis', 'Load created from the rate confirmation (owner confirmed the load and driver 2026-11-16)', 'completed', ?, ?)").run(j.ref, j.driver.id, j.from, j.p + 'T09:00:00', j.to, j.d + 'T17:00:00', j.d + 'T17:00:00', new Date().toISOString());
+          load = db.prepare('SELECT * FROM loads WHERE id = ?').get(info.lastInsertRowid);
+          log(j.ref + ': created completed load ' + j.from + ' -> ' + j.to);
+        }
+        const rc = db.prepare('SELECT * FROM rate_confirmations WHERE reference = ?').get(j.ref);
+        if (load && rc && rc.loadId !== load.id) {
+          db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(load.id, rc.id);
+          log(j.ref + ': rate con linked to its load');
+        }
+      }
+    }
+    // 7. PTG LXL-9841352 — owner: FAKE load
+    {
+      const row = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-9841352'").get();
+      if (row) deleteRcFully(row, 'owner confirmed this load is FAKE (2026-11-16)');
+    }
+    // 8. Corcoran LXL-127657 — owner: load CANCELLED
+    {
+      const row = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'LXL-127657'").get();
+      if (row) deleteRcFully(row, 'owner confirmed this load was CANCELLED (2026-11-16)');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication8 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -6164,7 +6278,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
