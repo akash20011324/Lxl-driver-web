@@ -266,11 +266,17 @@ function enterShell() {
   else renderDriverShell();
 }
 
+const BELL_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#e8eef7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>';
+
 function topbar() {
+  const bell = state.user && state.user.role === 'admin'
+    ? '<span class="bell-wrap"><button class="bell-btn" id="bellBtn" type="button" aria-label="Notifications" title="Notifications">' + BELL_SVG + '<span class="bell-badge" id="bellBadge" hidden></span></button>' +
+      '<span class="bell-panel" id="bellPanel" hidden></span></span>'
+    : '';
   return '<header class="topbar">' +
     '<img class="logo" src="assets/logo.png" alt="LXL logo">' +
     '<span class="brand">Lubana Xpress LLC</span>' +
-    '<span class="spacer"></span>' +
+    '<span class="spacer"></span>' + bell +
     '<span class="who">' + esc(state.user ? state.user.name : '') + (state.user ? ' · ' + esc(state.user.role) : '') + '</span>' +
     '<button class="btn btn-ghost btn-sm" onclick="signOut()">Sign out</button>' +
     '</header>';
@@ -286,7 +292,7 @@ const ADMIN_VIEWS = [
   ['loads', 'Loads'],
   ['documents', 'Documents'],
   ['requests', 'Requests'],
-  ['dispatch', 'Dispatch'],
+  ['dispatch', 'Chat'],
   ['locations', 'Tracking'],
   ['ratecons', 'Rate Cons'],
 ];
@@ -301,6 +307,138 @@ function renderAdminShell() {
   renderAdminSidebar();
   loadSidebarOrder();
   renderAdminView(state.adminView);
+  const bellBtn = document.getElementById('bellBtn');
+  if (bellBtn) bellBtn.addEventListener('click', toggleBell);
+  startAdminNotifier();
+}
+
+/* ---------- Admin notifications: bell, badges, desktop popups ----------
+   The bell feed (GET /api/admin/notifications) is polled every 15 s.
+   It drives the bell badge, the Chat menu unread badge, the dropdown
+   panel, and — when the browser allows it — real desktop notifications
+   on whatever device the admin is using. */
+let bellData = null;
+
+function timeAgo(iso) {
+  const t = Date.parse(iso);
+  if (!t) return '';
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' min ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + (h === 1 ? ' hr ago' : ' hrs ago');
+  const d = Math.floor(h / 24);
+  return d + (d === 1 ? ' day ago' : ' days ago');
+}
+
+function startAdminNotifier() {
+  if (state.bellTimer) clearInterval(state.bellTimer);
+  state.bellTimer = setInterval(pollAdminNotifications, 15000);
+  pollAdminNotifications();
+  if (!state.bellClickBound) {
+    state.bellClickBound = true;
+    document.addEventListener('click', (e) => {
+      const panel = document.getElementById('bellPanel');
+      if (!panel || panel.hidden) return;
+      if (!e.target.closest('.bell-wrap')) panel.hidden = true;
+    });
+  }
+}
+
+async function pollAdminNotifications() {
+  if (!state.user || state.user.role !== 'admin' || !state.token) return;
+  let data;
+  try { data = await api('/api/admin/notifications'); } catch { return; }
+  if (!data) return;
+  bellData = data;
+  const bb = document.getElementById('bellBadge');
+  if (bb) {
+    bb.hidden = !(data.unread > 0);
+    bb.textContent = data.unread > 99 ? '99+' : data.unread;
+  }
+  const total = data.dispatchUnread ? data.dispatchUnread.total : 0;
+  if (state.dispatchUnreadTotal !== total) {
+    state.dispatchUnreadTotal = total;
+    if (!state.organizing) renderAdminSidebar();
+  }
+  const items = Array.isArray(data.items) ? data.items : [];
+  const maxId = items.reduce((m, i) => Math.max(m, i.id), 0);
+  if (state.lastNotifId == null) {
+    state.lastNotifId = maxId;
+  } else if (maxId > state.lastNotifId) {
+    const fresh = items.filter(i => i.id > state.lastNotifId).sort((a, b) => a.id - b.id);
+    for (const n of fresh) maybeDesktopNotify(n);
+    state.lastNotifId = maxId;
+  }
+  const panel = document.getElementById('bellPanel');
+  if (panel && !panel.hidden) renderBellPanel();
+}
+
+function maybeDesktopNotify(n) {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const onTarget = state.adminView === n.view &&
+      !(n.view === 'dispatch' && n.refId && n.refId !== state.dispatchDriverId);
+    if (!document.hidden && onTarget) return;
+    const notif = new Notification(n.title, { body: n.body || '', tag: 'lxl-' + n.id });
+    notif.onclick = () => { window.focus(); openNotification(n); notif.close(); };
+  } catch { /* desktop notifications are best-effort */ }
+}
+
+function openNotification(n) {
+  const panel = document.getElementById('bellPanel');
+  if (panel) panel.hidden = true;
+  if (!n.view) return;
+  if (n.view === 'dispatch' && n.refId) state.dispatchDriverId = n.refId;
+  state.adminView = n.view;
+  renderAdminSidebar();
+  renderAdminView(n.view);
+}
+
+function renderBellPanel() {
+  const panel = document.getElementById('bellPanel');
+  if (!panel) return;
+  const items = bellData && Array.isArray(bellData.items) ? bellData.items : [];
+  const dotColor = { message: 'gold', document: 'blue', request: 'green', ratecon: 'blue', load: 'gold' };
+  let foot = '';
+  if ('Notification' in window && Notification.permission === 'default') {
+    foot = '<button class="bell-enable" id="bellEnable" type="button">Turn on desktop notifications</button>';
+  } else if ('Notification' in window && Notification.permission === 'denied') {
+    foot = '<div class="bell-note">Desktop notifications are blocked in this browser.</div>';
+  }
+  panel.innerHTML = '<div class="bell-head">Notifications</div>' +
+    (items.length ? items.map(n =>
+      '<button class="bell-item' + (n.read ? '' : ' unread') + '" type="button" data-notif="' + n.id + '">' +
+      '<span class="bell-dot ' + (dotColor[n.type] || 'blue') + '"></span>' +
+      '<span class="bell-texts"><span class="bell-title">' + esc(n.title) + '</span>' +
+      (n.body ? '<span class="bell-body">' + esc(n.body) + '</span>' : '') +
+      '<span class="bell-time">' + timeAgo(n.createdAt) + '</span></span></button>').join('')
+      : '<div class="bell-empty">Nothing yet — driver messages, uploads, requests and more will land here.</div>') + foot;
+  panel.querySelectorAll('[data-notif]').forEach(b => b.addEventListener('click', () => {
+    const n = items.find(x => x.id === parseInt(b.dataset.notif, 10));
+    if (n) openNotification(n);
+  }));
+  const en = document.getElementById('bellEnable');
+  if (en) en.addEventListener('click', async () => {
+    try { await Notification.requestPermission(); } catch { /* ignore */ }
+    renderBellPanel();
+  });
+}
+
+async function toggleBell() {
+  const panel = document.getElementById('bellPanel');
+  if (!panel) return;
+  if (!panel.hidden) { panel.hidden = true; return; }
+  await pollAdminNotifications();
+  renderBellPanel();
+  panel.hidden = false;
+  // Opening the bell marks everything read; the items just rendered
+  // keep their unread styling for this view.
+  try { await api('/api/admin/notifications/read', { method: 'POST', body: JSON.stringify({}) }); } catch { /* ignore */ }
+  const bb = document.getElementById('bellBadge');
+  if (bb) bb.hidden = true;
+  if (bellData) bellData.unread = 0;
 }
 
 // Sidebar order: ADMIN_VIEWS is the default. An admin can rearrange
@@ -392,9 +530,15 @@ function attachOrgDrag(row, nav, pendingRequests) {
 function renderAdminSidebar(pendingRequests) {
   const nav = document.getElementById('adminSidebar');
   if (!nav) return;
+  if (typeof pendingRequests === 'number') state.pendingRequestsCount = pendingRequests;
   const views = orderedAdminViews();
-  const badge = (key) => (key === 'requests' && pendingRequests > 0)
-    ? '<span class="badge">' + pendingRequests + '</span>' : '';
+  const badge = (key) => {
+    if (key === 'requests' && state.pendingRequestsCount > 0)
+      return '<span class="badge">' + state.pendingRequestsCount + '</span>';
+    if (key === 'dispatch' && state.dispatchUnreadTotal > 0)
+      return '<span class="badge red">' + state.dispatchUnreadTotal + '</span>';
+    return '';
+  };
   if (state.organizing) {
     nav.innerHTML = views.map(([key, label], i) =>
       '<div class="sidebar-org-row" data-key="' + key + '"><span><span class="org-grip">⠿</span>' + esc(label) + badge(key) + '</span>' +
@@ -1738,49 +1882,220 @@ async function viewRequests(main) {
 
 /* ---------- Dispatch (admin) ---------- */
 async function viewDispatch(main) {
-  const drivers = await api('/api/admin/drivers');
-  state.driversCache = Array.isArray(drivers) ? drivers : [];
-  if (!state.dispatchDriverId && state.driversCache.length) state.dispatchDriverId = state.driversCache[0].id;
-  main.innerHTML = '<h1>Dispatch</h1><div class="grid2" style="grid-template-columns: 260px 1fr; align-items: start;">' +
-    '<div class="card"><h3>Drivers</h3><div id="dispatchDriverList">' +
-    state.driversCache.map(d => '<button class="btn btn-ghost w100 mb" style="text-align:left" data-dispatch-driver="' + d.id + '">' + esc(d.name) + '</button>').join('') +
-    '</div></div>' +
-    '<div class="card"><h3 id="dispatchTitle">Messages</h3>' +
-    '<div class="msg-list" id="dispatchThread"><p class="muted">Loading…</p></div>' +
-    '<form id="dispatchSendForm" class="inline-form"><div class="field"><label>Message</label><input id="dispatchBody" required placeholder="Type a message to the driver…"></div>' +
-    '<button class="btn" type="submit">Send</button></form>' +
-    '<p class="muted small">Thread refreshes every 15 seconds.</p></div></div>';
+  main.innerHTML = '<div class="chat-page"><h1>Chat</h1>' +
+    '<div class="chat-layout">' +
+      '<div class="chat-convos" id="chatConvos"><p class="muted">Loading…</p></div>' +
+      '<div class="chat-panel">' +
+        '<div class="chat-head" id="chatHead"></div>' +
+        '<div class="chat-msgs" id="chatMsgs"><p class="muted">Loading…</p></div>' +
+        '<div class="chat-attach-chip" id="chatAttachChip" hidden></div>' +
+        '<form id="chatForm" class="chat-composer">' +
+          '<button class="chat-attach-btn" id="chatAttachBtn" type="button" title="Attach a picture or file">📎</button>' +
+          '<input type="file" id="chatFile" hidden>' +
+          '<input id="chatBody" placeholder="Type a message to the driver…" autocomplete="off">' +
+          '<button class="btn" type="submit">Send</button>' +
+        '</form>' +
+        '<p class="muted small chat-note">Chat refreshes every 15 seconds.</p>' +
+      '</div>' +
+      '<aside class="chat-context" id="chatContext"></aside>' +
+    '</div></div>';
+
+  const LIVE_MS = 15 * 60 * 1000;
+  let stagedFile = null;
+  const initials = (name) => {
+    const w = String(name || '?').trim().split(/\s+/);
+    return ((w[0] || '')[0] + ((w[1] || '')[0] || '')).toUpperCase() || '?';
+  };
+  const selected = () => (state.chatConvos || []).find(c => c.driver.id === state.dispatchDriverId) || null;
+  const attPreview = (m) => {
+    if (!m) return 'No messages yet';
+    if (m.body) return m.body;
+    if (m.attachment) return m.attachment.mimeType && m.attachment.mimeType.startsWith('image/')
+      ? '📎 Photo' : '📎 ' + (m.attachment.filename || 'File');
+    return '';
+  };
+
+  const renderConvos = () => {
+    const el = document.getElementById('chatConvos');
+    if (!el) return;
+    const convos = state.chatConvos || [];
+    el.innerHTML = convos.length ? convos.map(c =>
+      '<button class="convo-row' + (c.driver.id === state.dispatchDriverId ? ' active' : '') + '" type="button" data-convo="' + c.driver.id + '">' +
+      '<span class="chat-avatar">' + esc(initials(c.driver.name)) + '</span>' +
+      '<span class="convo-mid"><span class="convo-name">' + esc(c.driver.name) + '</span>' +
+      '<span class="convo-last">' + esc(attPreview(c.lastMessage)) + '</span></span>' +
+      '<span class="convo-side">' + (c.lastMessage ? '<span class="convo-time">' + timeAgo(c.lastMessage.createdAt) + '</span>' : '') +
+      (c.unread > 0 && c.driver.id !== state.dispatchDriverId ? '<span class="convo-unread">' + c.unread + '</span>' : '') + '</span></button>').join('')
+      : '<p class="empty">No drivers yet.</p>';
+    el.querySelectorAll('[data-convo]').forEach(b => b.addEventListener('click', () => {
+      state.dispatchDriverId = parseInt(b.dataset.convo, 10);
+      renderConvos();
+      renderHead();
+      renderContext();
+      loadThread();
+    }));
+  };
+
+  const statusLine = (c) => {
+    if (!c.location) return 'No location yet';
+    const fresh = Date.now() - Date.parse(c.location.updatedAt) < LIVE_MS;
+    if (!fresh) return 'Last update ' + timeAgo(c.location.updatedAt);
+    const spd = typeof c.location.speedMph === 'number' ? Math.round(c.location.speedMph) : 0;
+    return (spd > 2 ? 'Driving · ' + spd + ' mph' : 'Online') + (c.location.place ? ' · ' + c.location.place : '');
+  };
+
+  const renderHead = () => {
+    const el = document.getElementById('chatHead');
+    if (!el) return;
+    const c = selected();
+    if (!c) { el.innerHTML = ''; return; }
+    el.innerHTML = '<span class="chat-avatar lg">' + esc(initials(c.driver.name)) + '</span>' +
+      '<span class="chat-head-texts"><span class="chat-head-name">' + esc(c.driver.name) + '</span>' +
+      '<span class="chat-head-sub">' + esc(statusLine(c)) + '</span></span>' +
+      '<span class="chat-head-unit">' + (c.truck ? 'Truck ' + esc(c.truck.unitNumber) : '') +
+      (c.trailer ? ' · Trailer ' + esc(c.trailer.unitNumber) : '') + '</span>';
+  };
+
+  const renderContext = () => {
+    const el = document.getElementById('chatContext');
+    if (!el) return;
+    const c = selected();
+    if (!c) { el.innerHTML = ''; return; }
+    const l = c.activeLoad;
+    const loadCard = l
+      ? '<div class="ctx-card"><div class="ctx-title">Active load</div>' +
+        '<div class="ctx-ref">' + esc(l.reference) + '</div>' +
+        '<div class="ctx-route">' + esc(shortPlace(l.pickupLocation)) + ' → ' + esc(shortPlace(l.deliveryLocation)) + '</div>' +
+        '<div class="ctx-bar"><div class="ctx-fill" style="width:' + (l.progress || 0) + '%"></div></div>' +
+        '<div class="ctx-pct">' + (l.progress || 0) + '% · delivery ' + fmtDate(l.deliveryAt) + '</div>' +
+        '<div class="ctx-actions"><button class="btn btn-ghost btn-sm" type="button" data-ctx="documents">Documents</button>' +
+        '<button class="btn btn-ghost btn-sm" type="button" data-ctx="tracking">Tracking</button></div></div>'
+      : '<div class="ctx-card"><div class="ctx-title">Active load</div><p class="muted small">No active load.</p></div>';
+    const truckCard = '<div class="ctx-card"><div class="ctx-title">Truck</div>' +
+      '<div class="ctx-sub">' + (c.truck ? esc(c.truck.unitNumber) + (c.trailer ? ' · Trailer ' + esc(c.trailer.unitNumber) : '') : 'No truck assigned') +
+      (c.truck && c.truck.odometerMi != null ? '<br>' + Number(c.truck.odometerMi).toLocaleString('en-US') + ' mi' : '') + '</div></div>';
+    el.innerHTML = loadCard + truckCard;
+    el.querySelectorAll('[data-ctx]').forEach(b => b.addEventListener('click', () => {
+      const v = b.dataset.ctx === 'documents' ? 'documents' : 'locations';
+      state.adminView = v;
+      renderAdminSidebar();
+      renderAdminView(v);
+    }));
+  };
+
+  const hydrateImages = (root) => {
+    root.querySelectorAll('img[data-att-img]').forEach(async (img) => {
+      const url = img.dataset.attImg;
+      if (!url || img.dataset.loaded) return;
+      img.dataset.loaded = '1';
+      try {
+        if (!state.attUrlCache) state.attUrlCache = new Map();
+        if (!state.attUrlCache.has(url)) {
+          const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
+          if (!res.ok) return;
+          state.attUrlCache.set(url, URL.createObjectURL(await res.blob()));
+        }
+        img.src = state.attUrlCache.get(url);
+      } catch { /* leave the placeholder */ }
+    });
+  };
+
+  const renderThread = (list) => {
+    const thread = document.getElementById('chatMsgs');
+    if (!thread) return;
+    const c = selected();
+    const nearBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 140;
+    thread.innerHTML = list.length ? list.map(m => {
+      const mine = m.sender === 'dispatch';
+      let inner = '';
+      if (m.attachment) {
+        if (m.attachment.mimeType && m.attachment.mimeType.startsWith('image/')) {
+          inner += '<img class="chat-img" data-att-img="' + esc(m.attachment.url) + '" data-att-open="' + m.attachment.fileId + '" alt="' + esc(m.attachment.filename || 'Photo') + '">';
+        } else {
+          inner += '<button class="chat-file" type="button" data-att-open="' + m.attachment.fileId + '">📄 ' + esc(m.attachment.filename || 'File') + '</button>';
+        }
+      }
+      if (m.body) inner += '<span>' + esc(m.body) + '</span>';
+      return '<div class="chat-row' + (mine ? ' mine' : '') + '"><div class="chat-bubble' + (mine ? ' mine' : '') + '">' + inner + '</div>' +
+        '<div class="chat-meta' + (mine ? ' mine' : '') + '">' + esc(mine ? (m.senderName || 'Dispatch') : (c ? c.driver.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + '</div></div>';
+    }).join('') : '<p class="empty">No messages yet.</p>';
+    thread.querySelectorAll('[data-att-open]').forEach(el => el.addEventListener('click', () => {
+      const m = list.find(x => x.attachment && x.attachment.fileId === parseInt(el.dataset.attOpen, 10));
+      if (m) downloadFile(m.attachment.url, m.attachment.filename, true, m.attachment.mimeType);
+    }));
+    hydrateImages(thread);
+    if (nearBottom) thread.scrollTop = thread.scrollHeight;
+  };
 
   const loadThread = async () => {
     if (!state.dispatchDriverId || state.adminView !== 'dispatch') return;
     try {
       const msgs = await api('/api/admin/messages/' + state.dispatchDriverId);
-      const list = Array.isArray(msgs) ? msgs : [];
-      const d = state.driversCache.find(x => x.id === state.dispatchDriverId);
-      document.getElementById('dispatchTitle').textContent = 'Messages — ' + (d ? d.name : '');
-      const thread = document.getElementById('dispatchThread');
-      if (thread) thread.innerHTML = list.length ? list.map(m =>
-        '<div class="msg' + (m.sender === 'dispatch' ? ' mine' : '') + '">' + esc(m.body) +
-        '<div class="meta">' + esc(m.sender === 'dispatch' ? (m.senderName || 'Dispatch') : (d ? d.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + '</div></div>').join('')
-        : '<p class="empty">No messages yet.</p>';
-    } catch (e) { /* keep the old thread visible on a transient failure */ }
+      renderThread(Array.isArray(msgs) ? msgs : []);
+    } catch { /* keep the old thread visible on a transient failure */ }
   };
-  main.querySelectorAll('[data-dispatch-driver]').forEach(b => b.addEventListener('click', () => {
-    state.dispatchDriverId = parseInt(b.dataset.dispatchDriver, 10);
-    loadThread();
-  }));
-  document.getElementById('dispatchSendForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const body = document.getElementById('dispatchBody').value.trim();
-    if (!body || !state.dispatchDriverId) return;
+
+  const refreshConvos = async () => {
     try {
-      await api('/api/admin/messages/' + state.dispatchDriverId, { method: 'POST', body: JSON.stringify({ body }) });
-      document.getElementById('dispatchBody').value = '';
-      loadThread();
+      const convos = await api('/api/admin/dispatch/conversations');
+      state.chatConvos = Array.isArray(convos) ? convos : [];
+    } catch { return; }
+    if (!state.chatConvos.some(c => c.driver.id === state.dispatchDriverId)) {
+      state.dispatchDriverId = state.chatConvos.length ? state.chatConvos[0].driver.id : null;
+    }
+    state.driversCache = state.chatConvos.map(c => c.driver);
+    renderConvos();
+    renderHead();
+    renderContext();
+  };
+
+  const chip = document.getElementById('chatAttachChip');
+  const fileInput = document.getElementById('chatFile');
+  const renderChip = () => {
+    if (!stagedFile) { chip.hidden = true; chip.innerHTML = ''; return; }
+    chip.hidden = false;
+    chip.innerHTML = '<span>📎 ' + esc(stagedFile.name) + '</span><button type="button" id="chatAttachClear" title="Remove attachment">✕</button>';
+    document.getElementById('chatAttachClear').addEventListener('click', () => {
+      stagedFile = null;
+      fileInput.value = '';
+      renderChip();
+    });
+  };
+  document.getElementById('chatAttachBtn').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    stagedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    renderChip();
+  });
+
+  document.getElementById('chatForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const bodyEl = document.getElementById('chatBody');
+    const body = bodyEl.value.trim();
+    if (!state.dispatchDriverId || (!body && !stagedFile)) return;
+    try {
+      if (stagedFile) {
+        const fd = new FormData();
+        fd.append('file', stagedFile);
+        if (body) fd.append('body', body);
+        await api('/api/admin/messages/' + state.dispatchDriverId + '/attachment', { method: 'POST', body: fd });
+        stagedFile = null;
+        fileInput.value = '';
+        renderChip();
+      } else {
+        await api('/api/admin/messages/' + state.dispatchDriverId, { method: 'POST', body: JSON.stringify({ body }) });
+      }
+      bodyEl.value = '';
+      await loadThread();
+      refreshConvos();
     } catch (err) { showError(err); }
   });
+
+  await refreshConvos();
   await loadThread();
-  addTimer(loadThread, 15000);
+  const thread = document.getElementById('chatMsgs');
+  if (thread) thread.scrollTop = thread.scrollHeight;
+  pollAdminNotifications();
+  addTimer(async () => { await refreshConvos(); await loadThread(); }, 15000);
 }
 
 /* ---------- Locations (live map) ---------- */
@@ -2347,7 +2662,7 @@ const DRIVER_VIEWS = [
   ['truck', 'My Truck'],
   ['trailer', 'My Trailer'],
   ['loads', 'My Loads'],
-  ['dispatch', 'Dispatch'],
+  ['dispatch', 'Chat'],
   ['settings', 'Settings'],
 ];
 

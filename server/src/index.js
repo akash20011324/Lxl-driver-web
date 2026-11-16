@@ -190,6 +190,18 @@ function serializeRequest(r) {
 }
 
 function serializeMessage(m) {
+  let attachment = null;
+  if (m.fileId) {
+    const f = db.prepare('SELECT * FROM files WHERE id = ?').get(m.fileId);
+    if (f) {
+      attachment = {
+        fileId: f.id,
+        filename: f.originalFilename,
+        mimeType: f.mimeType,
+        url: `/files/${f.id}`,
+      };
+    }
+  }
   return {
     id: m.id,
     driverId: m.driverId,
@@ -198,6 +210,33 @@ function serializeMessage(m) {
     body: m.body,
     createdAt: m.createdAt,
     read: !!m.read,
+    attachment,
+  };
+}
+
+// Admin bell feed: one row per event the admins should see (driver
+// message, document upload, request, load completed, rate con added).
+// Written by notifyAdmins at each event site; never throws.
+function notifyAdmins(type, title, body, view, refId) {
+  try {
+    db.prepare(
+      'INSERT INTO admin_notifications (type, title, body, view, refId, createdAt, read) VALUES (?, ?, ?, ?, ?, ?, 0)',
+    ).run(type, title, body ?? null, view ?? null, refId ?? null, now());
+  } catch (e) {
+    console.error('[notify] admin notification failed:', e.message);
+  }
+}
+
+function serializeAdminNotification(n) {
+  return {
+    id: n.id,
+    type: n.type,
+    title: n.title,
+    body: n.body ?? null,
+    view: n.view ?? null,
+    refId: n.refId ?? null,
+    createdAt: n.createdAt,
+    read: !!n.read,
   };
 }
 
@@ -535,6 +574,7 @@ driver.post('/loads/:id/complete', async (req, res) => {
       db.prepare("UPDATE trucks SET yardStatus = 'yard' WHERE driverId = ?").run(req.user.id);
       db.prepare("UPDATE trailers SET yardStatus = 'yard' WHERE driverId = ?").run(req.user.id);
     });
+    notifyAdmins('load', `${req.user.name} completed ${load.reference}`, `${load.pickupLocation} → ${load.deliveryLocation}`, 'loads', load.id);
     res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
   } catch (e) {
     console.error('complete load failed', e);
@@ -633,6 +673,7 @@ driver.post('/requests', (req, res) => {
       'INSERT INTO requests (driverId, type, amountCents, reason, details, truckId, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     )
     .run(req.user.id, type, amountCents ?? null, reason, details ?? null, truckId ?? null, 'pending', ts).lastInsertRowid;
+  notifyAdmins('request', `${req.user.name} sent a request`, `${type} — ${reason}`, 'requests', id);
   res.status(201).json(serializeRequest(db.prepare('SELECT * FROM requests WHERE id = ?').get(id)));
 });
 
@@ -648,6 +689,22 @@ driver.post('/messages', (req, res) => {
   const id = db
     .prepare("INSERT INTO messages (driverId, sender, senderName, body, createdAt, read) VALUES (?, 'driver', ?, ?, ?, 0)")
     .run(req.user.id, req.user.name, String(body).trim(), now()).lastInsertRowid;
+  const text = String(body).trim();
+  notifyAdmins('message', `New message from ${req.user.name}`, text.length > 90 ? text.slice(0, 90) + '…' : text, 'dispatch', req.user.id);
+  res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
+});
+
+// Driver sends a photo or file in the chat (multipart, field "file";
+// optional caption in the "body" field).
+driver.post('/messages/attachment', upload.single('file'), (req, res) => {
+  if (!req.file) return err(res, 400, 'file is required');
+  const caption = req.body && req.body.body ? String(req.body.body).trim() : '';
+  const fileId = insertFileRow(req.file, 'message', null, req.user.id);
+  const id = db
+    .prepare("INSERT INTO messages (driverId, sender, senderName, body, createdAt, read, fileId) VALUES (?, 'driver', ?, ?, ?, 0, ?)")
+    .run(req.user.id, req.user.name, caption, now(), fileId).lastInsertRowid;
+  const isImage = String(req.file.mimetype || '').startsWith('image/');
+  notifyAdmins('message', `New message from ${req.user.name}`, caption || (isImage ? '📎 Photo' : '📎 ' + (req.file.originalname || 'File')), 'dispatch', req.user.id);
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
 });
 
@@ -756,6 +813,22 @@ driver.post('/documents', upload.single('file'), (req, res) => {
   const row = db
     .prepare('SELECT d.*, f.originalFilename, f.mimeType FROM documents d JOIN files f ON f.id = d.fileId WHERE d.id = ?')
     .get(id);
+  const DOC_LABELS = {
+    pickup_bol: 'a pickup BOL',
+    delivery_bol: 'a delivery BOL',
+    fuel_receipt: 'a fuel receipt',
+    receipt: 'a receipt',
+    unit_picture: 'a unit picture',
+    seal_picture: 'a seal picture',
+    driver_doc: 'a document',
+  };
+  notifyAdmins(
+    'document',
+    `${req.user.name} uploaded ${DOC_LABELS[kind] || 'a document'}`,
+    load ? load.reference : null,
+    'documents',
+    load ? load.id : null,
+  );
   res.status(201).json(serializeDocument(row));
 });
 
@@ -1820,6 +1893,99 @@ admin.post('/messages/:driverId', (req, res) => {
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
 });
 
+// Admin sends a photo or file in the chat (multipart, field "file";
+// optional caption in the "body" field).
+admin.post('/messages/:driverId/attachment', upload.single('file'), (req, res) => {
+  if (!req.file) return err(res, 400, 'file is required');
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.driverId);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  const caption = req.body && req.body.body ? String(req.body.body).trim() : '';
+  const fileId = insertFileRow(req.file, 'message', null, driverUser.id);
+  const id = db
+    .prepare("INSERT INTO messages (driverId, sender, senderName, body, createdAt, read, fileId) VALUES (?, 'dispatch', ?, ?, ?, 0, ?)")
+    .run(driverUser.id, req.user.name, caption, now(), fileId).lastInsertRowid;
+  notifyDriver(db, driverUser.id, 'dispatch_message', `Message from ${req.user.name}`, caption || '📎 Attachment').catch(() => {});
+  res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
+});
+
+// Bell feed for the admin top bar: latest events + unread counts. The
+// portal polls this every 15 s to drive the bell badge, the Chat menu
+// badge and desktop notifications.
+admin.get('/notifications', (_req, res) => {
+  const items = db
+    .prepare('SELECT * FROM admin_notifications ORDER BY id DESC LIMIT 30')
+    .all()
+    .map(serializeAdminNotification);
+  const unread = db.prepare('SELECT COUNT(*) AS c FROM admin_notifications WHERE read = 0').get().c;
+  const byDriverRows = db
+    .prepare("SELECT driverId, COUNT(*) AS c FROM messages WHERE sender = 'driver' AND read = 0 GROUP BY driverId")
+    .all();
+  const byDriver = {};
+  let total = 0;
+  for (const r of byDriverRows) {
+    byDriver[r.driverId] = r.c;
+    total += r.c;
+  }
+  res.json({ items, unread, dispatchUnread: { total, byDriver } });
+});
+
+admin.post('/notifications/read', (_req, res) => {
+  db.prepare('UPDATE admin_notifications SET read = 1 WHERE read = 0').run();
+  res.json({ ok: true });
+});
+
+// Chat page (Option B): one row per driver with the last message, the
+// unread count, live location and the active load for the side panel.
+admin.get('/dispatch/conversations', async (_req, res) => {
+  const drivers = db.prepare("SELECT * FROM users WHERE role = 'driver' ORDER BY name").all();
+  const out = [];
+  for (const d of drivers) {
+    const truck = db.prepare('SELECT * FROM trucks WHERE driverId = ?').get(d.id);
+    const trailer = db.prepare('SELECT * FROM trailers WHERE driverId = ?').get(d.id);
+    const location = db.prepare('SELECT * FROM locations WHERE driverId = ?').get(d.id);
+    const lastRow = db.prepare('SELECT * FROM messages WHERE driverId = ? ORDER BY id DESC LIMIT 1').get(d.id);
+    const unread = db
+      .prepare("SELECT COUNT(*) AS c FROM messages WHERE driverId = ? AND sender = 'driver' AND read = 0")
+      .get(d.id).c;
+    const activeLoad = db
+      .prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC LIMIT 1")
+      .get(d.id);
+    let place = null;
+    if (location) {
+      try {
+        place = await reversePlace(location.lat, location.lng);
+      } catch {
+        place = null;
+      }
+    }
+    out.push({
+      driver: publicUser(d),
+      truck: serializeTruck(truck),
+      trailer: serializeTrailer(trailer),
+      location: location
+        ? {
+            lat: location.lat,
+            lng: location.lng,
+            speedMph: location.speedMph ?? null,
+            heading: location.heading ?? null,
+            updatedAt: location.updatedAt,
+            place,
+          }
+        : null,
+      lastMessage: lastRow ? serializeMessage(lastRow) : null,
+      unread,
+      activeLoad: activeLoad ? serializeLoad(activeLoad) : null,
+    });
+  }
+  // Drivers with the newest conversation first; quiet drivers last.
+  out.sort((a, b) => {
+    const ta = a.lastMessage ? a.lastMessage.createdAt : '';
+    const tb = b.lastMessage ? b.lastMessage.createdAt : '';
+    return tb.localeCompare(ta);
+  });
+  res.json(out);
+});
+
 // Delivery-location gate: a load can only be completed at the delivery
 // address. The delivery coordinates are geocoded (OpenStreetMap Nominatim,
 // no key) when the load is assigned and cached on the load; the driver's
@@ -2401,7 +2567,15 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
     .get(id);
   // No file: still report the auto-generated name as the filename.
   if (!fileId) row.originalFilename = autoName;
-  return serializeRateCon(row);
+  const out = serializeRateCon(row);
+  notifyAdmins(
+    'ratecon',
+    'Rate confirmation added',
+    `${out.broker || '—'} · ${out.rateCents != null ? '$' + (Number(out.rateCents) / 100).toFixed(2) : 'rate —'}`,
+    'ratecons',
+    out.id,
+  );
+  return out;
 }
 
 admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {

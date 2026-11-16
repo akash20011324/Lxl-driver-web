@@ -205,6 +205,16 @@ CREATE TABLE IF NOT EXISTS notifications (
   createdAt TEXT NOT NULL,
   read INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS admin_notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT,
+  view TEXT,
+  refId INTEGER,
+  createdAt TEXT NOT NULL,
+  read INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS broker_access (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token TEXT NOT NULL UNIQUE,
@@ -270,6 +280,12 @@ export function openDb(dataDir) {
   }
   if (!locColumns.some((c) => c.name === 'heading')) {
     db.exec('ALTER TABLE locations ADD COLUMN heading REAL');
+  }
+  // Migrate databases created before chat attachments: a message can
+  // carry one file (photo / PDF) stored in the files table.
+  const msgFileColumns = db.prepare('PRAGMA table_info(messages)').all();
+  if (!msgFileColumns.some((c) => c.name === 'fileId')) {
+    db.exec('ALTER TABLE messages ADD COLUMN fileId INTEGER REFERENCES files(id)');
   }
   // Migrate databases created before TRC odometer readings: the latest
   // Pickup coordinates per load (fresh databases get them from the
