@@ -1521,7 +1521,7 @@ function trackPageHtml(mapsKey) {
 </div>
 <script>
   var token = location.pathname.split('/').pop();
-  var map = null, driverMarker = null, mapReady = false, timer = null;
+  var map = null, mapDiv = null, driverMarker = null, mapReady = false, timer = null;
   function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
   function fmt(dt) { if (!dt) return ''; try { return new Date(dt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
   function ago(dt) { if (!dt) return ''; var m = Math.max(0, Math.round((Date.now() - new Date(dt).getTime()) / 60000)); if (m < 1) return 'just now'; if (m < 60) return m + ' min ago'; return Math.round(m / 60) + ' hr ago'; }
@@ -1533,12 +1533,20 @@ function trackPageHtml(mapsKey) {
   function drawMap(d) {
     if (!mapReady || !window.google || !d.location) return;
     var pos = { lat: d.location.lat, lng: d.location.lng };
+    // render() rebuilds the page HTML on every poll; it moves the live
+    // map div into the new markup, so the map below should still match
+    // the div in the document. If it doesn't (page state changed), drop
+    // the stale map and build a fresh one on the current div.
+    if (map && document.getElementById('map') !== mapDiv) { map = null; driverMarker = null; mapDiv = null; }
     if (!map) {
-      map = new google.maps.Map(document.getElementById('map'), { center: pos, zoom: 9, mapTypeId: 'hybrid' });
+      mapDiv = document.getElementById('map');
+      map = new google.maps.Map(mapDiv, { center: pos, zoom: 9, mapTypeId: 'hybrid' });
       new google.maps.TrafficLayer().setMap(map);
       driverMarker = new google.maps.Marker({ map: map, title: d.driverName, icon: truckIcon(), zIndex: 10 });
       if (d.load && d.load.pickupLat != null) new google.maps.Marker({ map: map, position: { lat: d.load.pickupLat, lng: d.load.pickupLng }, label: 'P', title: 'Pickup' });
       if (d.load && d.load.deliveryLat != null) new google.maps.Marker({ map: map, position: { lat: d.load.deliveryLat, lng: d.load.deliveryLng }, label: 'D', title: 'Delivery' });
+    } else {
+      google.maps.event.trigger(map, 'resize');
     }
     driverMarker.setPosition(pos);
     map.setCenter(pos);
@@ -1564,7 +1572,14 @@ function trackPageHtml(mapsKey) {
     if (d.location && d.location.place) html += '<div>Location: <b>' + esc(d.location.place) + '</b></div>';
     html += '</div>';
     html += '<p class="muted" style="margin:10px 0 0">' + (d.location ? 'Last location update ' + ago(d.location.updatedAt) : 'Waiting for the driver&rsquo;s first location update&hellip;') + '</p></div>';
+    // Keep the live Google Map alive across re-renders: move its div
+    // into the new markup instead of letting innerHTML destroy it.
+    var prevMapDiv = document.getElementById('map');
     el.innerHTML = html;
+    if (prevMapDiv && map) {
+      var freshMapDiv = document.getElementById('map');
+      if (freshMapDiv && freshMapDiv !== prevMapDiv) freshMapDiv.replaceWith(prevMapDiv);
+    }
     drawMap(d);
     if (done && timer) { clearInterval(timer); timer = null; }
   }
