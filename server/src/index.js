@@ -4713,6 +4713,59 @@ async function removeDispatchSheetLoads() {
   } catch (e) { console.error('rc adjudication9 failed', e); }
 }
 
+// One-time cash flow reconciliation fix (2026-11-16, owner approved
+// after the manual bank-vs-portal check): (1) remove the
+// Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
+// the same OTR money arrives through the bank feed, so the email
+// import double-counts it; (2) remove the Outlook-imported 'fuel'
+// entry of $5,450.00 dated 2026-11-16 (category Other) — Pilot
+// weekly belongs in Fuel and arrives via the bank drafts;
+// (3) re-categorize any Garrett bank entry not already in
+// 'Trailer rental' (the portal was exactly one $2,458.04 month
+// short of the bank). Deletes run only on an exact single match.
+async function fixCashflowReconciliation() {
+  try {
+    const marker = 'cashflow-recon-fix-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('cashflow recon fix: ' + m);
+    // 1. Outlook factoring duplicate
+    {
+      const rows = db.prepare("SELECT * FROM cash_entries WHERE source = 'outlook' AND direction = 'in' AND category = 'Factoring payment' AND amountCents = 397250 AND date = '2026-11-16'").all();
+      if (rows.length === 1) {
+        db.prepare('DELETE FROM cash_entries WHERE id = ?').run(rows[0].id);
+        log('deleted Outlook factoring import id ' + rows[0].id + ' (+$3,972.50, 2026-11-16) — bank feed carries this money');
+      } else {
+        log('WARNING: expected exactly 1 Outlook factoring entry of $3,972.50 on 2026-11-16, found ' + rows.length + ' — skipped');
+      }
+    }
+    // 2. Outlook fuel import in Other
+    {
+      const rows = db.prepare("SELECT * FROM cash_entries WHERE source = 'outlook' AND direction = 'out' AND category = 'Other' AND amountCents = 545000 AND date = '2026-11-16'").all();
+      if (rows.length === 1) {
+        db.prepare('DELETE FROM cash_entries WHERE id = ?').run(rows[0].id);
+        log('deleted Outlook fuel import id ' + rows[0].id + ' (-$5,450.00, 2026-11-16, was in Other) — Pilot weekly arrives via the bank');
+      } else {
+        log('WARNING: expected exactly 1 Outlook Other entry of $5,450.00 on 2026-11-16, found ' + rows.length + ' — skipped');
+      }
+    }
+    // 3. Garrett rent category
+    {
+      const rows = db.prepare("SELECT bt.id AS btId, bt.date, bt.amountCents, bt.entryId, ce.category FROM bank_transactions bt JOIN cash_entries ce ON ce.id = bt.entryId WHERE bt.name LIKE '%GARRETT%' AND bt.direction = 'out' AND bt.status = 'categorized'").all();
+      let moved = 0;
+      for (const r of rows) {
+        if (r.category !== 'Trailer rental') {
+          db.prepare("UPDATE cash_entries SET category = 'Trailer rental' WHERE id = ?").run(r.entryId);
+          log('Garrett ' + r.date + ' $' + (r.amountCents / 100).toFixed(2) + ': category ' + r.category + ' -> Trailer rental');
+          moved++;
+        }
+      }
+      if (!moved) log('Garrett: all bank entries already in Trailer rental');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('cashflow recon fix failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -6301,7 +6354,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
