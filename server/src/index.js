@@ -1406,7 +1406,401 @@ admin.post('/trucks/:id/odometer', (req, res) => {
   }
   db.prepare('UPDATE trucks SET odometerMi = ?, odometerUpdatedAt = ?, engineHours = COALESCE(?, engineHours) WHERE id = ?')
     .run(Math.round(miles), at, hours, truck.id);
+  try { checkMaintAlerts(truck.id); } catch (e) { console.error('maintenance alerts failed', e); }
   res.json(serializeTruck(db.prepare('SELECT * FROM trucks WHERE id = ?').get(truck.id)));
+});
+
+// --- Maintenance + Cash Flow (owner's sections, 2026-11-16) ----------------
+// Maintenance runs off the TRC-fed odometer: each truck carries service
+// items with an interval in miles; the portal shows miles left, and the
+// odometer save path raises a bell alert when an item gets due soon or
+// overdue. Cash Flow: money in (factoring / broker payments) and money out
+// (Pilot weekly fuel, tolls, maintenance, truck payment, …) — entered by
+// hand, staged from Outlook emails (amount read from the attachment, the
+// admin confirms before saving), auto-added when a maintenance service is
+// marked done, plus approved driver advances counted automatically.
+// Driver fuel receipts are NOT cash flow (owner's rule) — only the Pilot
+// weekly bill counts as fuel.
+const MAINT_DUE_SOON_MI = 1000;
+
+function maintComputed(item, truck) {
+  const currentMi = truck && truck.odometerMi !== null && truck.odometerMi !== undefined ? truck.odometerMi : null;
+  if (item.lastDoneMi === null || item.lastDoneMi === undefined || currentMi === null)
+    return { currentMi, drivenMi: null, remainingMi: null, status: 'unset', pct: 0 };
+  const drivenMi = Math.max(0, currentMi - item.lastDoneMi);
+  const remainingMi = item.intervalMi - drivenMi;
+  const status = remainingMi <= 0 ? 'overdue' : remainingMi <= MAINT_DUE_SOON_MI ? 'soon' : 'ok';
+  return { currentMi, drivenMi, remainingMi, status, pct: Math.min(100, Math.round((drivenMi / item.intervalMi) * 100)) };
+}
+
+function serializeMaintItem(item, truck) {
+  return {
+    id: item.id, truckId: item.truckId, name: item.name, intervalMi: item.intervalMi,
+    lastDoneMi: item.lastDoneMi ?? null, lastDoneAt: item.lastDoneAt ?? null,
+    ...maintComputed(item, truck),
+  };
+}
+
+function ensureDefaultMaintItems(truckId) {
+  const n = db.prepare('SELECT COUNT(*) AS c FROM maintenance_items WHERE truckId = ?').get(truckId).c;
+  if (n > 0) return;
+  const ins = db.prepare('INSERT INTO maintenance_items (truckId, name, intervalMi, createdAt) VALUES (?, ?, ?, ?)');
+  ins.run(truckId, 'PM Service', 20000, now());
+  ins.run(truckId, 'Steer Tires', 100000, now());
+}
+
+function checkMaintAlerts(truckId) {
+  const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(truckId);
+  if (!truck) return;
+  ensureDefaultMaintItems(truckId);
+  for (const item of db.prepare('SELECT * FROM maintenance_items WHERE truckId = ?').all(truckId)) {
+    const c = maintComputed(item, truck);
+    if (c.status === 'soon' && item.alertLevel === 'none') {
+      notifyAdmins('maintenance', 'Maintenance due soon',
+        `Truck ${truck.unitNumber} — ${item.name} is due in ${c.remainingMi.toLocaleString('en-US')} mi (at ${c.currentMi.toLocaleString('en-US')} mi).`, 'maintenance', item.id);
+      if (truck.driverId)
+        notifyDriver(db, truck.driverId, 'maintenance', `${item.name} is needed`,
+          `Truck ${truck.unitNumber} — ${item.name} is due in ${c.remainingMi.toLocaleString('en-US')} mi.`).catch(() => {});
+      db.prepare("UPDATE maintenance_items SET alertLevel = 'soon' WHERE id = ?").run(item.id);
+    } else if (c.status === 'overdue' && item.alertLevel !== 'overdue') {
+      notifyAdmins('maintenance', 'Maintenance OVERDUE',
+        `Truck ${truck.unitNumber} — ${item.name} is ${Math.abs(c.remainingMi).toLocaleString('en-US')} mi overdue (at ${c.currentMi.toLocaleString('en-US')} mi).`, 'maintenance', item.id);
+      if (truck.driverId)
+        notifyDriver(db, truck.driverId, 'maintenance', `${item.name} is OVERDUE`,
+          `Truck ${truck.unitNumber} — ${item.name} is ${Math.abs(c.remainingMi).toLocaleString('en-US')} mi overdue. Please get it serviced.`).catch(() => {});
+      db.prepare("UPDATE maintenance_items SET alertLevel = 'overdue' WHERE id = ?").run(item.id);
+    }
+  }
+}
+
+admin.get('/maintenance', (_req, res) => {
+  const trucks = db.prepare('SELECT * FROM trucks ORDER BY unitNumber').all();
+  for (const t of trucks) ensureDefaultMaintItems(t.id);
+  const log = db.prepare(
+    `SELECT l.*, t.unitNumber AS truckUnit, f.id AS fid FROM maintenance_log l
+     LEFT JOIN trucks t ON t.id = l.truckId LEFT JOIN files f ON f.id = l.fileId
+     ORDER BY l.id DESC LIMIT 30`,
+  ).all().map((l) => ({
+    id: l.id, truckId: l.truckId, truckUnit: l.truckUnit ?? null, itemName: l.itemName,
+    doneAt: l.doneAt, doneMi: l.doneMi ?? null, costCents: l.costCents ?? null,
+    shop: l.shop ?? null, note: l.note ?? null, url: l.fileId ? `/files/${l.fileId}` : null,
+  }));
+  res.json({
+    trucks: trucks.map((t) => ({
+      id: t.id, unitNumber: t.unitNumber,
+      desc: [t.year, t.make, t.model].filter(Boolean).join(' ') || null,
+      odometerMi: t.odometerMi ?? null,
+      items: db.prepare('SELECT * FROM maintenance_items WHERE truckId = ? ORDER BY intervalMi').all(t.id)
+        .map((it) => serializeMaintItem(it, t)),
+    })),
+    log,
+  });
+});
+
+admin.post('/maintenance/items', (req, res) => {
+  const { truckId, name, intervalMi, lastDoneMi } = req.body || {};
+  const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(Number(truckId));
+  if (!truck) return err(res, 404, 'Truck not found');
+  if (!name || !String(name).trim()) return err(res, 400, 'name is required');
+  const interval = Number(intervalMi);
+  if (!Number.isFinite(interval) || interval <= 0) return err(res, 400, 'intervalMi must be a positive number of miles');
+  const r = db.prepare('INSERT INTO maintenance_items (truckId, name, intervalMi, lastDoneMi, lastDoneAt, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(truck.id, String(name).trim(), Math.round(interval),
+      lastDoneMi !== undefined && lastDoneMi !== null && lastDoneMi !== '' ? Math.round(Number(lastDoneMi)) : null,
+      lastDoneMi !== undefined && lastDoneMi !== null && lastDoneMi !== '' ? now() : null, now());
+  res.status(201).json(serializeMaintItem(db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(r.lastInsertRowid), truck));
+});
+
+admin.patch('/maintenance/items/:id', (req, res) => {
+  const item = db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(req.params.id);
+  if (!item) return err(res, 404, 'Service not found');
+  const { name, intervalMi, lastDoneMi } = req.body || {};
+  const updates = {};
+  if (name !== undefined && String(name).trim()) updates.name = String(name).trim();
+  if (intervalMi !== undefined) {
+    const v = Number(intervalMi);
+    if (!Number.isFinite(v) || v <= 0) return err(res, 400, 'intervalMi must be a positive number of miles');
+    updates.intervalMi = Math.round(v);
+  }
+  if (lastDoneMi !== undefined) {
+    updates.lastDoneMi = lastDoneMi === null || lastDoneMi === '' ? null : Math.round(Number(lastDoneMi));
+    updates.lastDoneAt = updates.lastDoneMi === null ? null : now();
+    updates.alertLevel = 'none';
+  }
+  const keys = Object.keys(updates);
+  if (keys.length) {
+    db.prepare(`UPDATE maintenance_items SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`)
+      .run(...keys.map((k) => updates[k]), item.id);
+  }
+  const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(item.truckId);
+  res.json(serializeMaintItem(db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(item.id), truck));
+});
+
+admin.delete('/maintenance/items/:id', (req, res) => {
+  const item = db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(req.params.id);
+  if (!item) return err(res, 404, 'Service not found');
+  db.prepare('DELETE FROM maintenance_items WHERE id = ?').run(item.id);
+  res.json({ ok: true });
+});
+
+admin.post('/maintenance/items/:id/done', upload.single('file'), (req, res) => {
+  const item = db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(req.params.id);
+  if (!item) return err(res, 404, 'Service not found');
+  const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(item.truckId);
+  const costDollars = Number(req.body && req.body.cost);
+  const costCents = Number.isFinite(costDollars) && costDollars > 0 ? Math.round(costDollars * 100) : null;
+  const doneMiBody = Number(req.body && req.body.doneMi);
+  const doneMi = Number.isFinite(doneMiBody) && doneMiBody > 0 ? Math.round(doneMiBody)
+    : (truck && truck.odometerMi !== null && truck.odometerMi !== undefined ? truck.odometerMi : null);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const fileId = req.file ? insertFileRow(req.file, 'maintenance_invoice', null, req.user.id) : null;
+  db.prepare('INSERT INTO maintenance_log (itemId, truckId, itemName, doneAt, doneMi, costCents, shop, note, fileId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(item.id, item.truckId, item.name, todayStr, doneMi, costCents,
+      (req.body && req.body.shop) || null, (req.body && req.body.note) || null, fileId, now());
+  db.prepare("UPDATE maintenance_items SET lastDoneMi = ?, lastDoneAt = ?, alertLevel = 'none' WHERE id = ?")
+    .run(doneMi, todayStr, item.id);
+  if (costCents) {
+    db.prepare('INSERT INTO cash_entries (direction, date, category, amountCents, truckId, note, fileId, source, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('out', todayStr, 'Maintenance', costCents, item.truckId,
+        `${item.name} — Truck ${truck ? truck.unitNumber : ''}${req.body && req.body.shop ? ' · ' + req.body.shop : ''}`, fileId, 'maintenance', now());
+  }
+  res.json(serializeMaintItem(db.prepare('SELECT * FROM maintenance_items WHERE id = ?').get(item.id), truck));
+});
+
+// --- Cash Flow ---
+function cashAmountFromBody(body) {
+  const dollars = Number(body && body.amount);
+  if (!Number.isFinite(dollars) || dollars <= 0) return null;
+  return Math.round(dollars * 100);
+}
+
+admin.get('/cashflow', (req, res) => {
+  const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
+  const rcTotal = db.prepare('SELECT COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get().s;
+  const entryRows = db.prepare(
+    `SELECT e.*, t.unitNumber AS truckUnit FROM cash_entries e
+     LEFT JOIN trucks t ON t.id = e.truckId ORDER BY e.date DESC, e.id DESC LIMIT 200`,
+  ).all();
+  const entries = entryRows.map((e) => ({
+    id: e.id, direction: e.direction, date: e.date, category: e.category, amountCents: e.amountCents,
+    truckId: e.truckId ?? null, truckUnit: e.truckUnit ?? null, note: e.note ?? null,
+    loadId: e.loadId ?? null, source: e.source, url: e.fileId ? `/files/${e.fileId}` : null, virtual: false,
+  }));
+  const advanceRows = db.prepare(
+    `SELECT r.id, r.amountCents, r.decidedAt, r.driverId, u.name AS driverName FROM requests r
+     LEFT JOIN users u ON u.id = r.driverId
+     WHERE r.type = 'advance' AND r.status = 'approved' AND r.amountCents IS NOT NULL`,
+  ).all();
+  const advances = advanceRows.map((a) => ({
+    id: 'adv-' + a.id, direction: 'out', date: String(a.decidedAt || '').slice(0, 10),
+    category: 'Driver advance', amountCents: a.amountCents, truckId: null, truckUnit: null,
+    driverId: a.driverId, note: a.driverName ? 'Advance — ' + a.driverName : 'Advance',
+    source: 'advance', url: null, virtual: true,
+  }));
+  const all = [...entries, ...advances].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const receivedCents = entries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amountCents, 0);
+  const outCents = all.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amountCents, 0);
+  const weekly = [];
+  const todayD = new Date();
+  for (let i = 7; i >= 0; i--) {
+    const end = new Date(todayD); end.setDate(end.getDate() - i * 7);
+    const start = new Date(end); start.setDate(start.getDate() - 6);
+    const sStr = start.toISOString().slice(0, 10);
+    const eStr = end.toISOString().slice(0, 10);
+    weekly.push({
+      weekStart: sStr,
+      inCents: all.filter((e) => e.direction === 'in' && e.date >= sStr && e.date <= eStr).reduce((s, e) => s + e.amountCents, 0),
+      outCents: all.filter((e) => e.direction === 'out' && e.date >= sStr && e.date <= eStr).reduce((s, e) => s + e.amountCents, 0),
+    });
+  }
+  // Fixed monthly payments (owner's fixed costs) — counted in the monthly
+  // profit automatically, never entered by hand.
+  const fixed = db.prepare('SELECT * FROM fixed_payments WHERE active = 1 ORDER BY category').all()
+    .map((f) => ({ id: f.id, category: f.category, amountCents: f.amountCents, note: f.note ?? null }));
+  // Monthly P&L: factoring money in, every expense group out, then profit.
+  const inMonth = (e) => (e.date || '').startsWith(monthParam);
+  const groupBy = (list) => {
+    const m = new Map();
+    for (const e of list) m.set(e.category, (m.get(e.category) || 0) + e.amountCents);
+    return [...m.entries()].map(([category, amountCents]) => ({ category, amountCents })).sort((a, b) => b.amountCents - a.amountCents);
+  };
+  const monthIn = groupBy(all.filter((e) => e.direction === 'in' && inMonth(e)));
+  const monthOut = groupBy(all.filter((e) => e.direction === 'out' && inMonth(e)));
+  for (const f of fixed) monthOut.push({ category: f.category, amountCents: f.amountCents, fixed: true });
+  const monthInTotal = monthIn.reduce((s, x) => s + x.amountCents, 0);
+  const monthOutTotal = monthOut.reduce((s, x) => s + x.amountCents, 0);
+  // Per-truck: trip revenue from rate cons (via the load's driver), costs
+  // from the entries tagged to the truck, profit after fuel + driver pay.
+  const truckRows = db.prepare('SELECT * FROM trucks ORDER BY unitNumber').all();
+  const trucksOut = truckRows.map((t) => {
+    const trips = t.driverId ? db.prepare(
+      `SELECT l.id AS loadId, l.reference AS reference, rc.rateCents AS rateCents FROM loads l
+       JOIN rate_confirmations rc ON rc.loadId = l.id
+       WHERE l.driverId = ? AND rc.rateCents IS NOT NULL ORDER BY l.id DESC`,
+    ).all(t.driverId).map((trip) => {
+      const exp = db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM cash_entries WHERE loadId = ? AND direction = 'out'").get(trip.loadId).s;
+      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, expensesCents: exp, profitCents: trip.rateCents - exp };
+    }) : [];
+    const sumCat = (cats) => entries.filter((e) => e.direction === 'out' && e.truckId === t.id && cats.includes(e.category)).reduce((s, e) => s + e.amountCents, 0);
+    const revenueCents = trips.reduce((s, x) => s + x.rateCents, 0);
+    const fuelCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
+    const driverPayCents = sumCat(['Driver pay'])
+      + advanceRows.filter((a) => {
+        const truckOfDriver = db.prepare('SELECT id FROM trucks WHERE driverId = ?').get(a.driverId);
+        return truckOfDriver && truckOfDriver.id === t.id;
+      }).reduce((s, a) => s + a.amountCents, 0);
+    const maintCents = sumCat(['Maintenance', 'Repairs']);
+    const known = new Set(['Driver pay', 'Maintenance', 'Repairs']);
+    const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && !known.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
+    const costs = fuelCents + driverPayCents + maintCents + otherCents;
+    return {
+      truckId: t.id, unitNumber: t.unitNumber, trips,
+      revenueCents, fuelCents, driverPayCents, maintCents, otherCents,
+      profitCents: revenueCents - costs,
+    };
+  });
+  const loads = db.prepare(
+    `SELECT l.id, l.reference, u.name AS driverName FROM loads l
+     LEFT JOIN users u ON u.id = l.driverId ORDER BY l.id DESC LIMIT 50`,
+  ).all().map((l) => ({ id: l.id, reference: l.reference, driverName: l.driverName ?? null }));
+  res.json({
+    bookedCents: rcTotal, receivedCents, outCents, netCents: receivedCents - outCents, weekly,
+    entries: all.slice(0, 60), fixed,
+    month: { key: monthParam, inGroups: monthIn, outGroups: monthOut, inTotalCents: monthInTotal, outTotalCents: monthOutTotal, profitCents: monthInTotal - monthOutTotal },
+    trucks: trucksOut, loads,
+  });
+});
+
+admin.post('/cashflow/fixed', (req, res) => {
+  const { category, note } = req.body || {};
+  const amountCents = cashAmountFromBody(req.body);
+  if (!category || !String(category).trim()) return err(res, 400, 'category is required');
+  if (!amountCents) return err(res, 400, 'amount must be a positive number');
+  const r = db.prepare('INSERT INTO fixed_payments (category, amountCents, note, createdAt) VALUES (?, ?, ?, ?)')
+    .run(String(category).trim(), amountCents, note ? String(note) : null, now());
+  res.status(201).json({ id: r.lastInsertRowid, ok: true });
+});
+
+admin.delete('/cashflow/fixed/:id', (req, res) => {
+  const f = db.prepare('SELECT * FROM fixed_payments WHERE id = ?').get(req.params.id);
+  if (!f) return err(res, 404, 'Fixed payment not found');
+  db.prepare('DELETE FROM fixed_payments WHERE id = ?').run(f.id);
+  res.json({ ok: true });
+});
+
+admin.post('/cashflow/entries', upload.single('file'), (req, res) => {
+  const { direction, category, date, truckId, note, loadId } = req.body || {};
+  if (direction !== 'in' && direction !== 'out') return err(res, 400, 'direction must be "in" or "out"');
+  const amountCents = cashAmountFromBody(req.body);
+  if (!amountCents) return err(res, 400, 'amount must be a positive number');
+  if (!category || !String(category).trim()) return err(res, 400, 'category is required');
+  const dateStr = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : new Date().toISOString().slice(0, 10);
+  const fileId = req.file ? insertFileRow(req.file, 'cash_entry', null, req.user.id) : null;
+  const r = db.prepare('INSERT INTO cash_entries (direction, date, category, amountCents, truckId, note, fileId, source, loadId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(direction, dateStr, String(category).trim(), amountCents,
+      truckId ? Number(truckId) : null, note ? String(note) : null, fileId, 'manual',
+      loadId ? Number(loadId) : null, now());
+  res.status(201).json({ id: r.lastInsertRowid, ok: true });
+});
+
+admin.delete('/cashflow/entries/:id', (req, res) => {
+  const e = db.prepare('SELECT * FROM cash_entries WHERE id = ?').get(req.params.id);
+  if (!e) return err(res, 404, 'Entry not found');
+  db.prepare('DELETE FROM cash_entries WHERE id = ?').run(e.id);
+  res.json({ ok: true });
+});
+
+function detectCashAmountCents(text) {
+  const labels = ['NET PAYMENT', 'NET PAID', 'TOTAL PAID', 'AMOUNT PAID', 'PAYMENT AMOUNT', 'AMOUNT DUE', 'TOTAL DUE', 'BALANCE DUE', 'TOTAL AMOUNT', 'GRAND TOTAL', 'TOTAL'];
+  const lines = String(text || '').split(/\r?\n/);
+  const money = /\$\s?([\d,]+\.\d{2})/;
+  for (const label of labels) {
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].toUpperCase().includes(label)) {
+        const here = lines[i].match(money);
+        if (here) return Math.round(parseFloat(here[1].replace(/,/g, '')) * 100);
+        if (lines[i + 1]) {
+          const next = lines[i + 1].match(money);
+          if (next) return Math.round(parseFloat(next[1].replace(/,/g, '')) * 100);
+        }
+      }
+    }
+  }
+  return detectRateCents(text);
+}
+
+function suggestCashKind(subject, from) {
+  const s = `${subject || ''} ${from || ''}`.toLowerCase();
+  if (s.includes('pilot')) return { direction: 'out', category: 'Fuel (Pilot weekly)' };
+  if (/toll|e-zpass|ezpass|prepass|bestpass|pay by plate/.test(s)) return { direction: 'out', category: 'Tolls' };
+  if (/factor|remittance|payment advice|funding|settlement/.test(s)) return { direction: 'in', category: 'Factoring payment' };
+  return { direction: 'out', category: 'Other' };
+}
+
+async function outlookAttachmentBuffer(user, messageId, attachmentId) {
+  const accessToken = await outlookAccessToken(user);
+  const att = await outlookGraph(accessToken,
+    `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`);
+  if (!att.contentBytes) throw Object.assign(new Error('That attachment has no file to download — pick a file attachment (PDF).'), { status: 400 });
+  const fileBuffer = Buffer.from(att.contentBytes, 'base64');
+  if (!fileBuffer.length) throw Object.assign(new Error('That attachment is empty.'), { status: 400 });
+  return { att, fileBuffer, accessToken };
+}
+
+admin.post('/cashflow/outlook-preview', async (req, res) => {
+  try {
+    const { messageId, attachmentId } = req.body || {};
+    if (!messageId || !attachmentId) return err(res, 400, 'messageId and attachmentId are required');
+    const user = getUserById(req.user.id);
+    const accessToken = await outlookAccessToken(user);
+    const msg = await outlookGraph(accessToken,
+      `/me/messages/${encodeURIComponent(messageId)}?$select=subject,from,receivedDateTime`);
+    const { fileBuffer } = await outlookAttachmentBuffer(user, messageId, attachmentId);
+    let amountCents = null;
+    try { amountCents = detectCashAmountCents(await extractFileText(fileBuffer)); } catch { /* detection is best-effort */ }
+    const from = (msg.from && msg.from.emailAddress && (msg.from.emailAddress.name || msg.from.emailAddress.address)) || '';
+    res.json({
+      amountCents, subject: msg.subject ?? '', from,
+      date: msg.receivedDateTime ? String(msg.receivedDateTime).slice(0, 10) : new Date().toISOString().slice(0, 10),
+      ...suggestCashKind(msg.subject, from),
+    });
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('cashflow outlook preview failed', e);
+    return err(res, 500, 'Could not read that email attachment');
+  }
+});
+
+admin.post('/cashflow/entries/from-outlook', async (req, res) => {
+  try {
+    const { messageId, attachmentId, direction, category, date, truckId, note, loadId } = req.body || {};
+    if (!messageId || !attachmentId) return err(res, 400, 'messageId and attachmentId are required');
+    if (direction !== 'in' && direction !== 'out') return err(res, 400, 'direction must be "in" or "out"');
+    const amountCents = cashAmountFromBody(req.body);
+    if (!amountCents) return err(res, 400, 'amount must be a positive number');
+    if (!category || !String(category).trim()) return err(res, 400, 'category is required');
+    const user = getUserById(req.user.id);
+    const { att, fileBuffer } = await outlookAttachmentBuffer(user, messageId, attachmentId);
+    // Files live on disk (multer pattern): write the buffer, then the row.
+    const safeName = String(att.name || 'outlook-attachment.pdf').replace(/[^A-Za-z0-9._-]/g, '_');
+    let storedName = `cash-${Date.now()}-${safeName}`;
+    let n = 1;
+    while (fs.existsSync(path.join(UPLOADS_DIR, storedName))) { storedName = `cash-${Date.now()}-${n}-${safeName}`; n += 1; }
+    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), fileBuffer);
+    const fileId = db.prepare(
+      'INSERT INTO files (storedFilename, originalFilename, mimeType, ownerType, ownerId, driverId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(storedName, att.name || storedName, att.contentType || 'application/pdf', 'cash_entry', null, req.user.id, now()).lastInsertRowid;
+    const dateStr = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : new Date().toISOString().slice(0, 10);
+    const r = db.prepare('INSERT INTO cash_entries (direction, date, category, amountCents, truckId, note, fileId, source, outlookMessageId, loadId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(direction, dateStr, String(category).trim(), amountCents,
+        truckId ? Number(truckId) : null, note ? String(note) : null, fileId, 'outlook', String(messageId),
+        loadId ? Number(loadId) : null, now());
+    res.status(201).json({ id: r.lastInsertRowid, ok: true });
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('cashflow from-outlook failed', e);
+    return err(res, 500, 'Could not pull the file from Outlook');
+  }
 });
 
 admin.get('/trailers', (_req, res) => {

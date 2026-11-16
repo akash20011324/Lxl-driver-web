@@ -241,6 +241,55 @@ CREATE TABLE IF NOT EXISTS broker_access (
   lastViewedAt TEXT,
   revokedAt TEXT
 );
+
+CREATE TABLE IF NOT EXISTS maintenance_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  truckId INTEGER NOT NULL REFERENCES trucks(id),
+  name TEXT NOT NULL,
+  intervalMi INTEGER NOT NULL,
+  lastDoneMi INTEGER,
+  lastDoneAt TEXT,
+  alertLevel TEXT NOT NULL DEFAULT 'none',
+  createdAt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  itemId INTEGER REFERENCES maintenance_items(id),
+  truckId INTEGER NOT NULL,
+  itemName TEXT NOT NULL,
+  doneAt TEXT NOT NULL,
+  doneMi INTEGER,
+  costCents INTEGER,
+  shop TEXT,
+  note TEXT,
+  fileId INTEGER REFERENCES files(id),
+  createdAt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cash_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  date TEXT NOT NULL,
+  category TEXT NOT NULL,
+  amountCents INTEGER NOT NULL,
+  truckId INTEGER REFERENCES trucks(id),
+  note TEXT,
+  fileId INTEGER REFERENCES files(id),
+  source TEXT NOT NULL DEFAULT 'manual',
+  outlookMessageId TEXT,
+  loadId INTEGER REFERENCES loads(id),
+  createdAt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fixed_payments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category TEXT NOT NULL,
+  amountCents INTEGER NOT NULL,
+  note TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  createdAt TEXT NOT NULL
+);
 `;
 
 export function openDb(dataDir) {
@@ -249,6 +298,12 @@ export function openDb(dataDir) {
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(SCHEMA);
+  // Cash Flow v2: entries can be tagged to a trip (load).
+  try {
+    const ceCols = db.prepare('PRAGMA table_info(cash_entries)').all();
+    if (ceCols.length && !ceCols.some((c) => c.name === 'loadId'))
+      db.exec('ALTER TABLE cash_entries ADD COLUMN loadId INTEGER REFERENCES loads(id)');
+  } catch { /* table may not exist yet on a brand-new database */ }
   // Migrate databases created before phone sign-in: add the normalized
   // phone column (fresh databases get it from the schema above) and
   // backfill it from the stored display phone numbers.

@@ -6,7 +6,7 @@
 // Refresh persistence (owner's ask, 2026-11-16): remember which section
 // the user was in, so refreshing the page lands back on that section
 // instead of the Dashboard. Kept per browser in localStorage.
-const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'driverDocs', 'admins', 'equipment', 'loads', 'documents', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons'];
+const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'driverDocs', 'admins', 'equipment', 'loads', 'documents', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons', 'maintenance', 'cashflow'];
 function savedAdminView() {
   try {
     const v = localStorage.getItem('lxl_admin_view');
@@ -535,6 +535,10 @@ async function boot() {
   removeAdminsBgLayer();
   document.body.classList.remove('requests-bg');
   removeRequestsBgLayer();
+  document.body.classList.remove('maintenance-bg');
+  removeMaintenanceBgLayer();
+  document.body.classList.remove('cashflow-bg');
+  removeCashflowBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const app = document.getElementById('app');
@@ -679,6 +683,8 @@ const ADMIN_VIEWS = [
   ['dispatch', 'Chat'],
   ['locations', 'Tracking'],
   ['ratecons', 'Rate Cons'],
+  ['maintenance', 'Maintenance'],
+  ['cashflow', 'Cash Flow'],
 ];
 
 function renderAdminShell() {
@@ -1023,6 +1029,10 @@ async function renderAdminView(view) {
   removeAdminsBgLayer();
   document.body.classList.remove('requests-bg');
   removeRequestsBgLayer();
+  document.body.classList.remove('maintenance-bg');
+  removeMaintenanceBgLayer();
+  document.body.classList.remove('cashflow-bg');
+  removeCashflowBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const main = document.getElementById('adminMain');
@@ -1045,6 +1055,8 @@ async function renderAdminView(view) {
     else if (view === 'dispatch') await viewDispatch(main);
     else if (view === 'locations') await viewLocations(main);
     else if (view === 'ratecons') await viewRateCons(main);
+    else if (view === 'maintenance') await viewMaintenance(main);
+    else if (view === 'cashflow') await viewCashflow(main);
   } catch (e) { main.innerHTML = '<p class="empty">Could not load this view.</p>'; showError(e); }
 }
 
@@ -1497,6 +1509,22 @@ function ensureRequestsBgLayer() {
   }
 }
 
+function ensureMaintenanceBgLayer() {
+  if (!document.getElementById('maintenanceBgLayer')) {
+    const d = document.createElement('div');
+    d.id = 'maintenanceBgLayer';
+    document.body.prepend(d);
+  }
+}
+
+function ensureCashflowBgLayer() {
+  if (!document.getElementById('cashflowBgLayer')) {
+    const d = document.createElement('div');
+    d.id = 'cashflowBgLayer';
+    document.body.prepend(d);
+  }
+}
+
 function ensureAdminsBgLayer() {
   if (!document.getElementById('adminsBgLayer')) {
     const d = document.createElement('div');
@@ -1522,6 +1550,14 @@ function removeAdminsBgLayer() {
 }
 function removeRequestsBgLayer() {
   const layer = document.getElementById('requestsBgLayer');
+  if (layer) layer.remove();
+}
+function removeMaintenanceBgLayer() {
+  const layer = document.getElementById('maintenanceBgLayer');
+  if (layer) layer.remove();
+}
+function removeCashflowBgLayer() {
+  const layer = document.getElementById('cashflowBgLayer');
   if (layer) layer.remove();
 }
 /* The Chat background is a real fixed layer too — same pattern. */
@@ -2621,6 +2657,320 @@ async function viewRequests(main) {
     }
     if (!confirm('Deny this request?\n\nReason: ' + reason)) return;
     decide(id, 'denied');
+  }));
+}
+
+/* ---------- Maintenance (admin) ---------- */
+async function viewMaintenance(main) {
+  document.body.classList.add('maintenance-bg'); // truck shop photo + liquid glass (removed on view switch)
+  ensureMaintenanceBgLayer();
+  const data = await api('/api/admin/maintenance');
+  const trucks = (data && data.trucks) || [];
+  const log = (data && data.log) || [];
+  const fmtMi = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US'));
+  const statusPill = (s) => s === 'overdue' ? '<span class="pill red">Overdue</span>'
+    : s === 'soon' ? '<span class="pill gold">Due soon</span>'
+    : s === 'unset' ? '<span class="pill">Not set</span>' : '<span class="pill green">OK</span>';
+  const barColor = (s) => s === 'overdue' ? '#DC2626' : s === 'soon' ? '#F2B705' : '#16A34A';
+  const itemRow = (t, it) => {
+    const left = it.status === 'unset' ? 'Set when it was last done to start tracking'
+      : it.status === 'overdue' ? Math.abs(it.remainingMi).toLocaleString('en-US') + ' mi OVERDUE'
+      : it.remainingMi.toLocaleString('en-US') + ' mi left';
+    return '<div class="maint-item">' +
+      '<div class="maint-item-top"><strong>' + esc(it.name) + '</strong>' + statusPill(it.status) +
+      '<span class="maint-left">' + left + '</span></div>' +
+      '<div class="maint-bar"><div class="maint-fill" style="width:' + (it.pct || 0) + '%;background:' + barColor(it.status) + '"></div></div>' +
+      '<div class="maint-meta">Every ' + fmtMi(it.intervalMi) + ' mi' +
+      (it.lastDoneMi !== null && it.lastDoneMi !== undefined ? ' · Last done at ' + fmtMi(it.lastDoneMi) + ' mi' + (it.lastDoneAt ? ' · ' + esc(String(it.lastDoneAt).slice(0, 10)) : '') : ' · Last done not recorded') +
+      (it.drivenMi !== null && it.drivenMi !== undefined ? ' · Driven since: ' + fmtMi(it.drivenMi) + ' mi' : '') + '</div>' +
+      '<div class="maint-actions">' +
+      '<button class="btn btn-sm" data-done="' + it.id + '">Mark done</button> ' +
+      '<button class="btn-ghost btn-sm" data-setlast="' + it.id + '" data-name="' + esc(it.name) + '">Set last done</button> ' +
+      '<button class="btn-ghost btn-sm" data-delitem="' + it.id + '" data-name="' + esc(it.name) + '">Delete</button></div>' +
+      '<form class="maint-done-form hidden" data-doneform="' + it.id + '">' +
+      '<div class="form-grid">' +
+      '<label>Cost $ <input name="cost" type="number" min="0" step="0.01" placeholder="0.00"></label>' +
+      '<label>Shop <input name="shop" placeholder="Shop name"></label>' +
+      '<label>Note <input name="note" placeholder="Optional"></label>' +
+      '<label>Invoice <input name="file" type="file" accept="image/*,.pdf"></label>' +
+      '</div>' +
+      '<div class="form-actions"><button class="btn btn-sm" type="submit">Save — service done</button> ' +
+      '<button class="btn-ghost btn-sm" type="button" data-donecancel="' + it.id + '">Cancel</button></div>' +
+      '<p class="small muted">Saving restarts the counter from the truck\'s current miles (' + fmtMi(t.odometerMi) + ') and adds the cost to Cash Flow.</p></form>' +
+      '</div>';
+  };
+  const truckPanel = (t) => '<section class="maint-panel">' +
+    '<div class="maint-panel-head"><div><span class="maint-unit">' + esc(t.unitNumber) + '</span> ' +
+    '<span class="muted">' + esc(t.desc || '') + '</span></div>' +
+    '<div class="maint-odo">' + fmtMi(t.odometerMi) + ' <span>mi · live from TRC</span></div></div>' +
+    (t.items.length ? t.items.map((it) => itemRow(t, it)).join('') : '<p class="empty">No services tracked for this truck yet.</p>') +
+    '<form class="maint-add-form" data-additem="' + t.id + '">' +
+    '<input name="name" placeholder="New service — e.g. Drive Tires" required> ' +
+    '<input name="intervalMi" type="number" min="1" placeholder="Every … miles" required> ' +
+    '<button class="btn-ghost btn-sm" type="submit">+ Add service</button></form>' +
+    '</section>';
+  const logRows = log.map((l) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(l.itemName) + '</strong> ' +
+    '<span class="muted">· Truck ' + esc(l.truckUnit || '') + (l.shop ? ' · ' + esc(l.shop) : '') + (l.note ? ' · ' + esc(l.note) : '') + '</span></div>' +
+    '<span class="muted">' + esc(String(l.doneAt || '').slice(0, 10)) + (l.doneMi ? ' · ' + fmtMi(l.doneMi) + ' mi' : '') + '</span>' +
+    '<span class="cf-amt out">' + (l.costCents ? '−' + fmtMoney(l.costCents) : '—') + '</span>' +
+    (l.url ? '<a class="btn-ghost btn-sm" href="' + l.url + '" target="_blank" rel="noopener">Invoice</a>' : '') + '</div>').join('');
+  main.innerHTML = '<div class="rc-head"><h1>Maintenance</h1><span class="muted">Miles update by themselves from TRC — you only tap “Mark done”.</span></div>' +
+    (trucks.length ? trucks.map(truckPanel).join('') : '<p class="empty">No trucks yet.</p>') +
+    '<h2 class="cf-h2">Recent service history</h2>' + (logRows || '<p class="empty">Nothing serviced yet.</p>');
+  main.querySelectorAll('[data-done]').forEach((b) => b.addEventListener('click', () => {
+    const f = main.querySelector('[data-doneform="' + b.dataset.done + '"]');
+    if (f) f.classList.toggle('hidden');
+  }));
+  main.querySelectorAll('[data-donecancel]').forEach((b) => b.addEventListener('click', () => {
+    const f = main.querySelector('[data-doneform="' + b.dataset.donecancel + '"]');
+    if (f) { f.reset(); f.classList.add('hidden'); }
+  }));
+  main.querySelectorAll('[data-doneform]').forEach((f) => f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/admin/maintenance/items/' + f.dataset.doneform + '/done', { method: 'POST', body: new FormData(f) });
+      toast('Service marked done.', 'ok');
+      renderAdminView('maintenance');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-setlast]').forEach((b) => b.addEventListener('click', async () => {
+    const v = prompt('At how many miles was "' + b.dataset.name + '" last done? (odometer reading)');
+    if (v === null) return;
+    const mi = Number(String(v).replace(/[^0-9.]/g, ''));
+    if (!Number.isFinite(mi) || mi < 0) { toast('Enter the miles as a number.', 'error'); return; }
+    try {
+      await api('/api/admin/maintenance/items/' + b.dataset.setlast, { method: 'PATCH', body: JSON.stringify({ lastDoneMi: Math.round(mi) }) });
+      toast('Last done saved.', 'ok');
+      renderAdminView('maintenance');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-delitem]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Stop tracking "' + b.dataset.name + '"? Its service history stays saved.')) return;
+    try {
+      await api('/api/admin/maintenance/items/' + b.dataset.delitem, { method: 'DELETE' });
+      renderAdminView('maintenance');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-additem]').forEach((f) => f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(f);
+    try {
+      await api('/api/admin/maintenance/items', {
+        method: 'POST',
+        body: JSON.stringify({ truckId: Number(f.dataset.additem), name: String(fd.get('name') || '').trim(), intervalMi: Number(fd.get('intervalMi')) }),
+      });
+      toast('Service added.', 'ok');
+      renderAdminView('maintenance');
+    } catch (err) { showError(err); }
+  }));
+}
+
+/* ---------- Cash Flow (admin) ---------- */
+let cfOutlookPick = null; // { messageId, attachmentId, subject } while an Outlook import is staged
+
+let cfMonthKey = ''; // YYYY-MM shown in the monthly P&L; '' = current month
+
+async function viewCashflow(main) {
+  document.body.classList.add('cashflow-bg'); // office desk photo + liquid glass (removed on view switch)
+  ensureCashflowBgLayer();
+  const [data, trucks, outlook] = await Promise.all([
+    api('/api/admin/cashflow' + (cfMonthKey ? '?month=' + cfMonthKey : '')),
+    api('/api/admin/trucks').catch(() => []),
+    api('/api/admin/outlook/status').catch(() => ({ configured: false, connected: false, email: null })),
+  ]);
+  const d = data || {};
+  const entries = d.entries || [];
+  const weekly = d.weekly || [];
+  const mo = d.month || { key: '', inGroups: [], outGroups: [], inTotalCents: 0, outTotalCents: 0, profitCents: 0 };
+  const fixed = d.fixed || [];
+  const truckStats = d.trucks || [];
+  const loads = d.loads || [];
+  const maxW = Math.max(1, ...weekly.map((w) => Math.max(w.inCents, w.outCents)));
+  const weekCols = weekly.map((w) => '<div class="cf-week">' +
+    '<div class="cf-bars"><div class="cf-bar in" style="height:' + Math.round((w.inCents / maxW) * 100) + '%" title="In ' + fmtMoney(w.inCents) + '"></div>' +
+    '<div class="cf-bar out" style="height:' + Math.round((w.outCents / maxW) * 100) + '%" title="Out ' + fmtMoney(w.outCents) + '"></div></div>' +
+    '<span>' + esc(String(w.weekStart).slice(5)) + '</span></div>').join('');
+  const truckOpts = '<option value="">All trucks / company</option>' + (trucks || []).map((t) => '<option value="' + t.id + '">Truck ' + esc(t.unitNumber) + '</option>').join('');
+  const loadOpts = '<option value="">No specific trip</option>' + loads.map((l) => '<option value="' + l.id + '">' + esc(l.reference) + (l.driverName ? ' · ' + esc(l.driverName) : '') + '</option>').join('');
+  const groupRows = (groups, sign) => groups.length ? groups.map((g) => '<div class="cf-group"><span>' + esc(g.category) + (g.fixed ? ' <span class="cf-src">Fixed</span>' : '') + '</span><strong>' + sign + fmtMoney(g.amountCents) + '</strong></div>').join('') : '<p class="small muted">Nothing this month yet.</p>';
+  const monthName = mo.key ? new Date(mo.key + '-15T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : '';
+  const fixedRows = fixed.map((f) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(f.category) + '</strong> ' +
+    '<span class="muted">' + (f.note ? '· ' + esc(f.note) : '') + '</span></div><span class="cf-src">Fixed · monthly</span>' +
+    '<span class="cf-amt out">−' + fmtMoney(f.amountCents) + '</span>' +
+    '<button class="btn-ghost btn-sm" data-delfixed="' + f.id + '">Delete</button></div>').join('');
+  const truckPanels = truckStats.map((t) => '<section class="maint-panel">' +
+    '<div class="maint-panel-head"><div><span class="maint-unit">' + esc(t.unitNumber) + '</span></div>' +
+    '<div class="maint-odo">' + fmtMoney(t.profitCents) + ' <span>profit</span></div></div>' +
+    '<div class="cf-truck-stats">' +
+    '<span>Made <strong>' + fmtMoney(t.revenueCents) + '</strong></span>' +
+    '<span>Fuel <strong>−' + fmtMoney(t.fuelCents) + '</strong></span>' +
+    '<span>Driver pay <strong>−' + fmtMoney(t.driverPayCents) + '</strong></span>' +
+    '<span>Maintenance <strong>−' + fmtMoney(t.maintCents) + '</strong></span>' +
+    '<span>Other <strong>−' + fmtMoney(t.otherCents) + '</strong></span></div>' +
+    (t.trips.length ? t.trips.map((trip) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(trip.reference) + '</strong></div>' +
+      '<span class="muted">Rate ' + fmtMoney(trip.rateCents) + '</span>' +
+      '<span class="muted">Trip expenses −' + fmtMoney(trip.expensesCents) + '</span>' +
+      '<span class="cf-amt ' + (trip.profitCents >= 0 ? 'in' : 'out') + '">' + (trip.profitCents >= 0 ? '+' : '−') + fmtMoney(Math.abs(trip.profitCents)) + '</span></div>').join('')
+      : '<p class="empty">No trips with a rate con yet for this truck.</p>') +
+    '</section>').join('');
+  const entryRow = (e) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(e.category) + '</strong> ' +
+    '<span class="muted">' + (e.truckUnit ? '· Truck ' + esc(e.truckUnit) + ' ' : '') + (e.note ? '· ' + esc(e.note) : '') + '</span></div>' +
+    '<span class="cf-src">' + esc(e.source === 'outlook' ? 'Outlook' : e.source === 'maintenance' ? 'Maintenance' : e.source === 'advance' ? 'Advance' : 'Manual') + '</span>' +
+    '<span class="muted">' + esc(e.date || '') + '</span>' +
+    '<span class="cf-amt ' + (e.direction === 'in' ? 'in' : 'out') + '">' + (e.direction === 'in' ? '+' : '−') + fmtMoney(e.amountCents) + '</span>' +
+    (e.url ? '<a class="btn-ghost btn-sm" href="' + e.url + '" target="_blank" rel="noopener">File</a>' : '') +
+    (e.virtual ? '' : '<button class="btn-ghost btn-sm" data-delentry="' + e.id + '">Delete</button>') + '</div>';
+  main.innerHTML = '<div class="rc-head"><h1>Cash Flow</h1><span>' +
+    '<button class="btn-blue btn" id="cfOutlookBtn">Import from Outlook</button> ' +
+    '<button class="btn-ghost btn" id="cfAddToggle">+ Add entry</button></span></div>' +
+    '<div class="rc-stats">' +
+    '<div class="rc-stat"><div class="num">' + fmtMoney(d.bookedCents || 0) + '</div><div class="lab">Booked (rate cons)</div></div>' +
+    '<div class="rc-stat"><div class="num" style="color:#4ade80">' + fmtMoney(d.receivedCents || 0) + '</div><div class="lab">Received</div></div>' +
+    '<div class="rc-stat"><div class="num" style="color:#f87171">' + fmtMoney(d.outCents || 0) + '</div><div class="lab">Money out</div></div>' +
+    '<div class="rc-stat"><div class="num" style="color:#F2B705">' + fmtMoney(d.netCents || 0) + '</div><div class="lab">Net (received − out)</div></div></div>' +
+    '<section class="cf-panel"><div class="cf-panel-head"><h3>' + esc(monthName) + ' — profit</h3>' +
+    '<span><input type="month" id="cfMonthInput" value="' + esc(mo.key || '') + '"> <button class="btn-ghost btn-sm" id="cfMonthGo">Show month</button></span></div>' +
+    '<div class="cf-cols"><div><h4>Money in</h4>' + groupRows(mo.inGroups, '+') +
+    '<div class="cf-group total"><span>Total in</span><strong>+' + fmtMoney(mo.inTotalCents) + '</strong></div></div>' +
+    '<div><h4>Money out</h4>' + groupRows(mo.outGroups, '−') +
+    '<div class="cf-group total"><span>Total out</span><strong>−' + fmtMoney(mo.outTotalCents) + '</strong></div></div></div>' +
+    '<div class="cf-profit">Profit for ' + esc(monthName) + ': <strong style="color:' + (mo.profitCents >= 0 ? '#4ade80' : '#f87171') + '">' + fmtMoney(mo.profitCents) + '</strong></div></section>' +
+    '<div class="cf-chart"><div class="cf-chart-title">Last 8 weeks — <span style="color:#4ade80">money in</span> vs <span style="color:#f87171">money out</span></div><div class="cf-weeks">' + weekCols + '</div></div>' +
+    '<section class="card hidden" id="cfOutlookCard"><h3>Import from Outlook</h3>' +
+    (outlook.connected
+      ? '<p class="small muted">Connected: ' + esc(outlook.email || '') + ' — pick the factoring payment, toll bill or Pilot weekly email; the amount is read from its attachment and you confirm it before saving.</p>' +
+        '<div class="form-actions"><input id="cfMailSearch" placeholder="Search — pilot, toll, factoring…"> <button class="btn btn-sm" id="cfMailSearchBtn">Search</button></div>' +
+        '<div id="cfMailList"><p class="small muted">Loading emails…</p></div>'
+      : '<p class="small muted">Connect the Outlook mailbox to import factoring payments, toll bills and the Pilot weekly fuel report.</p>' +
+        '<div class="form-actions"><button class="btn btn-sm" id="cfOutlookConnect">Connect Outlook</button></div>') +
+    '</section>' +
+    '<section class="card add-unit-card hidden" id="cfAddCard"><h3 id="cfFormTitle">Add entry</h3>' +
+    '<p class="small muted hidden" id="cfFromOutlookNote"></p>' +
+    '<form id="cfEntryForm"><div class="form-grid">' +
+    '<label>In / Out <select name="direction"><option value="out">Money out</option><option value="in">Money in</option></select></label>' +
+    '<label>Category <select name="category"><option>Fuel (Pilot weekly)</option><option>Tolls</option><option>Maintenance</option><option>Repairs</option><option>Driver pay</option><option>Dispatch pay</option><option>Truck payment</option><option>Insurance</option><option>Office expenses</option><option>Factoring payment</option><option>Broker payment</option><option>Other</option></select></label>' +
+    '<label>Amount $ <input name="amount" type="number" min="0" step="0.01" required placeholder="0.00"></label>' +
+    '<label>Date <input name="date" type="date" required></label>' +
+    '<label>Truck <select name="truckId">' + truckOpts + '</select></label>' +
+    '<label>Trip (load) <select name="loadId">' + loadOpts + '</select></label>' +
+    '<label>Note <input name="note" placeholder="Optional"></label>' +
+    '<label id="cfFileLabel">Receipt <input name="file" type="file" accept="image/*,.pdf"></label>' +
+    '</div><div class="form-actions"><button class="btn" type="submit">Save entry</button> ' +
+    '<button class="btn-ghost" type="button" id="cfAddCancel">Cancel</button></div></form></section>' +
+    '<h2 class="cf-h2">Fixed monthly payments</h2>' +
+    '<p class="small muted">Set once — they count automatically in every month\'s profit above. Don\'t add these by hand as entries too.</p>' +
+    (fixedRows || '<p class="empty">No fixed payments yet.</p>') +
+    '<form class="maint-add-form" id="cfFixedForm">' +
+    '<select name="category"><option>Truck payment</option><option>Insurance</option><option>Dispatch pay</option><option>Office expenses</option><option>Other</option></select> ' +
+    '<input name="amount" type="number" min="0" step="0.01" placeholder="Amount $ / month" required> ' +
+    '<input name="note" placeholder="Note — e.g. Truck 1301"> ' +
+    '<button class="btn-ghost btn-sm" type="submit">+ Add fixed payment</button></form>' +
+    '<h2 class="cf-h2">Per truck</h2>' + (truckPanels || '<p class="empty">No trucks yet.</p>') +
+    '<h2 class="cf-h2">Entries</h2>' +
+    (entries.length ? entries.map(entryRow).join('') : '<p class="empty">No entries yet — import from Outlook or add the first one.</p>') +
+    '<p class="small muted">Driver fuel receipts stay with their loads and are NOT counted here — only the Pilot weekly bill counts as fuel. Approved driver advances are counted automatically.</p>';
+  const addCard = main.querySelector('#cfAddCard');
+  const outlookCard = main.querySelector('#cfOutlookCard');
+  const form = main.querySelector('#cfEntryForm');
+  form.elements.date.value = new Date().toISOString().slice(0, 10);
+  main.querySelector('#cfAddToggle').addEventListener('click', () => addCard.classList.toggle('hidden'));
+  main.querySelector('#cfOutlookBtn').addEventListener('click', () => outlookCard.classList.toggle('hidden'));
+  main.querySelector('#cfAddCancel').addEventListener('click', () => { cfOutlookPick = null; form.reset(); addCard.classList.add('hidden'); });
+  main.querySelector('#cfMonthGo').addEventListener('click', () => {
+    const v = main.querySelector('#cfMonthInput').value;
+    if (v) { cfMonthKey = v; renderAdminView('cashflow'); }
+  });
+  main.querySelector('#cfFixedForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api('/api/admin/cashflow/fixed', { method: 'POST', body: JSON.stringify({ category: fd.get('category'), amount: fd.get('amount'), note: fd.get('note') || undefined }) });
+      toast('Fixed payment added.', 'ok');
+      renderAdminView('cashflow');
+    } catch (err) { showError(err); }
+  });
+  main.querySelectorAll('[data-delfixed]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Remove this fixed payment?')) return;
+    try {
+      await api('/api/admin/cashflow/fixed/' + b.dataset.delfixed, { method: 'DELETE' });
+      renderAdminView('cashflow');
+    } catch (err) { showError(err); }
+  }));
+  const connectBtn = main.querySelector('#cfOutlookConnect');
+  if (connectBtn) connectBtn.addEventListener('click', async () => {
+    try {
+      const res = await api('/api/admin/outlook/auth-url');
+      window.open(res.url, '_blank');
+      toast('Sign in to Microsoft in the new tab, then come back here.', 'ok');
+    } catch (err) { showError(err); }
+  });
+  const loadMail = async (search) => {
+    const box = main.querySelector('#cfMailList');
+    if (!box) return;
+    box.innerHTML = '<p class="small muted">Loading emails…</p>';
+    try {
+      const msgs = await api('/api/admin/outlook/messages' + (search ? '?search=' + encodeURIComponent(search) : ''));
+      if (!Array.isArray(msgs) || !msgs.length) { box.innerHTML = '<p class="small muted">No emails found.</p>'; return; }
+      box.innerHTML = msgs.map((m) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(m.subject || '(no subject)') + '</strong> ' +
+        '<span class="muted">· ' + esc(m.from || '') + '</span></div><span class="muted">' + esc(String(m.receivedAt || '').slice(0, 10)) + '</span>' +
+        '<button class="btn-ghost btn-sm" data-cfmail="' + esc(m.id) + '" data-subject="' + esc(m.subject || '') + '">Use this email</button></div>').join('');
+      box.querySelectorAll('[data-cfmail]').forEach((b) => b.addEventListener('click', async () => {
+        try {
+          const atts = await api('/api/admin/outlook/messages/' + encodeURIComponent(b.dataset.cfmail) + '/attachments');
+          const files = (atts || []).filter((a) => a.id);
+          if (!files.length) { toast('That email has no file attachment.', 'error'); return; }
+          const att = files[0];
+          const prev = await api('/api/admin/cashflow/outlook-preview', { method: 'POST', body: JSON.stringify({ messageId: b.dataset.cfmail, attachmentId: att.id }) });
+          cfOutlookPick = { messageId: b.dataset.cfmail, attachmentId: att.id };
+          form.elements.direction.value = prev.direction || 'out';
+          if (prev.category) form.elements.category.value = prev.category;
+          if (prev.amountCents) form.elements.amount.value = (prev.amountCents / 100).toFixed(2);
+          if (prev.date) form.elements.date.value = prev.date;
+          const note = main.querySelector('#cfFromOutlookNote');
+          note.textContent = 'From Outlook: “' + (prev.subject || b.dataset.subject || '') + '” — check the amount, then Save. The email attachment is saved with the entry.';
+          note.classList.remove('hidden');
+          main.querySelector('#cfFormTitle').textContent = 'Confirm import';
+          const fl = main.querySelector('#cfFileLabel');
+          if (fl) fl.classList.add('hidden');
+          addCard.classList.remove('hidden');
+          outlookCard.classList.add('hidden');
+          addCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch (err) { showError(err); }
+      }));
+    } catch (err) { box.innerHTML = '<p class="small muted">Could not load emails.</p>'; }
+  };
+  if (outlook.connected) loadMail('');
+  const searchBtn = main.querySelector('#cfMailSearchBtn');
+  if (searchBtn) searchBtn.addEventListener('click', () => loadMail(main.querySelector('#cfMailSearch').value.trim()));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    try {
+      if (cfOutlookPick) {
+        await api('/api/admin/cashflow/entries/from-outlook', {
+          method: 'POST',
+          body: JSON.stringify({
+            messageId: cfOutlookPick.messageId, attachmentId: cfOutlookPick.attachmentId,
+            direction: fd.get('direction'), category: fd.get('category'),
+            amount: fd.get('amount'), date: fd.get('date'),
+            truckId: fd.get('truckId') || undefined, loadId: fd.get('loadId') || undefined,
+            note: fd.get('note') || undefined,
+          }),
+        });
+        cfOutlookPick = null;
+      } else {
+        await api('/api/admin/cashflow/entries', { method: 'POST', body: fd });
+      }
+      toast('Entry saved.', 'ok');
+      renderAdminView('cashflow');
+    } catch (err) { showError(err); }
+  });
+  main.querySelectorAll('[data-delentry]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Delete this entry?')) return;
+    try {
+      await api('/api/admin/cashflow/entries/' + b.dataset.delentry, { method: 'DELETE' });
+      renderAdminView('cashflow');
+    } catch (err) { showError(err); }
   }));
 }
 
