@@ -273,6 +273,22 @@ function serializeEquipmentDoc(d) {
   };
 }
 
+function serializeDriverDoc(d) {
+  return {
+    id: d.id,
+    driverId: d.driverId,
+    driverName: d.driverName,
+    docType: d.docType,
+    note: d.note ?? null,
+    expiryDate: d.expiryDate ?? null,
+    issuedDate: d.issuedDate ?? null,
+    filename: d.originalFilename,
+    mimeType: d.mimeType,
+    url: `/files/${d.fileId}`,
+    createdAt: d.createdAt,
+  };
+}
+
 function serializeRateCon(r) {
   return {
     id: r.id,
@@ -3361,6 +3377,110 @@ admin.delete('/equipment-documents/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM equipment_documents WHERE id = ?').get(req.params.id);
   if (!row) return err(res, 404, 'Equipment document not found');
   db.prepare('DELETE FROM equipment_documents WHERE id = ?').run(row.id);
+  const f = getFileRow(row.fileId);
+  db.prepare('DELETE FROM files WHERE id = ?').run(row.fileId);
+  if (f) {
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename));
+    } catch {
+      // ignore
+    }
+  }
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Driver documents (owner's ask, 2026-11-16): a per-driver documents page,
+// deliberately separate from the BOL Documents section and from the
+// truck/trailer unit documents. Same behavior as unit documents: tiles,
+// issued/expiry dates read off the upload automatically, status from the
+// expiry date. Types: driver_license, driver_application, other.
+// ---------------------------------------------------------------------------
+const DRIVER_DOC_TYPES = ['driver_license', 'driver_application', 'other'];
+
+admin.get('/driver-documents', (req, res) => {
+  const { driverId } = req.query;
+  let rows;
+  if (driverId) {
+    rows = db
+      .prepare(
+        'SELECT e.*, f.originalFilename, f.mimeType FROM driver_documents e JOIN files f ON f.id = e.fileId WHERE e.driverId = ? ORDER BY e.createdAt DESC, e.id DESC',
+      )
+      .all(driverId);
+  } else {
+    rows = db
+      .prepare(
+        'SELECT e.*, f.originalFilename, f.mimeType FROM driver_documents e JOIN files f ON f.id = e.fileId ORDER BY e.createdAt DESC, e.id DESC',
+      )
+      .all();
+  }
+  res.json(rows.map(serializeDriverDoc));
+});
+
+admin.post('/driver-documents', upload.single('file'), async (req, res) => {
+  const { driverId, docType, note, expiryDate } = req.body || {};
+  if (expiryDate && !EXPIRY_RE.test(expiryDate)) return err(res, 400, 'expiryDate must be YYYY-MM-DD');
+  if (!req.file) return err(res, 400, 'file is required');
+  if (!driverId) return err(res, 400, 'driverId is required');
+  if (!DRIVER_DOC_TYPES.includes(docType)) return err(res, 400, 'Invalid docType');
+  const driver = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(driverId);
+  if (!driver) return err(res, 404, 'Driver not found');
+  const fileId = insertFileRow(req.file, 'driver_document', driverId, driverId);
+  const id = db
+    .prepare(
+      'INSERT INTO driver_documents (driverId, driverName, docType, note, fileId, expiryDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    )
+    .run(driverId, driver.name, docType, note ?? null, fileId, expiryDate || null, now()).lastInsertRowid;
+  // Auto-read the dates off the document (same as unit documents).
+  let detected = {};
+  {
+    detected = await detectDatesForFile(req.file.path);
+    const fillExpiry = !expiryDate && detected.expiryDate ? detected.expiryDate : null;
+    const fillIssued = detected.issuedDate || null;
+    if (fillExpiry || fillIssued) {
+      db.prepare('UPDATE driver_documents SET expiryDate = COALESCE(?, expiryDate), issuedDate = COALESCE(?, issuedDate) WHERE id = ?')
+        .run(fillExpiry, fillIssued, id);
+    }
+  }
+  const row = db
+    .prepare('SELECT e.*, f.originalFilename, f.mimeType FROM driver_documents e JOIN files f ON f.id = e.fileId WHERE e.id = ?')
+    .get(id);
+  const out = serializeDriverDoc(row);
+  out.detected = detected;
+  res.status(201).json(out);
+});
+
+admin.patch('/driver-documents/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM driver_documents WHERE id = ?').get(req.params.id);
+  if (!row) return err(res, 404, 'Driver document not found');
+  const body = req.body || {};
+  const hasExp = Object.prototype.hasOwnProperty.call(body, 'expiryDate');
+  const hasIss = Object.prototype.hasOwnProperty.call(body, 'issuedDate');
+  if (!hasExp && !hasIss) return err(res, 400, 'Nothing to update');
+  const sets = [];
+  const vals = [];
+  if (hasExp) {
+    if (body.expiryDate && !EXPIRY_RE.test(body.expiryDate)) return err(res, 400, 'expiryDate must be YYYY-MM-DD');
+    sets.push('expiryDate = ?');
+    vals.push(body.expiryDate || null);
+  }
+  if (hasIss) {
+    if (body.issuedDate && !EXPIRY_RE.test(body.issuedDate)) return err(res, 400, 'issuedDate must be YYYY-MM-DD');
+    sets.push('issuedDate = ?');
+    vals.push(body.issuedDate || null);
+  }
+  vals.push(row.id);
+  db.prepare('UPDATE driver_documents SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals);
+  const updated = db
+    .prepare('SELECT e.*, f.originalFilename, f.mimeType FROM driver_documents e JOIN files f ON f.id = e.fileId WHERE e.id = ?')
+    .get(row.id);
+  res.json(serializeDriverDoc(updated));
+});
+
+admin.delete('/driver-documents/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM driver_documents WHERE id = ?').get(req.params.id);
+  if (!row) return err(res, 404, 'Driver document not found');
+  db.prepare('DELETE FROM driver_documents WHERE id = ?').run(row.id);
   const f = getFileRow(row.fileId);
   db.prepare('DELETE FROM files WHERE id = ?').run(row.fileId);
   if (f) {

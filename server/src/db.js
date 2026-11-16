@@ -184,6 +184,18 @@ CREATE TABLE IF NOT EXISTS equipment_documents (
   createdAt TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS driver_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  driverId INTEGER NOT NULL,
+  driverName TEXT NOT NULL,
+  docType TEXT NOT NULL CHECK (docType IN ('driver_license', 'driver_application', 'other')),
+  note TEXT,
+  fileId INTEGER NOT NULL REFERENCES files(id),
+  expiryDate TEXT,
+  issuedDate TEXT,
+  createdAt TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS rate_confirmations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   reference TEXT NOT NULL,

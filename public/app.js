@@ -6,7 +6,7 @@
 // Refresh persistence (owner's ask, 2026-11-16): remember which section
 // the user was in, so refreshing the page lands back on that section
 // instead of the Dashboard. Kept per browser in localStorage.
-const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'admins', 'equipment', 'loads', 'documents', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons'];
+const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'driverDocs', 'admins', 'equipment', 'loads', 'documents', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons'];
 function savedAdminView() {
   try {
     const v = localStorage.getItem('lxl_admin_view');
@@ -28,6 +28,13 @@ function savedUnitDocsTarget() {
   } catch (e) {}
   return null;
 }
+function savedDriverDocsTarget() {
+  try {
+    const t = JSON.parse(localStorage.getItem('lxl_driverdocs_target') || 'null');
+    if (t && Number.isFinite(t.id)) return t;
+  } catch (e) {}
+  return null;
+}
 function savedDispatchDriverId() {
   try {
     const n = parseInt(localStorage.getItem('lxl_dispatch_driver') || '', 10);
@@ -42,6 +49,7 @@ const state = {
   adminView: savedAdminView(),
   driverView: savedDriverView(),
   unitDocsTarget: savedUnitDocsTarget(),
+  driverDocsTarget: savedDriverDocsTarget(),
   yardFilter: 'all', // all | yard | road
   dispatchDriverId: savedDispatchDriverId(),
   driversCache: [],
@@ -521,6 +529,8 @@ async function boot() {
   removeLoadsBgLayer();
   document.body.classList.remove('trucks-bg');
   removeTrucksBgLayer();
+  document.body.classList.remove('drivers-bg');
+  removeDriversBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const app = document.getElementById('app');
@@ -985,6 +995,8 @@ async function renderAdminView(view) {
     localStorage.setItem('lxl_admin_view', view);
     if (view === 'unitDocs' && state.unitDocsTarget)
       localStorage.setItem('lxl_unitdocs_target', JSON.stringify(state.unitDocsTarget));
+    if (view === 'driverDocs' && state.driverDocsTarget)
+      localStorage.setItem('lxl_driverdocs_target', JSON.stringify(state.driverDocsTarget));
     if (state.dispatchDriverId)
       localStorage.setItem('lxl_dispatch_driver', String(state.dispatchDriverId));
   } catch (e) {}
@@ -1001,6 +1013,8 @@ async function renderAdminView(view) {
   removeLoadsBgLayer();
   document.body.classList.remove('trucks-bg');
   removeTrucksBgLayer();
+  document.body.classList.remove('drivers-bg');
+  removeDriversBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const main = document.getElementById('adminMain');
@@ -1018,6 +1032,7 @@ async function renderAdminView(view) {
     else if (view === 'loads') await viewLoads(main);
     else if (view === 'documents') await viewDocuments(main);
     else if (view === 'unitDocs') await viewUnitDocuments(main);
+    else if (view === 'driverDocs') await viewDriverDocuments(main);
     else if (view === 'requests') await viewRequests(main);
     else if (view === 'dispatch') await viewDispatch(main);
     else if (view === 'locations') await viewLocations(main);
@@ -1463,6 +1478,18 @@ function removeTrucksBgLayer() {
   const layer = document.getElementById('trucksBgLayer');
   if (layer) layer.remove();
 }
+/* Drivers background: the light-trails photo — same pattern. */
+function ensureDriversBgLayer() {
+  if (!document.getElementById('driversBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'driversBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeDriversBgLayer() {
+  const layer = document.getElementById('driversBgLayer');
+  if (layer) layer.remove();
+}
 /* The Chat background is a real fixed layer too — same pattern. */
 function ensureChatBgLayer() {
   if (!document.getElementById('chatBgLayer')) {
@@ -1477,7 +1504,23 @@ function removeChatBgLayer() {
 }
 
 /* ---------- Drivers ---------- */
+/* Display a stored phone number as 718-717-6440. */
+function fmtPhone(p) {
+  const raw = String(p || '').trim();
+  if (!raw) return '—';
+  let d = raw.replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  return d.length === 10 ? d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6) : raw;
+}
+
+/* Drivers — Option B driver cards (owner's pick, 2026-11-16) on the
+   light-trails background. Phone numbers only: email is gone from this
+   section — the add form and the cards show phone, never email. Each
+   card also carries a Documents button to that driver's own documents
+   page (license / application / other). */
 async function viewDrivers(main) {
+  ensureDriversBgLayer();
+  document.body.classList.add('drivers-bg');
   const drivers = await api('/api/admin/drivers');
   state.driversCache = Array.isArray(drivers) ? drivers : [];
   // /api/admin/drivers does not include assignments — merge them from /overview.
@@ -1487,48 +1530,79 @@ async function viewDrivers(main) {
     (Array.isArray(overview) ? overview : (overview.drivers || [])).forEach(o => {
       driverUnits[o.id] = { truck: o.truck || null, trailer: o.trailer || null };
     });
-  } catch (e) { /* overview unavailable — assignment columns stay blank */ }
-  main.innerHTML = '<h1>Drivers</h1>' +
-    '<div class="card"><h2>Add driver</h2><form id="addDriverForm">' +
+  } catch (e) { /* overview unavailable — assignment fields stay blank */ }
+  const cardFor = (d) => {
+    const u = driverUnits[d.id] || {};
+    const dTruck = u.truck || d.truck;
+    const dTrailer = u.trailer || d.trailer;
+    const truckNo = dTruck ? (dTruck.unitNumber || dTruck) : (d.truckUnitNumber || '—');
+    const trailerNo = dTrailer ? (dTrailer.unitNumber || dTrailer) : (d.trailerUnitNumber || '—');
+    const color = driverColor(d.id);
+    const initial = esc((String(d.name || '?').trim().charAt(0) || '?').toUpperCase());
+    const inactive = d.active === false;
+    return '<div class="driver-card">' +
+      '<div class="dc-stripe" style="background:' + color + '"></div>' +
+      '<div class="dc-body">' +
+      '<div class="dc-head"><span class="dc-avatar" style="background:' + color + '">' + initial + '</span>' +
+      '<div><div class="dc-name">' + esc(d.name) + '</div><div class="dc-sub">Driver</div></div>' +
+      (inactive ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</div>' +
+      '<div class="dc-stats">' +
+      '<div><span>PHONE</span><strong>' + esc(fmtPhone(d.phone)) + '</strong></div>' +
+      '<div><span>TRUCK</span><strong>' + esc(truckNo) + '</strong></div>' +
+      '<div><span>TRAILER</span><strong>' + esc(trailerNo) + '</strong></div>' +
+      '</div>' +
+      '<div class="dc-actions">' +
+      '<button class="btn btn-blue btn-sm" data-driver-docs="' + d.id + '" data-driver-name="' + esc(d.name) + '">Documents</button> ' +
+      '<button class="btn btn-ghost btn-sm" data-toggle-driver="' + d.id + '" data-active="' + inactive + '">' +
+      (inactive ? 'Activate' : 'Deactivate') + '</button> ' +
+      '<button class="btn btn-ghost btn-sm" data-reset-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Reset password</button> ' +
+      '<button class="btn btn-danger btn-sm" data-delete-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Delete</button>' +
+      '</div></div></div>';
+  };
+  main.innerHTML = '<div class="rc-head"><h1>Drivers</h1>' +
+    '<button class="btn btn-blue" id="addDriverToggle" type="button">+ Add driver</button></div>' +
+    '<div class="card add-unit-card" id="addDriverCard" hidden><h3>Add driver</h3><form id="addDriverForm">' +
     '<div class="form-row">' +
     '<div class="field"><label for="ad-name">Name *</label><input id="ad-name" required></div>' +
-    '<div class="field"><label for="ad-phone">Phone</label><input id="ad-phone" type="tel" autocomplete="tel"></div>' +
-    '<div class="field"><label for="ad-email">Email</label><input id="ad-email" type="email" autocomplete="email"></div>' +
+    '<div class="field"><label for="ad-phone">Phone *</label><input id="ad-phone" type="tel" autocomplete="tel" required></div>' +
     '<div class="field"><label for="ad-pass">Password *</label><input id="ad-pass" type="password" required minlength="8" autocomplete="new-password"></div>' +
-    '</div><p class="small muted">At least one of phone or email is required. Drivers sign in with their phone number or email.</p>' +
-    '<div class="form-actions"><button class="btn" type="submit">Add driver</button></div>' +
+    '</div><p class="small muted">Drivers sign in with their phone number.</p>' +
+    '<div class="form-actions"><button class="btn btn-blue" type="submit">Add driver</button>' +
+    '<button class="btn btn-ghost" type="button" data-cancel-add="addDriverForm">Cancel</button></div>' +
     '</form></div>' +
-    '<div class="card"><div class="table-wrap"><table><thead><tr>' +
-    '<th>Name</th><th>Phone</th><th>Email</th><th>Truck</th><th>Trailer</th><th>Status</th><th></th>' +
-    '</tr></thead><tbody>' +
-    state.driversCache.map(d => { const u = driverUnits[d.id] || {}; const dTruck = u.truck || d.truck; const dTrailer = u.trailer || d.trailer; return '<tr>' +
-      '<td><strong>' + esc(d.name) + '</strong></td>' +
-      '<td>' + esc(d.phone || '—') + '</td><td>' + esc(d.email || '—') + '</td>' +
-      '<td>' + esc(dTruck ? (dTruck.unitNumber || dTruck) : (d.truckUnitNumber || '—')) + '</td>' +
-      '<td>' + esc(dTrailer ? (dTrailer.unitNumber || dTrailer) : (d.trailerUnitNumber || '—')) + '</td>' +
-      '<td>' + (d.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</td>' +
-      '<td><button class="btn btn-ghost btn-sm" data-toggle-driver="' + d.id + '" data-active="' + (d.active === false) + '">' +
-      (d.active === false ? 'Activate' : 'Deactivate') + '</button> ' +
-      '<button class="btn btn-ghost btn-sm" data-reset-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Reset password</button> ' +
-      '<button class="btn btn-danger btn-sm" data-delete-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Delete</button></td></tr>'; }).join('') +
-    '</tbody></table></div>' +
-    (state.driversCache.length ? '' : '<p class="empty">No drivers yet.</p>') + '</div>';
+    (state.driversCache.length ? '<div class="driver-grid">' + state.driversCache.map(cardFor).join('') + '</div>' : '<p class="empty">No drivers yet.</p>');
 
+  const addBtn = document.getElementById('addDriverToggle');
+  const addCard = document.getElementById('addDriverCard');
+  if (addBtn && addCard) addBtn.addEventListener('click', () => { addCard.hidden = !addCard.hidden; });
+  // Cancel: throw away whatever was typed and fold the form back up.
+  main.querySelectorAll('[data-cancel-add]').forEach(b => b.addEventListener('click', () => {
+    const form = document.getElementById(b.dataset.cancelAdd);
+    if (!form) return;
+    form.reset();
+    const card = form.closest('.add-unit-card');
+    if (card) card.hidden = true;
+  }));
   document.getElementById('addDriverForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const phone = document.getElementById('ad-phone').value.trim();
-    const email = document.getElementById('ad-email').value.trim();
-    if (!phone && !email) { toast('Enter a phone number or an email for the driver.', 'error'); return; }
+    if (!phone) { toast('Enter the driver’s phone number.', 'error'); return; }
     try {
+      const newPw = document.getElementById('ad-pass').value;
       await api('/api/admin/drivers', { method: 'POST', body: JSON.stringify({
         name: document.getElementById('ad-name').value.trim(),
-        phone: phone || undefined, email: email || undefined,
-        password: document.getElementById('ad-pass').value,
+        phone,
+        password: newPw,
       }) });
       toast('Driver added.', 'ok');
       renderAdminView('drivers');
     } catch (err) { showError(err); }
   });
+  main.querySelectorAll('[data-driver-docs]').forEach(b => b.addEventListener('click', () => {
+    state.driverDocsTarget = { id: parseInt(b.dataset.driverDocs, 10), name: b.dataset.driverName || '' };
+    try { localStorage.setItem('lxl_driverdocs_target', JSON.stringify(state.driverDocsTarget)); } catch (e) {}
+    renderAdminView('driverDocs');
+  }));
   main.querySelectorAll('[data-toggle-driver]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.toggleDriver;
     const active = btn.dataset.active === 'true';
@@ -1563,6 +1637,166 @@ async function viewDrivers(main) {
       toast('Password reset. ' + name + ' will need to sign in again with the new password.', 'ok');
     } catch (err) { showError(err); }
   }));
+}
+
+/* ---------- Driver documents ---------- */
+/* A driver's own documents page (owner's ask, 2026-11-16), built the
+   same as the truck/trailer documents page: tiles, summary pills,
+   issued/expiry dates read off the upload automatically. Separate from
+   the BOL Documents section and from the unit documents. */
+const DRIVER_DOC_LABELS = {
+  driver_license: 'Driver License',
+  driver_application: 'Driver Application',
+  other: 'Other Documents',
+};
+const DRIVER_DOC_TYPES_ALL = Object.keys(DRIVER_DOC_LABELS);
+const DRIVER_DOC_CORE = ['driver_license', 'driver_application', 'other'];
+
+async function viewDriverDocuments(main) {
+  const target = state.driverDocsTarget;
+  if (!target) { renderAdminView('drivers'); return; }
+  const [drivers, docs] = await Promise.all([
+    api('/api/admin/drivers').catch(() => []),
+    api('/api/admin/driver-documents?driverId=' + target.id).catch(() => []),
+  ]);
+  const driver = (Array.isArray(drivers) ? drivers : []).find(u => u.id === target.id);
+  if (!driver) { toast('That driver no longer exists.', 'err'); renderAdminView('drivers'); return; }
+  const list = Array.isArray(docs) ? docs : [];
+  const byType = new Map();
+  for (const d of list) {
+    if (!byType.has(d.docType)) byType.set(d.docType, []);
+    byType.get(d.docType).push(d);
+  }
+  let nActive = 0, nSoon = 0, nExpired = 0;
+  for (const d of list) {
+    const st = equipDocStatus(d.expiryDate);
+    if (st.key === 'active') nActive++;
+    else if (st.key === 'soon') nSoon++;
+    else if (st.key === 'expired') nExpired++;
+  }
+  const nMissing = DRIVER_DOC_CORE.filter(t => !byType.has(t)).length;
+  const countdown = (d) => {
+    const st = equipDocStatus(d.expiryDate);
+    if (st.key === 'expired') return 'Expired ' + fmtExpiry(d.expiryDate);
+    if (st.key === 'soon' || st.key === 'active') return st.days + (st.days === 1 ? ' day' : ' days') + ' left · expires ' + fmtExpiry(d.expiryDate);
+    return 'No expiry date — add it below';
+  };
+  const tileHtml = (d) => {
+    const st = equipDocStatus(d.expiryDate);
+    return '<div class="ud-tile ' + st.cls + '">' +
+      '<div class="ud-tile-top"><span class="ud-tile-name">' + esc(DRIVER_DOC_LABELS[d.docType] || d.docType) + '</span>' +
+      '<span class="doc-pill ' + st.cls + '">' + st.label + '</span></div>' +
+      '<div class="ud-file">' + esc(d.filename || '') + (d.note ? ' · ' + esc(d.note) : '') + '</div>' +
+      '<div class="ud-count">' + countdown(d) + '</div>' +
+      '<div class="ud-dates">' +
+      '<label>Issued<input type="date" data-ddoc-issued="' + d.id + '" value="' + esc(d.issuedDate || '') + '"></label>' +
+      '<label>Expires<input type="date" data-ddoc-exp="' + d.id + '" value="' + esc(d.expiryDate || '') + '"></label></div>' +
+      '<div class="ud-acts"><button class="btn btn-ghost btn-sm" type="button" data-ddoc-view="' + d.id + '">View</button>' +
+      '<button class="btn btn-ghost btn-sm" type="button" data-ddoc-pick="' + d.docType + '">Replace</button>' +
+      '<button class="btn btn-danger btn-sm" type="button" data-ddoc-del="' + d.id + '">Delete</button></div></div>';
+  };
+  const missingTile = (t) =>
+    '<div class="ud-tile missing"><div class="ud-tile-top"><span class="ud-tile-name">' + DRIVER_DOC_LABELS[t] + '</span>' +
+    '<span class="doc-pill grey">Missing</span></div>' +
+    '<div class="ud-count">Not uploaded yet</div>' +
+    '<div class="ud-acts"><button class="btn btn-sm" type="button" data-ddoc-pick="' + t + '">Upload</button></div></div>';
+  const coreTiles = DRIVER_DOC_CORE.map(t => {
+    const ds = byType.get(t) || [];
+    return ds.length ? ds.map(tileHtml).join('') : missingTile(t);
+  }).join('');
+  const extraTiles = list.filter(d => !DRIVER_DOC_CORE.includes(d.docType)).map(tileHtml).join('');
+  main.innerHTML = '<button class="btn btn-ghost btn-sm" id="ddBack" type="button">← Drivers</button>' +
+    '<div class="rc-head"><h1>Documents — ' + esc(driver.name) + '</h1>' +
+    (driver.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</div>' +
+    '<p class="muted">' + esc('Driver' + (driver.phone ? ' · ' + fmtPhone(driver.phone) : '')) + '</p>' +
+    '<div class="ud-summary">' +
+    '<span class="doc-pill green">' + nActive + ' Active</span>' +
+    '<span class="doc-pill amber">' + nSoon + ' Expiring</span>' +
+    '<span class="doc-pill red">' + nExpired + ' Expired</span>' +
+    '<span class="doc-pill grey">' + nMissing + ' Missing</span></div>' +
+    '<p class="small muted">Upload a photo or scan of a paper and the dates are read off it automatically — check them on the tile and fix any date with the date boxes.</p>' +
+    '<div class="ud-grid">' + coreTiles + extraTiles + '</div>' +
+    '<div class="card"><h3>Add another document</h3>' +
+    '<form class="unit-doc-form" id="ddAddForm">' +
+    '<div class="field"><label>Document type</label><select name="docType">' +
+    DRIVER_DOC_TYPES_ALL.map(t => '<option value="' + t + '">' + DRIVER_DOC_LABELS[t] + '</option>').join('') +
+    '</select></div>' +
+    '<div class="field"><label>File *</label><input type="file" name="file" required></div>' +
+    '<div class="field"><label>Note</label><input name="note"></div>' +
+    '<button class="btn btn-sm" type="submit">Upload</button></form></div>' +
+    '<input type="file" id="ddTileFile" hidden>';
+  document.getElementById('ddBack').addEventListener('click', () => renderAdminView('drivers'));
+  const uploadFor = async (docType, file) => {
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('driverId', String(target.id));
+    fd.append('docType', docType);
+    try {
+      const r = await api('/api/admin/driver-documents', { method: 'POST', body: fd });
+      const label = DRIVER_DOC_LABELS[docType] || docType;
+      if (r && r.detected && (r.detected.expiryDate || r.detected.issuedDate)) {
+        toast(label + ' saved — dates read automatically' +
+          (r.detected.issuedDate ? ' · issued ' + fmtExpiry(r.detected.issuedDate) : '') +
+          (r.detected.expiryDate ? ' · expires ' + fmtExpiry(r.detected.expiryDate) : '') + '.', 'ok');
+      } else {
+        toast(label + ' saved — no dates found on it; add them on the tile.', 'ok');
+      }
+      renderAdminView('driverDocs');
+    } catch (err) { showError(err); }
+  };
+  const tileFile = document.getElementById('ddTileFile');
+  let pendingType = null;
+  main.querySelectorAll('[data-ddoc-pick]').forEach(b => b.addEventListener('click', () => {
+    pendingType = b.dataset.ddocPick;
+    tileFile.value = '';
+    tileFile.click();
+  }));
+  tileFile.addEventListener('change', () => {
+    if (pendingType && tileFile.files && tileFile.files[0]) uploadFor(pendingType, tileFile.files[0]);
+    pendingType = null;
+  });
+  main.querySelectorAll('[data-ddoc-view]').forEach(b => b.addEventListener('click', () => {
+    const d = list.find(x => String(x.id) === b.dataset.ddocView);
+    if (d) downloadFile(d.url, d.filename, true, d.mimeType);
+  }));
+  main.querySelectorAll('[data-ddoc-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Delete this document?')) return;
+    try {
+      await api('/api/admin/driver-documents/' + b.dataset.ddocDel, { method: 'DELETE' });
+      toast('Document deleted.', 'ok');
+      renderAdminView('driverDocs');
+    } catch (err) { showError(err); }
+  }));
+  const patchDate = async (id, body) => {
+    try {
+      await api('/api/admin/driver-documents/' + id, { method: 'PATCH', body: JSON.stringify(body) });
+      toast('Date saved.', 'ok');
+      renderAdminView('driverDocs');
+    } catch (err) { showError(err); }
+  };
+  main.querySelectorAll('[data-ddoc-exp]').forEach(inp => inp.addEventListener('change', () =>
+    patchDate(inp.dataset.ddocExp, { expiryDate: inp.value || null })));
+  main.querySelectorAll('[data-ddoc-issued]').forEach(inp => inp.addEventListener('change', () =>
+    patchDate(inp.dataset.ddocIssued, { issuedDate: inp.value || null })));
+  document.getElementById('ddAddForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const file = form.file.files && form.file.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('driverId', String(target.id));
+    fd.append('docType', form.docType.value);
+    if (form.note.value) fd.append('note', form.note.value);
+    try {
+      const r = await api('/api/admin/driver-documents', { method: 'POST', body: fd });
+      const label = DRIVER_DOC_LABELS[form.docType.value] || 'Document';
+      if (r && r.detected && r.detected.expiryDate) toast(label + ' saved — expires ' + fmtExpiry(r.detected.expiryDate) + ' (read automatically).', 'ok');
+      else toast(label + ' saved.', 'ok');
+      renderAdminView('driverDocs');
+    } catch (err) { showError(err); }
+  });
 }
 
 /* ---------- Admins & Dispatchers ---------- */
