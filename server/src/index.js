@@ -4789,6 +4789,42 @@ async function removeOutlookFactoring2() {
   } catch (e) { console.error('cashflow recon fix2 failed', e); }
 }
 
+// One-time backfill (2026-11-16): documents uploaded before the
+// dash-date fix (Indiana cab cards: '01-JUN-2026 TO 31-MAY-2027')
+// got no auto-read dates. Re-run detection on every equipment /
+// driver document still missing a date and fill only the blanks.
+async function backfillDocDates() {
+  try {
+    const marker = 'doc-dates-backfill-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('doc dates backfill: ' + m);
+    const jobs = [
+      ['equipment_documents', 'equipment doc'],
+      ['driver_documents', 'driver doc'],
+    ];
+    for (const [table, label] of jobs) {
+      const rows = db.prepare(
+        'SELECT d.id, d.expiryDate, d.issuedDate, f.storedFilename FROM ' + table + ' d JOIN files f ON f.id = d.fileId WHERE d.expiryDate IS NULL OR d.issuedDate IS NULL'
+      ).all();
+      for (const r of rows) {
+        const found = await detectDatesForFile(path.join(UPLOADS_DIR, r.storedFilename));
+        const fillExpiry = !r.expiryDate && found.expiryDate ? found.expiryDate : null;
+        const fillIssued = !r.issuedDate && found.issuedDate ? found.issuedDate : null;
+        if (fillExpiry || fillIssued) {
+          db.prepare('UPDATE ' + table + ' SET expiryDate = COALESCE(?, expiryDate), issuedDate = COALESCE(?, issuedDate) WHERE id = ?')
+            .run(fillExpiry, fillIssued, r.id);
+          log(label + ' ' + r.id + ': issued=' + (fillIssued || '(kept)') + ' expiry=' + (fillExpiry || '(kept)'));
+        } else {
+          log(label + ' ' + r.id + ': still no dates found');
+        }
+      }
+      if (!rows.length) log(label + ': nothing missing dates');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('doc dates backfill failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -5964,6 +6000,13 @@ function findAllDates(text) {
   while ((m = rxMon.exec(text))) push(toIso(+m[3], MONTHS_RX[m[1].slice(0, 3).toLowerCase()], +m[2]), m.index);
   const rxMon2 = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})\b/gi;
   while ((m = rxMon2.exec(text))) push(toIso(+m[3], MONTHS_RX[m[2].slice(0, 3).toLowerCase()], +m[1]), m.index);
+  // Dash-separated month names: Indiana cab cards print the validity
+  // period as '01-JUN-2026 TO 31-MAY-2027' — the space-only patterns
+  // above missed those dates entirely (owner's cards, 2026-11-16).
+  const rxMon3 = /\b(\d{1,2})-(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*-(\d{4})\b/gi;
+  while ((m = rxMon3.exec(text))) push(toIso(+m[3], MONTHS_RX[m[2].slice(0, 3).toLowerCase()], +m[1]), m.index);
+  const rxMon4 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*-(\d{1,2})-(\d{4})\b/gi;
+  while ((m = rxMon4.exec(text))) push(toIso(+m[3], MONTHS_RX[m[1].slice(0, 3).toLowerCase()], +m[2]), m.index);
   return out.sort((a, b) => a.idx - b.idx);
 }
 function dateNearLabel(text, dates, labelRx) {
@@ -6377,7 +6420,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
