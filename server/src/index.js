@@ -4766,6 +4766,29 @@ async function fixCashflowReconciliation() {
   } catch (e) { console.error('cashflow recon fix failed', e); }
 }
 
+// One-time removal (2026-11-16): a second Outlook factoring import
+// (+$3,241.25, dated 2026-11-16) landed after the reconciliation
+// fix earlier the same evening — the same double-count pattern
+// (OTR schedule money imported from email while the bank feed
+// already carries it). Removed on the owner's standing instruction
+// from that fix. Exact-single-match guard.
+async function removeOutlookFactoring2() {
+  try {
+    const marker = 'cashflow-recon-fix2-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('cashflow recon fix2: ' + m);
+    const rows = db.prepare("SELECT * FROM cash_entries WHERE source = 'outlook' AND direction = 'in' AND category = 'Factoring payment' AND amountCents = 324125 AND date = '2026-11-16'").all();
+    if (rows.length === 1) {
+      db.prepare('DELETE FROM cash_entries WHERE id = ?').run(rows[0].id);
+      log('deleted Outlook factoring import id ' + rows[0].id + ' (+$3,241.25, 2026-11-16) — bank feed carries this money');
+    } else {
+      log('WARNING: expected exactly 1 Outlook factoring entry of $3,241.25 on 2026-11-16, found ' + rows.length + ' — skipped');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('cashflow recon fix2 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -6354,7 +6377,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
