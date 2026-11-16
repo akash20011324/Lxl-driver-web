@@ -342,10 +342,10 @@ body.rc-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .convo-row:hover { background: rgba(255, 255, 255, 0.05); }
 .convo-row.active { background: rgba(30, 64, 175, 0.28); border-color: rgba(77, 163, 255, 0.35); }
 .chat-avatar {
-  width: 36px; height: 36px; border-radius: 999px; background: var(--blue); border: 1.5px solid var(--gold);
+  width: 36px; height: 36px; border-radius: 999px; background: #1e40af; border: 2.5px solid #f2b705;
   color: #fff; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; flex: none;
 }
-.chat-avatar.lg { width: 44px; height: 44px; font-size: 17px; }
+.chat-avatar.lg { width: 44px; height: 44px; font-size: 17px; border-width: 3px; }
 .convo-mid { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .convo-name { font-weight: 700; font-size: 14px; }
 .convo-last { color: #8fa1ba; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
