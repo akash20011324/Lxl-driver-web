@@ -2853,7 +2853,7 @@ async function viewCashflow(main) {
   const bankCats = (dir, name) => {
     const opts = dir === 'in'
       ? ['Factoring payment', 'Broker payment', 'Other']
-      : ['Fuel (Pilot weekly)', 'Tolls', 'Parking', 'Maintenance', 'Repairs', 'Driver pay', 'Dispatch pay', 'Truck payment', 'Insurance', 'Office expenses', 'Other'];
+      : ['Fuel (Pilot weekly)', 'Tolls', 'Parking', 'Maintenance', 'Repairs', 'Driver pay', 'Dispatch pay', 'Truck payment', 'Trailer rental', 'Insurance', 'Office expenses', 'Other'];
     const sel = bankSuggest(name, dir);
     return opts.map((o) => '<option' + (o === sel ? ' selected' : '') + '>' + o + '</option>').join('');
   };
@@ -2899,7 +2899,7 @@ async function viewCashflow(main) {
     '<p class="small muted hidden" id="cfFromOutlookNote"></p>' +
     '<form id="cfEntryForm"><div class="form-grid">' +
     '<label>In / Out <select name="direction"><option value="out">Money out</option><option value="in">Money in</option></select></label>' +
-    '<label>Category <select name="category"><option>Fuel (Pilot weekly)</option><option>Tolls</option><option>Parking</option><option>Maintenance</option><option>Repairs</option><option>Driver pay</option><option>Dispatch pay</option><option>Truck payment</option><option>Insurance</option><option>Office expenses</option><option>Factoring payment</option><option>Broker payment</option><option>Other</option></select></label>' +
+    '<label>Category <select name="category"><option>Fuel (Pilot weekly)</option><option>Tolls</option><option>Parking</option><option>Maintenance</option><option>Repairs</option><option>Driver pay</option><option>Dispatch pay</option><option>Truck payment</option><option>Trailer rental</option><option>Insurance</option><option>Office expenses</option><option>Factoring payment</option><option>Broker payment</option><option>Other</option></select></label>' +
     '<label>Amount $ <input name="amount" type="number" min="0" step="0.01" required placeholder="0.00"></label>' +
     '<label>Date <input name="date" type="date" required></label>' +
     '<label>Truck <select name="truckId">' + truckOpts + '</select></label>' +
@@ -2912,7 +2912,7 @@ async function viewCashflow(main) {
     '<p class="small muted">Set once — they count automatically in every month\'s profit above. Don\'t add these by hand as entries too.</p>' +
     (fixedRows || '<p class="empty">No fixed payments yet.</p>') +
     '<form class="maint-add-form" id="cfFixedForm">' +
-    '<select name="category"><option>Truck payment</option><option>Insurance</option><option>Dispatch pay</option><option>Office expenses</option><option>Other</option></select> ' +
+    '<select name="category"><option>Truck payment</option><option>Trailer rental</option><option>Insurance</option><option>Dispatch pay</option><option>Office expenses</option><option>Other</option></select> ' +
     '<input name="amount" type="number" min="0" step="0.01" placeholder="Amount $ / month" required> ' +
     '<input name="note" placeholder="Note — e.g. Truck 1301"> ' +
     '<button class="btn-ghost btn-sm" type="submit">+ Add fixed payment</button></form>' +

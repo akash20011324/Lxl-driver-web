@@ -1755,6 +1755,8 @@ function suggestCashKind(subject, from) {
   if (/toll|e-zpass|ezpass|prepass|bestpass|pay by plate/.test(s)) return { direction: 'out', category: 'Tolls' };
   if (/parking|park/.test(s)) return { direction: 'out', category: 'Parking' };
   if (/factor|remittance|payment advice|funding|settlement/.test(s)) return { direction: 'in', category: 'Factoring payment' };
+  if (/us ?premium|premium finance/.test(s)) return { direction: 'out', category: 'Insurance' };
+  if (/garrett|gsf|trailer rental/.test(s)) return { direction: 'out', category: 'Trailer rental' };
   return { direction: 'out', category: 'Other' };
 }
 
@@ -1798,6 +1800,8 @@ function builtinBankCategory(name, direction, amountCents) {
   if (s.includes('PILOT') && amountCents >= 50000) return 'Fuel (Pilot weekly)';
   if (s.includes('PREPASS') || s.includes('EZPASS') || s.includes('E-ZPASS') || s.includes('TOLL')) return 'Tolls';
   if (s.includes('PARK')) return 'Parking';
+  if (s.includes('GARRETT')) return 'Trailer rental';
+  if (s.includes('USPREMIUMFINANCE') || s.includes('PREMIUM FINANCE')) return 'Insurance';
   if (s.includes('ZELLE') && (s.includes('AKASHDEEP') || s.includes('ARSH'))) return 'Driver pay';
   if (s.includes('WIRE TRANSFER FEE') || s.includes('SERVICE CHARGE') || s.includes('MONTHLY FEE') || s.includes('RINGCENTRAL')) return 'Office expenses';
   return null;
