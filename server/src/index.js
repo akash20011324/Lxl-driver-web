@@ -3575,6 +3575,63 @@ async function backfillRateConDetails() {
   }
 }
 
+// One-time verification (owner, 2026-11-16: "open the rc and verify
+// the states"): re-read every stored rate confirmation, pull the
+// route from its pickup/delivery sections, and correct the stored
+// pickup/delivery states — plus the route cities on loads the import
+// created from those RCs. Runs once; the marker row in one_off_jobs
+// keeps later boots from redoing it.
+async function verifyRateConStates() {
+  try {
+    db.prepare('CREATE TABLE IF NOT EXISTS one_off_jobs (name TEXT PRIMARY KEY, doneAt TEXT)').run();
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get('rc-state-verify-2026-11-16')) return;
+    const rows = db.prepare(
+      `SELECT r.id, r.reference, r.pickupState, r.deliveryState, r.rateCents, r.loadId, f.storedFilename
+       FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId WHERE f.storedFilename IS NOT NULL`,
+    ).all();
+    let corrected = 0;
+    let loadsFixed = 0;
+    for (const row of rows) {
+      try {
+        const buf = fs.readFileSync(path.join(UPLOADS_DIR, row.storedFilename));
+        const text = await extractFileText(buf);
+        if (row.rateCents != null && row.rateCents > 2000000 && text) {
+          const amt = (row.rateCents / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+          const at = text.indexOf(amt);
+          console.log(`rc verify: big rate ${row.reference} $${amt} context: ${at >= 0 ? JSON.stringify(text.slice(Math.max(0, at - 70), at + 30)) : '(amount string not found in text)'}`);
+        }
+        const route = extractRcRouteAnchored(text || '');
+        if (!route) continue;
+        const [pu, dl] = route;
+        if (pu.state !== row.pickupState || dl.state !== row.deliveryState) {
+          db.prepare('UPDATE rate_confirmations SET pickupState = ?, deliveryState = ? WHERE id = ?').run(pu.state, dl.state, row.id);
+          corrected += 1;
+          console.log(`rc verify: ${row.reference} states ${row.pickupState}->${row.deliveryState} corrected to ${pu.state}->${dl.state} (${pu.city} -> ${dl.city})`);
+        }
+        if (row.loadId) {
+          const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(row.loadId);
+          if (load && load.notes === 'Imported from a rate confirmation email') {
+            const np = `${pu.city}, ${pu.state}${pu.zip ? ' ' + pu.zip : ''}`;
+            const nd = `${dl.city}, ${dl.state}${dl.zip ? ' ' + dl.zip : ''}`;
+            if (np !== load.pickupLocation || nd !== load.deliveryLocation) {
+              db.prepare('UPDATE loads SET pickupLocation = ?, deliveryLocation = ?, pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE id = ?')
+                .run(np, nd, load.id);
+              loadsFixed += 1;
+              console.log(`rc verify: load ${load.reference} route corrected to ${np} -> ${nd}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`rc verify failed for RC ${row.id}`, e);
+      }
+    }
+    db.prepare('INSERT OR REPLACE INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run('rc-state-verify-2026-11-16', now());
+    console.log(`rc verify: checked ${rows.length} rate cons, corrected ${corrected} state pairs, ${loadsFixed} load routes`);
+  } catch (e) {
+    console.error('rc verify failed', e);
+  }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -3766,34 +3823,74 @@ function extractRcDates(text) {
 }
 const US_STATE_CODES = new Set(['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY']);
 const US_STATE_NAMES = { ALABAMA: 'AL', ALASKA: 'AK', ARIZONA: 'AZ', ARKANSAS: 'AR', CALIFORNIA: 'CA', COLORADO: 'CO', CONNECTICUT: 'CT', DELAWARE: 'DE', FLORIDA: 'FL', GEORGIA: 'GA', HAWAII: 'HI', IDAHO: 'ID', ILLINOIS: 'IL', INDIANA: 'IN', IOWA: 'IA', KANSAS: 'KS', KENTUCKY: 'KY', LOUISIANA: 'LA', MAINE: 'ME', MARYLAND: 'MD', MASSACHUSETTS: 'MA', MICHIGAN: 'MI', MINNESOTA: 'MN', MISSISSIPPI: 'MS', MISSOURI: 'MO', MONTANA: 'MT', NEBRASKA: 'NE', NEVADA: 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', OHIO: 'OH', OKLAHOMA: 'OK', OREGON: 'OR', PENNSYLVANIA: 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC', 'SOUTH DAKOTA': 'SD', TENNESSEE: 'TN', TEXAS: 'TX', UTAH: 'UT', VERMONT: 'VT', VIRGINIA: 'VA', WASHINGTON: 'WA', 'WEST VIRGINIA': 'WV', WISCONSIN: 'WI', WYOMING: 'WY', 'DISTRICT OF COLUMBIA': 'DC' };
-function extractRcPlaces(text, subject) {
-  // Brokers write addresses many ways: "City, ST 12345", "City, ST" with no
-  // ZIP, and "City, Full State (Name)". Collect every form, in document
-  // order; if the document itself yields fewer than 2 places, also scan the
-  // email subject (brokers often put the route there).
+function scanRcPlaces(t, base) {
+  // Every "City, ST (ZIP)" form in one text, in document order.
+  // Brokers write addresses many ways: "City, ST 12345", "City, ST"
+  // with no ZIP, and "City, Full State Name".
   const found = [];
   const add = (city, state, zip, idx) => {
     const c = cleanCityName(city);
     if (!c || !US_STATE_CODES.has(state)) return;
     if (!found.some((p) => p.city === c && p.state === state)) found.push({ city: c, state, zip: zip || '', idx });
   };
+  if (!t) return found;
+  let m;
   const nameAlt = Object.keys(US_STATE_NAMES).join('|');
-  const scan = (t, base) => {
-    if (!t) return;
-    let m;
-    const reZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
-    while ((m = reZip.exec(t))) add(m[1], m[2], m[3], base + m.index);
-    const reNameZip = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\s+(\\d{5})', 'gi');
-    while ((m = reNameZip.exec(t))) add(m[1], US_STATE_NAMES[m[2].toUpperCase()], m[3], base + m.index);
-    const reName = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\b', 'gi');
-    while ((m = reName.exec(t))) add(m[1], US_STATE_NAMES[m[2].toUpperCase()], '', base + m.index);
-    const reNoZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\b(?!\s*\d)/g;
-    while ((m = reNoZip.exec(t))) add(m[1], m[2], '', base + m.index);
-  };
-  scan(text || '', 0);
-  if (found.length < 2) scan(subject || '', 1000000000);
+  const reZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
+  while ((m = reZip.exec(t))) add(m[1], m[2], m[3], base + m.index);
+  const reNameZip = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\s+(\\d{5})', 'gi');
+  while ((m = reNameZip.exec(t))) add(m[1], US_STATE_NAMES[m[2].toUpperCase()], m[3], base + m.index);
+  const reName = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\b', 'gi');
+  while ((m = reName.exec(t))) add(m[1], US_STATE_NAMES[m[2].toUpperCase()], '', base + m.index);
+  const reNoZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\b(?!\s*\d)/g;
+  while ((m = reNoZip.exec(t))) add(m[1], m[2], '', base + m.index);
   found.sort((a, b) => a.idx - b.idx);
-  return found.map(({ city, state, zip }) => ({ city, state, zip }));
+  return found;
+}
+
+const RC_PICKUP_LABEL = /\b(PICK[\s-]?UP|ORIGIN|SHIPPER|SHIP[\s-]?FROM|LOAD(?:ING)?\s+(?:AT|FROM))\b/gi;
+const RC_DELIVERY_LABEL = /\b(DELIVER(?:Y|ING)?|DESTINATION|CONSIGNEE|RECEIVER|RECEIVING|UNLOAD(?:ING)?|DROP[\s-]?OFF)\b/gi;
+
+function extractRcRouteAnchored(text) {
+  // The route lives in the document's pickup and delivery sections.
+  // Letterhead, broker-HQ and carrier addresses appear earlier in the
+  // text, so a plain first-two-addresses read keeps landing on those
+  // (owner, 2026-11-16: "pickup and delivery states are wrong — open
+  // the rc and verify the states"). Anchor on the section labels:
+  // first address after a pickup label (and before the delivery
+  // label), first address after the delivery label.
+  if (!text) return null;
+  const flat = String(text).replace(/\s+/g, ' ');
+  const places = scanRcPlaces(flat, 0);
+  if (places.length < 2) return null;
+  const anchors = (re) => { const out = []; let m; re.lastIndex = 0; while ((m = re.exec(flat))) out.push(m.index); return out; };
+  const pus = anchors(RC_PICKUP_LABEL);
+  const dls = anchors(RC_DELIVERY_LABEL);
+  for (const p of pus) {
+    for (const d of dls) {
+      if (d <= p) continue;
+      const pu = places.find((x) => x.idx > p && x.idx < d);
+      const dl = places.find((x) => x.idx > d && x.idx < d + 1500);
+      if (pu && dl) return [pu, dl].map(({ city, state, zip }) => ({ city, state, zip }));
+    }
+  }
+  return null;
+}
+
+function extractRcPlaces(text, subject) {
+  // Anchored route first (the pickup/delivery sections); if the
+  // document has no usable section labels, fall back to every address
+  // in document order, then the email subject (brokers often put the
+  // route there).
+  const anchored = extractRcRouteAnchored(text || '');
+  if (anchored) return anchored;
+  let found = scanRcPlaces(text || '', 0);
+  if (found.length < 2) found = found.concat(scanRcPlaces(subject || '', 1000000000));
+  found.sort((a, b) => a.idx - b.idx);
+  const seen = new Set();
+  return found
+    .filter((p) => { const k = p.city + '|' + p.state; if (seen.has(k)) return false; seen.add(k); return true; })
+    .map(({ city, state, zip }) => ({ city, state, zip }));
 }
 function extractRcLoadFields(text, subject) {
   const all = `${subject || ''}\n${text || ''}`;
@@ -4897,6 +4994,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
+  void verifyRateConStates();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
