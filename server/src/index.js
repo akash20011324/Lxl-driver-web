@@ -2965,6 +2965,24 @@ async function geocodeNominatimAddress(q) {
   }
 }
 
+async function geocodeCensus(address) {
+  try {
+    const r = await fetch(
+      'https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?benchmark=Public_AR_Current&format=json&address=' + encodeURIComponent(address),
+    );
+    if (!r.ok) return null;
+    const j = await r.json();
+    const m = j && j.result && j.result.addressMatches && j.result.addressMatches[0];
+    if (!m || !m.coordinates) return null;
+    const lat = Number(m.coordinates.y);
+    const lng = Number(m.coordinates.x);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  } catch {
+    return null;
+  }
+}
+
 async function geocodeAddress(address, warehouse) {
   if (!address) return null;
   // Google first: rooftop-accurate for street addresses. Nominatim
@@ -2977,8 +2995,17 @@ async function geocodeAddress(address, warehouse) {
   }
   const byGoogle = await geocodeGoogleForward(address);
   if (byGoogle) return byGoogle;
+  // US Census geocoder: its TIGER street-segment interpolation is
+  // far more accurate for US street addresses than Nominatim (which
+  // put the Lansdale pin a mile from the building, 2026-11-16).
+  const byCensus = await geocodeCensus(address);
+  if (byCensus) return byCensus;
   const direct = await geocodeNominatimAddress(address);
   if (direct) return direct;
+  // A street-level point still beats the city center as a last
+  // resort before the city fallback below.
+  const street = await geocodeQuery(address);
+  if (street) return street;
   // Street-level misses are common for rural/industrial addresses —
   // fall back to the city/state/ZIP segment; city-level coordinates
   // are accurate enough for route distances.
