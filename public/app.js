@@ -1892,6 +1892,7 @@ async function viewDispatch(main) {
         '<form id="chatForm" class="chat-composer">' +
           '<button class="chat-attach-btn" id="chatAttachBtn" type="button" title="Attach a picture or file">📎</button>' +
           '<input type="file" id="chatFile" hidden>' +
+          '<input type="file" id="chatWpFile" accept="image/*" hidden>' +
           '<input id="chatBody" placeholder="Type a message to the driver…" autocomplete="off">' +
           '<button class="btn" type="submit">Send</button>' +
         '</form>' +
@@ -1953,7 +1954,18 @@ async function viewDispatch(main) {
       '<span class="chat-head-texts"><span class="chat-head-name">' + esc(c.driver.name) + '</span>' +
       '<span class="chat-head-sub">' + esc(statusLine(c)) + '</span></span>' +
       '<span class="chat-head-unit">' + (c.truck ? 'Truck ' + esc(c.truck.unitNumber) : '') +
-      (c.trailer ? ' · Trailer ' + esc(c.trailer.unitNumber) : '') + '</span>';
+      (c.trailer ? ' · Trailer ' + esc(c.trailer.unitNumber) : '') + '</span>' +
+      '<span class="chat-head-wp"><button class="chat-wp-btn" id="chatWpBtn" type="button" title="Change chat wallpaper">🖼 Wallpaper</button>' +
+      (state.chatWpServerUrl ? '<button class="chat-wp-btn" id="chatWpReset" type="button" title="Remove wallpaper">✕</button>' : '') + '</span>';
+    const wpBtn = document.getElementById('chatWpBtn');
+    if (wpBtn) wpBtn.addEventListener('click', () => document.getElementById('chatWpFile').click());
+    const wpReset = document.getElementById('chatWpReset');
+    if (wpReset) wpReset.addEventListener('click', async () => {
+      try { await api('/api/admin/chat-wallpaper', { method: 'DELETE' }); } catch { /* ignore */ }
+      state.chatWpServerUrl = null;
+      applyWallpaper();
+      renderHead();
+    });
   };
 
   const renderContext = () => {
@@ -2016,8 +2028,11 @@ async function viewDispatch(main) {
         }
       }
       if (m.body) inner += '<span>' + esc(m.body) + '</span>';
+      const status = mine
+        ? ' · <span class="tick' + (m.read ? ' seen' : '') + '">' + (m.read ? '✓✓ Seen' : m.delivered ? '✓ Delivered' : '✓ Sent') + '</span>'
+        : '';
       return '<div class="chat-row' + (mine ? ' mine' : '') + '"><div class="chat-bubble' + (mine ? ' mine' : '') + '">' + inner + '</div>' +
-        '<div class="chat-meta' + (mine ? ' mine' : '') + '">' + esc(mine ? (m.senderName || 'Dispatch') : (c ? c.driver.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + '</div></div>';
+        '<div class="chat-meta' + (mine ? ' mine' : '') + '">' + esc(mine ? (m.senderName || 'Dispatch') : (c ? c.driver.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + status + '</div></div>';
     }).join('') : '<p class="empty">No messages yet.</p>';
     thread.querySelectorAll('[data-att-open]').forEach(el => el.addEventListener('click', () => {
       const m = list.find(x => x.attachment && x.attachment.fileId === parseInt(el.dataset.attOpen, 10));
@@ -2025,6 +2040,24 @@ async function viewDispatch(main) {
     }));
     hydrateImages(thread);
     if (nearBottom) thread.scrollTop = thread.scrollHeight;
+  };
+
+  const applyWallpaper = async () => {
+    const msgs = document.getElementById('chatMsgs');
+    if (!msgs) return;
+    const url = state.chatWpServerUrl;
+    if (!url) { msgs.style.backgroundImage = ''; return; }
+    try {
+      if (!state.attUrlCache) state.attUrlCache = new Map();
+      if (!state.attUrlCache.has(url)) {
+        const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
+        if (!res.ok) return;
+        state.attUrlCache.set(url, URL.createObjectURL(await res.blob()));
+      }
+      msgs.style.backgroundImage = 'linear-gradient(rgba(4, 9, 18, 0.62), rgba(4, 9, 18, 0.62)), url("' + state.attUrlCache.get(url) + '")';
+      msgs.style.backgroundSize = 'cover';
+      msgs.style.backgroundPosition = 'center';
+    } catch { /* wallpaper is cosmetic */ }
   };
 
   const loadThread = async () => {
@@ -2066,6 +2099,21 @@ async function viewDispatch(main) {
     stagedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
     renderChip();
   });
+  const wpInput = document.getElementById('chatWpFile');
+  wpInput.addEventListener('change', async () => {
+    const f = wpInput.files && wpInput.files[0];
+    if (!f) return;
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const out = await api('/api/admin/chat-wallpaper', { method: 'POST', body: fd });
+      state.chatWpServerUrl = out && out.url ? out.url : null;
+      await applyWallpaper();
+      renderHead();
+      toast('Chat wallpaper set.', 'ok');
+    } catch (err) { showError(err); }
+    wpInput.value = '';
+  });
 
   document.getElementById('chatForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -2090,8 +2138,13 @@ async function viewDispatch(main) {
     } catch (err) { showError(err); }
   });
 
+  try {
+    const wp = await api('/api/admin/chat-wallpaper');
+    state.chatWpServerUrl = wp && wp.url ? wp.url : null;
+  } catch { state.chatWpServerUrl = null; }
   await refreshConvos();
   await loadThread();
+  applyWallpaper();
   const thread = document.getElementById('chatMsgs');
   if (thread) thread.scrollTop = thread.scrollHeight;
   pollAdminNotifications();
@@ -2942,34 +2995,158 @@ function pastLoadHtml(l) {
 
 /* ---------- Driver Dispatch ---------- */
 async function viewDriverDispatch(main) {
-  main.innerHTML = '<h1>Dispatch</h1><div class="card">' +
+  main.innerHTML = '<h1>Chat</h1><div class="card">' +
+    '<div class="flex-between"><span class="muted small">Your chat with dispatch</span>' +
+    '<span><button class="chat-wp-btn" id="drvWpBtn" type="button">🖼 Wallpaper</button>' +
+    '<button class="chat-wp-btn" id="drvWpReset" type="button" hidden>✕ Remove</button></span></div>' +
+    '<input type="file" id="drvWpFile" accept="image/*" hidden>' +
     '<div class="msg-list" id="driverThread"><p class="muted">Loading…</p></div>' +
-    '<form id="driverSendForm" class="inline-form"><div class="field"><label>Message</label><input id="driverBody" required placeholder="Type a message to dispatch…"></div>' +
+    '<div class="chat-attach-chip" id="drvAttachChip" hidden></div>' +
+    '<form id="driverSendForm" class="chat-composer">' +
+    '<button class="chat-attach-btn" id="drvAttachBtn" type="button" title="Attach a picture or file">📎</button>' +
+    '<input type="file" id="drvFile" hidden>' +
+    '<input id="driverBody" placeholder="Type a message to dispatch…" autocomplete="off">' +
     '<button class="btn" type="submit">Send</button></form>' +
     '<p class="muted small">Thread refreshes every 15 seconds.</p></div>';
+
+  let stagedFile = null;
+  const threadEl = () => document.getElementById('driverThread');
+
+  const hydrate = (root) => {
+    root.querySelectorAll('img[data-att-img]').forEach(async (img) => {
+      const url = img.dataset.attImg;
+      if (!url || img.dataset.loaded) return;
+      img.dataset.loaded = '1';
+      try {
+        if (!state.attUrlCache) state.attUrlCache = new Map();
+        if (!state.attUrlCache.has(url)) {
+          const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
+          if (!res.ok) return;
+          state.attUrlCache.set(url, URL.createObjectURL(await res.blob()));
+        }
+        img.src = state.attUrlCache.get(url);
+      } catch { /* leave the placeholder */ }
+    });
+  };
+
+  const applyWallpaper = async () => {
+    const el = threadEl();
+    if (!el) return;
+    const url = state.drvWpServerUrl;
+    if (!url) { el.style.backgroundImage = ''; return; }
+    try {
+      if (!state.attUrlCache) state.attUrlCache = new Map();
+      if (!state.attUrlCache.has(url)) {
+        const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
+        if (!res.ok) return;
+        state.attUrlCache.set(url, URL.createObjectURL(await res.blob()));
+      }
+      el.style.backgroundImage = 'linear-gradient(rgba(4, 9, 18, 0.62), rgba(4, 9, 18, 0.62)), url("' + state.attUrlCache.get(url) + '")';
+      el.style.backgroundSize = 'cover';
+      el.style.backgroundPosition = 'center';
+    } catch { /* wallpaper is cosmetic */ }
+  };
+
   const loadThread = async () => {
     if (state.driverView !== 'dispatch') return;
     try {
       const msgs = await api('/api/driver/messages');
       const list = Array.isArray(msgs) ? msgs : [];
-      const thread = document.getElementById('driverThread');
-      if (thread) thread.innerHTML = list.length ? list.map(m =>
-        '<div class="msg' + (m.sender === 'driver' ? ' mine' : '') + '">' + esc(m.body) +
-        '<div class="meta">' + esc(m.sender === 'driver' ? 'You' : (m.senderName || 'Dispatch')) + ' · ' + fmtDate(m.createdAt) + '</div></div>').join('')
-        : '<p class="empty">No messages yet. Say hello to dispatch.</p>';
+      const thread = threadEl();
+      if (!thread) return;
+      thread.innerHTML = list.length ? list.map(m => {
+        const mine = m.sender === 'driver';
+        let inner = '';
+        if (m.attachment) {
+          if (m.attachment.mimeType && m.attachment.mimeType.startsWith('image/')) {
+            inner += '<img class="chat-img" data-att-img="' + esc(m.attachment.url) + '" data-att-open="' + m.attachment.fileId + '" alt="' + esc(m.attachment.filename || 'Photo') + '">';
+          } else {
+            inner += '<button class="chat-file" type="button" data-att-open="' + m.attachment.fileId + '">📄 ' + esc(m.attachment.filename || 'File') + '</button>';
+          }
+        }
+        inner += esc(m.body || '');
+        const status = mine ? ' · ' + (m.read ? '✓✓ Seen' : '✓ Sent') : '';
+        return '<div class="msg' + (mine ? ' mine' : '') + '">' + inner +
+          '<div class="meta">' + esc(mine ? 'You' : (m.senderName || 'Dispatch')) + ' · ' + fmtDate(m.createdAt) + status + '</div></div>';
+      }).join('') : '<p class="empty">No messages yet. Say hello to dispatch.</p>';
+      thread.querySelectorAll('[data-att-open]').forEach(el => el.addEventListener('click', () => {
+        const m = list.find(x => x.attachment && x.attachment.fileId === parseInt(el.dataset.attOpen, 10));
+        if (m) downloadFile(m.attachment.url, m.attachment.filename, true, m.attachment.mimeType);
+      }));
+      hydrate(thread);
     } catch (e) { /* keep old thread on transient failure */ }
   };
+
+  const chip = document.getElementById('drvAttachChip');
+  const fileInput = document.getElementById('drvFile');
+  const renderChip = () => {
+    if (!stagedFile) { chip.hidden = true; chip.innerHTML = ''; return; }
+    chip.hidden = false;
+    chip.innerHTML = '<span>📎 ' + esc(stagedFile.name) + '</span><button type="button" id="drvAttachClear" title="Remove attachment">✕</button>';
+    document.getElementById('drvAttachClear').addEventListener('click', () => {
+      stagedFile = null;
+      fileInput.value = '';
+      renderChip();
+    });
+  };
+  document.getElementById('drvAttachBtn').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    stagedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    renderChip();
+  });
+
   document.getElementById('driverSendForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const body = document.getElementById('driverBody').value.trim();
-    if (!body) return;
+    const bodyEl = document.getElementById('driverBody');
+    const body = bodyEl.value.trim();
+    if (!body && !stagedFile) return;
     try {
-      await api('/api/driver/messages', { method: 'POST', body: JSON.stringify({ body }) });
-      document.getElementById('driverBody').value = '';
+      if (stagedFile) {
+        const fd = new FormData();
+        fd.append('file', stagedFile);
+        if (body) fd.append('body', body);
+        await api('/api/driver/messages/attachment', { method: 'POST', body: fd });
+        stagedFile = null;
+        fileInput.value = '';
+        renderChip();
+      } else {
+        await api('/api/driver/messages', { method: 'POST', body: JSON.stringify({ body }) });
+      }
+      bodyEl.value = '';
       loadThread();
     } catch (err) { showError(err); }
   });
+
+  document.getElementById('drvWpBtn').addEventListener('click', () => document.getElementById('drvWpFile').click());
+  document.getElementById('drvWpFile').addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const out = await api('/api/driver/chat-wallpaper', { method: 'POST', body: fd });
+      state.drvWpServerUrl = out && out.url ? out.url : null;
+      document.getElementById('drvWpReset').hidden = !state.drvWpServerUrl;
+      await applyWallpaper();
+      toast('Chat wallpaper set.', 'ok');
+    } catch (err) { showError(err); }
+    e.target.value = '';
+  });
+  document.getElementById('drvWpReset').addEventListener('click', async () => {
+    try { await api('/api/driver/chat-wallpaper', { method: 'DELETE' }); } catch { /* ignore */ }
+    state.drvWpServerUrl = null;
+    document.getElementById('drvWpReset').hidden = true;
+    applyWallpaper();
+  });
+
+  try {
+    const wp = await api('/api/driver/chat-wallpaper');
+    state.drvWpServerUrl = wp && wp.url ? wp.url : null;
+  } catch { state.drvWpServerUrl = null; }
+  const resetBtn = document.getElementById('drvWpReset');
+  if (resetBtn) resetBtn.hidden = !state.drvWpServerUrl;
   await loadThread();
+  applyWallpaper();
   addTimer(loadThread, 15000);
 }
 

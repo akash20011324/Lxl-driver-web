@@ -210,6 +210,7 @@ function serializeMessage(m) {
     body: m.body,
     createdAt: m.createdAt,
     read: !!m.read,
+    delivered: !!m.deliveredAt,
     attachment,
   };
 }
@@ -238,6 +239,19 @@ function serializeAdminNotification(n) {
     createdAt: n.createdAt,
     read: !!n.read,
   };
+}
+
+// Per-user chat wallpaper (WhatsApp-style): each admin and driver can
+// set their own chat background picture.
+function chatWallpaperUrlFor(user) {
+  return user && user.chatWallpaperFileId ? `/files/${user.chatWallpaperFileId}` : null;
+}
+
+function setChatWallpaper(req, res) {
+  if (!req.file) return err(res, 400, 'file is required');
+  const fileId = insertFileRow(req.file, 'chat_wallpaper', null, req.user.id);
+  db.prepare('UPDATE users SET chatWallpaperFileId = ? WHERE id = ?').run(fileId, req.user.id);
+  res.json({ url: `/files/${fileId}` });
 }
 
 function serializeEquipmentDoc(d) {
@@ -678,6 +692,9 @@ driver.post('/requests', (req, res) => {
 });
 
 driver.get('/messages', (req, res) => {
+  // Fetching the thread means the messages reached this device
+  // (delivered) and are now on screen (read).
+  db.prepare("UPDATE messages SET deliveredAt = ? WHERE driverId = ? AND sender = 'dispatch' AND deliveredAt IS NULL").run(now(), req.user.id);
   db.prepare("UPDATE messages SET read = 1 WHERE driverId = ? AND sender = 'dispatch'").run(req.user.id);
   const rows = db.prepare('SELECT * FROM messages WHERE driverId = ? ORDER BY id ASC').all(req.user.id);
   res.json(rows.map(serializeMessage));
@@ -706,6 +723,17 @@ driver.post('/messages/attachment', upload.single('file'), (req, res) => {
   const isImage = String(req.file.mimetype || '').startsWith('image/');
   notifyAdmins('message', `New message from ${req.user.name}`, caption || (isImage ? '📎 Photo' : '📎 ' + (req.file.originalname || 'File')), 'dispatch', req.user.id);
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
+});
+
+driver.get('/chat-wallpaper', (req, res) => {
+  res.json({ url: chatWallpaperUrlFor(req.user) });
+});
+
+driver.post('/chat-wallpaper', upload.single('file'), setChatWallpaper);
+
+driver.delete('/chat-wallpaper', (req, res) => {
+  db.prepare('UPDATE users SET chatWallpaperFileId = NULL WHERE id = ?').run(req.user.id);
+  res.json({ url: null });
 });
 
 driver.get('/documents', (req, res) => {
@@ -879,6 +907,9 @@ driver.post('/location', (req, res) => {
   const head = typeof heading === 'number' && Number.isFinite(heading) && heading >= 0 && heading < 360 ? heading : null;
   db.prepare('INSERT INTO locations (driverId, lat, lng, speedMph, heading, updatedAt) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(driverId) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, speedMph = excluded.speedMph, heading = excluded.heading, updatedAt = excluded.updatedAt')
     .run(req.user.id, lat, lng, speed, head, now());
+  // The app is alive on the driver's phone and checking in — any
+  // dispatch messages waiting count as delivered to the device.
+  db.prepare("UPDATE messages SET deliveredAt = ? WHERE driverId = ? AND sender = 'dispatch' AND deliveredAt IS NULL").run(now(), req.user.id);
   res.json({ ok: true });
 });
 
@@ -1906,6 +1937,17 @@ admin.post('/messages/:driverId/attachment', upload.single('file'), (req, res) =
     .run(driverUser.id, req.user.name, caption, now(), fileId).lastInsertRowid;
   notifyDriver(db, driverUser.id, 'dispatch_message', `Message from ${req.user.name}`, caption || '📎 Attachment').catch(() => {});
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
+});
+
+admin.get('/chat-wallpaper', (req, res) => {
+  res.json({ url: chatWallpaperUrlFor(req.user) });
+});
+
+admin.post('/chat-wallpaper', upload.single('file'), setChatWallpaper);
+
+admin.delete('/chat-wallpaper', (req, res) => {
+  db.prepare('UPDATE users SET chatWallpaperFileId = NULL WHERE id = ?').run(req.user.id);
+  res.json({ url: null });
 });
 
 // Bell feed for the admin top bar: latest events + unread counts. The

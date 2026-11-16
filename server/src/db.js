@@ -271,6 +271,11 @@ export function openDb(dataDir) {
   if (!columns.some((c) => c.name === 'emailSignatureHtml')) {
     db.exec('ALTER TABLE users ADD COLUMN emailSignatureHtml TEXT');
   }
+  // Per-user chat wallpaper (WhatsApp-style): each admin and driver can
+  // set their own chat background picture; stored as a files row.
+  if (!columns.some((c) => c.name === 'chatWallpaperFileId')) {
+    db.exec('ALTER TABLE users ADD COLUMN chatWallpaperFileId INTEGER REFERENCES files(id)');
+  }
   // Migrate databases created before live speed: add speed (mph) and
   // heading (degrees) to the stored driver location (fresh databases get
   // them from the schema above).
@@ -286,6 +291,11 @@ export function openDb(dataDir) {
   const msgFileColumns = db.prepare('PRAGMA table_info(messages)').all();
   if (!msgFileColumns.some((c) => c.name === 'fileId')) {
     db.exec('ALTER TABLE messages ADD COLUMN fileId INTEGER REFERENCES files(id)');
+  }
+  // Delivered receipts: set when the driver's app next checks in
+  // (location post or message fetch) after a dispatch message was sent.
+  if (!msgFileColumns.some((c) => c.name === 'deliveredAt')) {
+    db.exec('ALTER TABLE messages ADD COLUMN deliveredAt TEXT');
   }
   // Migrate databases created before TRC odometer readings: the latest
   // Pickup coordinates per load (fresh databases get them from the
