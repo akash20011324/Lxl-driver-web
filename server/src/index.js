@@ -4091,6 +4091,54 @@ async function adjudicateRateCons() {
   } catch (e) { console.error('rc adjudication failed', e); }
 }
 
+// Adjudication round 2 (2026-11-16): the remaining documents from the
+// manual pass were read — more letterhead routes, two totals that
+// include accessorials, and two loads whose documents DO identify
+// the driver (3318 names Arsh / truck 1302; 130113554 prints Akash's
+// phone as the driver phone).
+async function adjudicateRateCons2() {
+  try {
+    const marker = 'rc-adjudication2-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication2: ' + m);
+    const driverByName = (frag) => db.prepare("SELECT id FROM users WHERE role = 'driver' AND name LIKE ? ORDER BY id LIMIT 1").get('%' + frag + '%');
+    const akash = driverByName('akash');
+    const arsh = driverByName('arsh');
+    const upd = (sql, params, msg) => { const r = db.prepare(sql).run(...params); if (r.changes && msg) log(msg); };
+    // Route / broker / date corrections read off the documents.
+    upd("UPDATE rate_confirmations SET deliveryState = 'PA' WHERE reference = 'LXL-682545'", [], 'LXL-682545 delivery state GA->PA corrected to PA (Greencastle, document)');
+    upd("UPDATE rate_confirmations SET broker = 'C.H. Robinson' WHERE reference = 'LXL-569202874'", [], 'LXL-569202874 broker set to C.H. Robinson (O&W is the receiver)');
+    upd("UPDATE rate_confirmations SET broker = 'PTG Logistics LLC' WHERE reference = 'LXL-9841352'", [], 'LXL-9841352 broker set to PTG Logistics LLC');
+    upd("UPDATE rate_confirmations SET deliveryState = 'NJ', pickupDate = '2026-08-03', broker = 'SPI Logistics' WHERE reference = 'SPT-691666'", [], 'SPT-691666 set to TX -> NJ, pickup 2026-08-03, SPI Logistics (document)');
+    upd("UPDATE rate_confirmations SET broker = 'SPI Logistics' WHERE reference = 'SPT-724956'", [], 'SPT-724956 broker set to SPI Logistics');
+    upd("UPDATE rate_confirmations SET broker = 'DeGroot Logistics Inc', pickupDate = '2026-07-06', deliveryDate = '2026-07-07' WHERE reference = 'LXL-183569'", [], 'LXL-183569 broker/dates set from its document');
+    upd("UPDATE rate_confirmations SET pickupState = 'CA', pickupDate = '2026-06-05' WHERE reference = 'LXL-2991353'", [], 'LXL-2991353 pickup set to CA, 2026-06-05 (document)');
+    // 3318's document total is $1,650 (line haul $1,500 + $150 GPS
+    // fee); the row carried only the line haul.
+    upd('UPDATE rate_confirmations SET rateCents = 165000 WHERE reference = ?', ['LXL-3318'], 'LXL-3318 rate set to $1,650.00 (document total)');
+    // Loads for the two documents that identify their driver.
+    const settleFor = (ref, drv, pu, dl, puDate, dlDate) => {
+      if (!drv) { log(ref + ': driver row not found — load not created'); return; }
+      let load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(ref);
+      if (!load) {
+        const puAt = puDate + 'T09:00:00';
+        const dlAt = dlDate + 'T17:00:00';
+        const info = db.prepare("INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, 'America/Indiana/Indianapolis', ?, ?, 'America/Indiana/Indianapolis', 'Imported from a rate confirmation email', 'completed', ?, ?)").run(ref, drv.id, pu, puAt, dl, dlAt, dlAt, new Date().toISOString());
+        load = db.prepare('SELECT * FROM loads WHERE id = ?').get(info.lastInsertRowid);
+        log(ref + ': created completed load');
+      }
+      db.prepare('UPDATE loads SET pickupLocation = ?, deliveryLocation = ?, pickupAt = ?, deliveryAt = ?, completedAt = ?, driverId = ?, pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE id = ?')
+        .run(pu, dl, puDate + 'T09:00:00', dlDate + 'T17:00:00', dlDate + 'T17:00:00', drv.id, load.id);
+      db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE reference = ?').run(load.id, ref);
+      log(ref + ': load settled to ' + pu + ' -> ' + dl + ', ' + puDate + ' -> ' + dlDate);
+    };
+    settleFor('LXL-3318', arsh, 'Martinsburg, WV', 'Atlanta, GA', '2026-10-29', '2026-10-30');
+    settleFor('LXL-130113554', akash, 'Fort Wayne, IN 46804', 'Colton, CA 92324', '2026-07-08', '2026-07-10');
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication2 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -5673,7 +5721,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
