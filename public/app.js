@@ -1243,6 +1243,13 @@ function bindUnitCards(main, type) {
 
 /* ---------- Loads ---------- */
 /* ISO -> "YYYY-MM-DDTHH:mm" in local time, for datetime-local inputs. */
+/* The browser's IANA timezone, sent with load pickup/delivery times so
+   the server stores them against the place they were entered for. */
+function browserTimezone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Indiana/Indianapolis'; }
+  catch { return 'America/Indiana/Indianapolis'; }
+}
+
 function toLocalInput(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -1356,10 +1363,10 @@ async function viewLoads(main) {
     };
     try {
       if (state.editingLoadId) {
-        await api('/api/admin/loads/' + state.editingLoadId + '/edit', { method: 'POST', body });
+        await api('/api/admin/loads/' + state.editingLoadId + '/edit', { method: 'POST', body: JSON.stringify(body) });
         toast('Load updated.', 'ok');
       } else {
-        await api('/api/admin/loads', { method: 'POST', body });
+        await api('/api/admin/loads', { method: 'POST', body: JSON.stringify(body) });
         toast('Load assigned.', 'ok');
       }
       state.editingLoadId = null;
@@ -1412,14 +1419,14 @@ async function viewLoads(main) {
   main.querySelectorAll('[data-reopen-load]').forEach((b) => b.addEventListener('click', async () => {
     if (!confirm('Reopen this load? It becomes active again for the driver.')) return;
     try {
-      await api('/api/admin/loads/' + b.dataset.reopenLoad + '/status', { method: 'POST', body: { status: 'active' } });
+      await api('/api/admin/loads/' + b.dataset.reopenLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'active' }) });
       toast('Load reopened.', 'ok');
       renderAdminView('loads');
     } catch (err) { showError(err); }
   }));
   main.querySelectorAll('[data-reactivate-load]').forEach((b) => b.addEventListener('click', async () => {
     try {
-      await api('/api/admin/loads/' + b.dataset.reactivateLoad + '/status', { method: 'POST', body: { status: 'active' } });
+      await api('/api/admin/loads/' + b.dataset.reactivateLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'active' }) });
       toast('Load reactivated.', 'ok');
       renderAdminView('loads');
     } catch (err) { showError(err); }
