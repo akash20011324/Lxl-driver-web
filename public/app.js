@@ -531,6 +531,8 @@ async function boot() {
   removeTrucksBgLayer();
   document.body.classList.remove('drivers-bg');
   removeDriversBgLayer();
+  document.body.classList.remove('admins-bg');
+  removeAdminsBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const app = document.getElementById('app');
@@ -827,7 +829,7 @@ async function toggleBell() {
 // a saved order (e.g. a newer page) keep their default relative order
 // at the end.
 function orderedAdminViews() {
-  const visible = ADMIN_VIEWS.filter(([key]) => key !== 'admins' || (state.user && state.user.isMainAdmin));
+  const visible = ADMIN_VIEWS.filter(([key]) => key !== 'admins' || (state.user && (state.user.isMainAdmin || state.user.adminKind === 'admin')));
   const saved = state.organizing && Array.isArray(state.organizeOrder)
     ? state.organizeOrder
     : (Array.isArray(state.sidebarOrder) ? state.sidebarOrder : []);
@@ -1015,13 +1017,15 @@ async function renderAdminView(view) {
   removeTrucksBgLayer();
   document.body.classList.remove('drivers-bg');
   removeDriversBgLayer();
+  document.body.classList.remove('admins-bg');
+  removeAdminsBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
-  if (view === 'admins' && !(state.user && state.user.isMainAdmin)) {
-    main.innerHTML = '<p class="empty">Only the main admin can manage admin accounts.</p>';
+  if (view === 'admins' && !(state.user && (state.user.isMainAdmin || state.user.adminKind === 'admin'))) {
+    main.innerHTML = '<p class="empty">Only the main admin or an admin can manage admin accounts.</p>';
     return;
   }
   try {
@@ -1479,6 +1483,16 @@ function removeTrucksBgLayer() {
   if (layer) layer.remove();
 }
 /* Drivers background: the light-trails photo — same pattern. */
+const ADMIN_CARD_COLORS = ['#2563EB', '#9333EA', '#0891B2', '#DB2777', '#EA580C', '#16A34A', '#65A30D', '#DC2626'];
+
+function ensureAdminsBgLayer() {
+  if (!document.getElementById('adminsBgLayer')) {
+    const d = document.createElement('div');
+    d.id = 'adminsBgLayer';
+    document.body.prepend(d);
+  }
+}
+
 function ensureDriversBgLayer() {
   if (!document.getElementById('driversBgLayer')) {
     const layer = document.createElement('div');
@@ -1488,6 +1502,10 @@ function ensureDriversBgLayer() {
 }
 function removeDriversBgLayer() {
   const layer = document.getElementById('driversBgLayer');
+  if (layer) layer.remove();
+}
+function removeAdminsBgLayer() {
+  const layer = document.getElementById('adminsBgLayer');
   if (layer) layer.remove();
 }
 /* The Chat background is a real fixed layer too — same pattern. */
@@ -1801,40 +1819,81 @@ async function viewDriverDocuments(main) {
 
 /* ---------- Admins & Dispatchers ---------- */
 async function viewAdmins(main) {
+  document.body.classList.add('admins-bg'); // control-room photo + liquid glass (removed on view switch)
+  ensureAdminsBgLayer();
   const admins = await api('/api/admin/admins');
   const list = Array.isArray(admins) ? admins : [];
-  main.innerHTML = '<h1>Admins & Dispatchers</h1>' +
-    '<div class="card"><h2>Add admin / dispatcher</h2><form id="addAdminForm">' +
+  const roleOf = (a) => a.isMainAdmin ? 'Main Admin' : (a.adminKind === 'admin' ? 'Admin' : 'Dispatcher');
+  main.innerHTML =
+    '<div class="rc-head"><h1>Admins & Dispatchers</h1>' +
+    '<button class="btn btn-blue" type="button" data-toggle-add="addAdminCard">+ Add admin</button></div>' +
+    '<div class="card add-unit-card" id="addAdminCard" hidden><h3>Add admin / dispatcher</h3><form id="addAdminForm">' +
     '<div class="form-row">' +
     '<div class="field"><label for="aa-name">Name *</label><input id="aa-name" required></div>' +
     '<div class="field"><label for="aa-email">Email *</label><input id="aa-email" type="email" required autocomplete="email"></div>' +
     '<div class="field"><label for="aa-pass">Password *</label><input id="aa-pass" type="password" required minlength="8" autocomplete="new-password"></div>' +
-    '</div><p class="small muted">Admins sign in to the Admin Portal with their email and password. New admins are dispatchers: they can do everything except manage other admin accounts — only the main admin can do that.</p>' +
-    '<div class="form-actions"><button class="btn" type="submit">Add admin</button></div>' +
+    '<div class="field"><label for="aa-role">Role *</label><select id="aa-role"><option value="dispatcher">Dispatcher</option><option value="admin">Admin</option></select></div>' +
+    '</div><p class="small muted">Admins sign in to the Admin Portal with their email and password. Dispatchers can do everything except manage admin accounts. Admins can also add, reset and delete other admin accounts — the main admin (owner) account can never be deleted.</p>' +
+    '<div class="form-actions"><button class="btn btn-blue" type="submit">Add admin</button> ' +
+    '<button class="btn btn-ghost" type="button" data-cancel-add="addAdminForm">Cancel</button></div>' +
     '</form></div>' +
-    '<div class="card"><div class="table-wrap"><table><thead><tr>' +
-    '<th>Name</th><th>Email</th><th>Status</th><th></th>' +
-    '</tr></thead><tbody>' +
-    list.map(a => '<tr>' +
-      '<td><strong>' + esc(a.name) + '</strong>' + (state.user && a.id === state.user.id ? ' <span class="pill">You</span>' : '') + '</td>' +
-      '<td>' + esc(a.email || '—') + '</td>' +
-      '<td>' + (a.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>') + '</td>' +
-      '<td>' + (state.user && a.id === state.user.id ? '' : '<button class="btn btn-danger btn-sm" data-delete-admin="' + a.id + '" data-admin-name="' + esc(a.name) + '">Delete</button>') + '</td></tr>').join('') +
-    '</tbody></table></div>' +
-    (list.length ? '' : '<p class="empty">No admins yet.</p>') + '</div>';
+    (list.length ? '<div class="driver-grid">' + list.map((a, i) => {
+      const color = ADMIN_CARD_COLORS[i % ADMIN_CARD_COLORS.length];
+      const initial = esc((String(a.name || '?').trim().charAt(0) || '?').toUpperCase());
+      const isSelf = !!(state.user && a.id === state.user.id);
+      return '<div class="driver-card">' +
+        '<div class="dc-stripe" style="background:' + color + '"></div>' +
+        '<div class="dc-body">' +
+        '<div class="dc-head"><span class="dc-avatar" style="background:' + color + '">' + initial + '</span>' +
+        '<div><div class="dc-name">' + esc(a.name) + '</div><div class="dc-sub">' + roleOf(a) + (isSelf ? ' · You' : '') + '</div></div>' +
+        (a.isMainAdmin ? '<span class="pill gold">Main Admin</span>' : (a.active === false ? '<span class="pill red">Inactive</span>' : '<span class="pill green">Active</span>')) + '</div>' +
+        '<div class="dc-stats">' +
+        '<div><span>EMAIL</span><strong>' + esc(a.email || '—') + '</strong></div>' +
+        '<div><span>ROLE</span><strong>' + roleOf(a) + '</strong></div>' +
+        '<div><span>ACCESS</span><strong>' + (roleOf(a) === 'Dispatcher' ? 'All but admin accounts' : 'Everything') + '</strong></div>' +
+        '</div>' +
+        '<div class="dc-actions">' +
+        '<button class="btn btn-ghost btn-sm" data-reset-admin="' + a.id + '" data-admin-name="' + esc(a.name) + '">Reset password</button> ' +
+        (isSelf || a.isMainAdmin
+          ? '<span class="small muted">' + (a.isMainAdmin ? 'Main admin — can’t be deleted' : '') + '</span>'
+          : '<button class="btn btn-danger btn-sm" data-delete-admin="' + a.id + '" data-admin-name="' + esc(a.name) + '">Delete</button>') +
+        '</div></div></div>';
+    }).join('') + '</div>' : '<p class="empty">No admins yet.</p>');
 
+  const addCard = document.getElementById('addAdminCard');
+  main.querySelector('[data-toggle-add]').addEventListener('click', () => { addCard.hidden = !addCard.hidden; });
+  main.querySelector('[data-cancel-add]').addEventListener('click', () => {
+    document.getElementById('addAdminForm').reset();
+    addCard.hidden = true;
+  });
   document.getElementById('addAdminForm').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const newPw = document.getElementById('aa-pass').value;
     try {
       await api('/api/admin/admins', { method: 'POST', body: JSON.stringify({
         name: document.getElementById('aa-name').value.trim(),
         email: document.getElementById('aa-email').value.trim(),
-        password: document.getElementById('aa-pass').value,
+        password: newPw,
+        adminKind: document.getElementById('aa-role').value,
       }) });
       toast('Admin added.', 'ok');
       renderAdminView('admins');
     } catch (err) { showError(err); }
   });
+  main.querySelectorAll('[data-reset-admin]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.resetAdmin;
+    const name = btn.dataset.adminName || 'this admin';
+    const pw = prompt('New password for ' + name + ' (at least 8 characters):');
+    if (pw === null) return;
+    if (pw.length < 8) { toast('Password must be at least 8 characters.', 'error'); return; }
+    const pw2 = prompt('Type the new password again to confirm:');
+    if (pw2 === null) return;
+    if (pw2 !== pw) { toast('Passwords do not match.', 'error'); return; }
+    try {
+      await api('/api/admin/admins/' + id + '/password', { method: 'POST', body: JSON.stringify({ password: pw }) });
+      toast('Password reset. ' + name + ' will need to sign in again with the new password.', 'ok');
+    } catch (err) { showError(err); }
+  }));
   main.querySelectorAll('[data-delete-admin]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.deleteAdmin;
     const name = btn.dataset.adminName || 'this admin';

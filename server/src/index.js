@@ -58,6 +58,7 @@ function publicUser(u) {
     emergencyContact: u.emergencyContact ?? null,
     active: !!u.active,
     isMainAdmin: !!u.isMainAdmin,
+    adminKind: u.adminKind || 'dispatcher',
     createdAt: u.createdAt,
   };
 }
@@ -350,6 +351,14 @@ const requireAdmin = requireRole('admin');
 const requireMainAdmin = (req, res, next) => {
   if (req.user.role !== 'admin' || !req.user.isMainAdmin)
     return err(res, 403, 'Only the main admin can manage admin accounts');
+  next();
+};
+
+// Admin accounts are managed by the main admin (owner) or by an admin whose
+// kind is 'admin'. Dispatchers (adminKind 'dispatcher') cannot manage them.
+const requireAdminManager = (req, res, next) => {
+  if (req.user.role !== 'admin' || !(req.user.isMainAdmin || req.user.adminKind === 'admin'))
+    return err(res, 403, 'Only the main admin or an admin can manage admin accounts');
   next();
 };
 const requireDriver = requireRole('driver');
@@ -1144,12 +1153,13 @@ admin.get('/drivers', (_req, res) => {
 
 // Admins & dispatchers — any admin can add another Admin Portal login.
 // Dispatchers sign in with email + password, same as the owner.
-admin.get('/admins', requireMainAdmin, (_req, res) => {
+admin.get('/admins', requireAdminManager, (_req, res) => {
   res.json(db.prepare("SELECT * FROM users WHERE role = 'admin' ORDER BY name").all().map(publicUser));
 });
 
-admin.post('/admins', requireMainAdmin, (req, res) => {
-  const { name, email, password } = req.body || {};
+admin.post('/admins', requireAdminManager, (req, res) => {
+  const { name, email, password, adminKind } = req.body || {};
+  const kind = adminKind === 'admin' ? 'admin' : 'dispatcher';
   if (!name || !email || !password) return err(res, 400, 'name, email and password are required');
   if (typeof password !== 'string' || password.length < 8)
     return err(res, 400, 'Password must be at least 8 characters');
@@ -1157,21 +1167,40 @@ admin.post('/admins', requireMainAdmin, (req, res) => {
     return err(res, 409, 'Email is already in use');
   const ts = now();
   const id = db
-    .prepare("INSERT INTO users (role, name, email, passwordHash, active, createdAt) VALUES ('admin', ?, ?, ?, 1, ?)")
-    .run(name, email, bcrypt.hashSync(password, 10), ts).lastInsertRowid;
+    .prepare("INSERT INTO users (role, name, email, passwordHash, active, createdAt, adminKind) VALUES ('admin', ?, ?, ?, 1, ?, ?)")
+    .run(name, email, bcrypt.hashSync(password, 10), ts, kind).lastInsertRowid;
   res.status(201).json(publicUser(getUserById(id)));
 });
 
 // Remove an admin / dispatcher login. You cannot delete your own account,
 // and the last active admin cannot be deleted.
-admin.delete('/admins/:id', requireMainAdmin, (req, res) => {
+admin.delete('/admins/:id', requireAdminManager, (req, res) => {
   const adminUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'admin'").get(req.params.id);
   if (!adminUser) return err(res, 404, 'Admin not found');
+  if (adminUser.isMainAdmin) return err(res, 400, 'The main admin account cannot be deleted');
   if (adminUser.id === req.user.id) return err(res, 400, 'You cannot delete your own admin account');
   const count = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").get().n;
   if (count <= 1) return err(res, 400, 'The last admin account cannot be deleted');
   db.prepare('DELETE FROM sessions WHERE userId = ?').run(adminUser.id);
   db.prepare('DELETE FROM users WHERE id = ?').run(adminUser.id);
+  res.json({ ok: true });
+});
+
+// Reset an admin / dispatcher's password (owner's ask, 2026-11-16). The
+// manager types the new password; the admin's sessions are ended. Only the
+// main admin can reset the main admin's password.
+admin.post('/admins/:id/password', requireAdminManager, (req, res) => {
+  const pw = (req.body || {}).password;
+  if (typeof pw !== 'string' || pw.length < 8)
+    return err(res, 400, 'New password must be at least 8 characters');
+  const adminUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'admin'").get(req.params.id);
+  if (!adminUser) return err(res, 404, 'Admin not found');
+  if (adminUser.isMainAdmin && !req.user.isMainAdmin)
+    return err(res, 403, 'Only the main admin can reset the main admin password');
+  withTransaction(db, () => {
+    db.prepare('UPDATE users SET passwordHash = ? WHERE id = ?').run(bcrypt.hashSync(pw, 10), adminUser.id);
+    db.prepare('DELETE FROM sessions WHERE userId = ?').run(adminUser.id);
+  });
   res.json({ ok: true });
 });
 
