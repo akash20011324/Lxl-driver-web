@@ -713,6 +713,33 @@ driver.post('/requests', (req, res) => {
   res.status(201).json(serializeRequest(db.prepare('SELECT * FROM requests WHERE id = ?').get(id)));
 });
 
+// Delete chat messages FOR EVERYONE (owner's rule, 2026-11-15): the rows
+// and any attachment files go away for both sides of the thread.
+function deleteMessagesForEveryone(rows) {
+  if (!rows.length) return 0;
+  const ids = rows.map(r => r.id);
+  const fileIds = rows.map(r => r.fileId).filter(Boolean);
+  db.prepare('DELETE FROM messages WHERE id IN (' + ids.map(() => '?').join(',') + ')').run(...ids);
+  for (const fid of fileIds) {
+    const f = db.prepare('SELECT * FROM files WHERE id = ?').get(fid);
+    if (!f) continue;
+    db.prepare('DELETE FROM files WHERE id = ?').run(fid);
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename));
+    } catch {
+      // file already gone — ignore
+    }
+  }
+  return ids.length;
+}
+function pickMessageRows(driverId, ids) {
+  const clean = (Array.isArray(ids) ? ids : []).map(Number).filter(n => Number.isFinite(n) && n > 0);
+  if (!clean.length) return null;
+  return db
+    .prepare('SELECT * FROM messages WHERE driverId = ? AND id IN (' + clean.map(() => '?').join(',') + ')')
+    .all(driverId, ...clean);
+}
+
 driver.get('/messages', (req, res) => {
   // Fetching the thread means the messages reached this device
   // (delivered) and are now on screen (read).
@@ -745,6 +772,12 @@ driver.post('/messages/attachment', upload.single('file'), (req, res) => {
   const isImage = String(req.file.mimetype || '').startsWith('image/');
   notifyAdmins('message', `New message from ${req.user.name}`, caption || (isImage ? '📎 Photo' : '📎 ' + (req.file.originalname || 'File')), 'dispatch', req.user.id);
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
+});
+
+driver.delete('/messages', (req, res) => {
+  const rows = pickMessageRows(req.user.id, (req.body || {}).ids);
+  if (!rows) return err(res, 400, 'ids are required');
+  res.json({ ok: true, deleted: deleteMessagesForEveryone(rows) });
 });
 
 driver.get('/chat-wallpaper', (req, res) => {
@@ -1959,6 +1992,14 @@ admin.post('/messages/:driverId/attachment', upload.single('file'), (req, res) =
     .run(driverUser.id, req.user.name, caption, now(), fileId).lastInsertRowid;
   notifyDriver(db, driverUser.id, 'dispatch_message', `Message from ${req.user.name}`, caption || '📎 Attachment').catch(() => {});
   res.status(201).json(serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id)));
+});
+
+admin.delete('/messages/:driverId', (req, res) => {
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.driverId);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  const rows = pickMessageRows(driverUser.id, (req.body || {}).ids);
+  if (!rows) return err(res, 400, 'ids are required');
+  res.json({ ok: true, deleted: deleteMessagesForEveryone(rows) });
 });
 
 admin.get('/chat-wallpaper', (req, res) => {

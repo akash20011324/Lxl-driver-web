@@ -478,6 +478,8 @@ async function boot() {
   removeLocBgLayer();
   document.body.classList.remove('loads-bg');
   removeLoadsBgLayer();
+  document.body.classList.remove('trucks-bg');
+  removeTrucksBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const app = document.getElementById('app');
@@ -948,6 +950,8 @@ async function renderAdminView(view) {
   removeLocBgLayer();
   document.body.classList.remove('loads-bg');
   removeLoadsBgLayer();
+  document.body.classList.remove('trucks-bg');
+  removeTrucksBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const main = document.getElementById('adminMain');
@@ -1398,6 +1402,18 @@ function removeLoadsBgLayer() {
   const layer = document.getElementById('loadsBgLayer');
   if (layer) layer.remove();
 }
+/* Trucks & Trailers background: the LXL reefer yard — same pattern. */
+function ensureTrucksBgLayer() {
+  if (!document.getElementById('trucksBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'trucksBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeTrucksBgLayer() {
+  const layer = document.getElementById('trucksBgLayer');
+  if (layer) layer.remove();
+}
 /* The Chat background is a real fixed layer too — same pattern. */
 function ensureChatBgLayer() {
   if (!document.getElementById('chatBgLayer')) {
@@ -1550,8 +1566,8 @@ async function viewAdmins(main) {
 
 /* ---------- Trucks & Trailers (yard board + paperwork) ---------- */
 async function viewEquipment(main) {
-  document.body.classList.add('loads-bg'); // reefer dock-row photo + liquid glass (removed on view switch)
-  ensureLoadsBgLayer();
+  document.body.classList.add('trucks-bg'); // LXL reefer yard photo + liquid glass (removed on view switch)
+  ensureTrucksBgLayer();
   const [trucks, trailers, drivers] = await Promise.all([
     api('/api/admin/trucks'), api('/api/admin/trailers'), api('/api/admin/drivers'),
   ]);
@@ -1658,11 +1674,11 @@ function unitCard(u, type, pair) {
     '<button class="btn btn-gold btn-sm" data-assign-btn>Assign</button>' +
     '</div>' +
     (type === 'truck'
-      ? '<div class="row"><label class="small" for="odo-' + u.id + '">Odometer (mi)</label>' +
+      ? (u.odometerUpdatedAt ? '<p class="muted small" style="margin-top:8px">Odometer live from TRC eLOGS · Updated ' + esc(fmtDate(u.odometerUpdatedAt)) + '</p>' : '') +
+        '<details class="odo-override"><summary>Manual odometer override</summary>' +
+        '<div class="row"><label class="small" for="odo-' + u.id + '">Odometer (mi)</label>' +
         '<input type="number" min="0" step="1" id="odo-' + u.id + '" data-odo-input data-odo-orig="' + (u.odometerMi ?? '') + '" value="' + (u.odometerMi ?? '') + '" placeholder="No reading yet">' +
-        '<button class="btn btn-ghost btn-sm" data-odo-btn>Save odometer</button>' +
-        (u.odometerUpdatedAt ? '<span class="muted small">Updated ' + esc(fmtDate(u.odometerUpdatedAt)) + '</span>' : '') +
-        '</div>'
+        '<button class="btn btn-ghost btn-sm" data-odo-btn>Save odometer</button></div></details>'
       : '') +
     '</div></div>';
 }
@@ -2220,6 +2236,9 @@ async function viewDispatch(main) {
         '<div class="chat-head" id="chatHead"></div>' +
         '<div class="chat-msgs" id="chatMsgs"><p class="muted">Loading…</p></div>' +
         '<div class="chat-attach-chip" id="chatAttachChip" hidden></div>' +
+        '<div class="chat-delbar" id="chatDelBar" hidden><span id="chatDelCount"></span>' +
+        '<button class="btn btn-danger btn-sm" id="chatDelBtn" type="button">Delete for everyone</button>' +
+        '<button class="btn btn-ghost btn-sm" id="chatDelCancel" type="button">Cancel</button></div>' +
         '<form id="chatForm" class="chat-composer">' +
           '<button class="chat-attach-btn" id="chatAttachBtn" type="button" title="Attach a picture or file">📎</button>' +
           '<input type="file" id="chatFile" hidden>' +
@@ -2234,6 +2253,23 @@ async function viewDispatch(main) {
 
   const LIVE_MS = 15 * 60 * 1000;
   let stagedFile = null;
+  let threadList = [];
+  let selectMode = false;
+  const selectedMsgIds = new Set();
+  const updateDelBar = () => {
+    const bar = document.getElementById('chatDelBar');
+    if (!bar) return;
+    bar.hidden = !(selectMode && selectedMsgIds.size);
+    const cnt = document.getElementById('chatDelCount');
+    if (cnt) cnt.textContent = selectedMsgIds.size + ' selected';
+  };
+  const exitSelectMode = () => {
+    selectMode = false;
+    selectedMsgIds.clear();
+    updateDelBar();
+    renderHead();
+    renderThread(threadList);
+  };
   const initials = (name) => {
     const w = String(name || '?').trim().split(/\s+/);
     return ((w[0] || '')[0] + ((w[1] || '')[0] || '')).toUpperCase() || '?';
@@ -2260,6 +2296,9 @@ async function viewDispatch(main) {
       (c.unread > 0 && c.driver.id !== state.dispatchDriverId ? '<span class="convo-unread">' + c.unread + '</span>' : '') + '</span></button>').join('')
       : '<p class="empty">No drivers yet.</p>';
     el.querySelectorAll('[data-convo]').forEach(b => b.addEventListener('click', () => {
+      selectMode = false;
+      selectedMsgIds.clear();
+      updateDelBar();
       state.dispatchDriverId = parseInt(b.dataset.convo, 10);
       renderConvos();
       renderHead();
@@ -2286,8 +2325,14 @@ async function viewDispatch(main) {
       '<span class="chat-head-sub">' + esc(statusLine(c)) + '</span></span>' +
       '<span class="chat-head-unit">' + (c.truck ? 'Truck ' + esc(c.truck.unitNumber) : '') +
       (c.trailer ? ' · Trailer ' + esc(c.trailer.unitNumber) : '') + '</span>' +
-      '<span class="chat-head-wp"><button class="chat-wp-btn" id="chatWpBtn" type="button" title="Change chat wallpaper">🖼 Wallpaper</button>' +
+      '<span class="chat-head-wp"><button class="chat-wp-btn" id="chatSelectBtn" type="button" title="Select messages to delete">🗑 Select</button>' +
+      '<button class="chat-wp-btn" id="chatWpBtn" type="button" title="Change chat wallpaper">🖼 Wallpaper</button>' +
       '<button class="chat-wp-btn" id="chatWpReset" type="button" title="Remove wallpaper"' + (state.chatWpServerUrl ? '' : ' disabled') + '>✕ Remove</button></span>';
+    const selBtn = document.getElementById('chatSelectBtn');
+    if (selBtn) selBtn.addEventListener('click', () => {
+      if (selectMode) exitSelectMode();
+      else { selectMode = true; renderHead(); renderThread(threadList); }
+    });
     const wpBtn = document.getElementById('chatWpBtn');
     if (wpBtn) wpBtn.addEventListener('click', () => document.getElementById('chatWpFile').click());
     const wpReset = document.getElementById('chatWpReset');
@@ -2362,9 +2407,17 @@ async function viewDispatch(main) {
       const status = mine
         ? ' · <span class="tick' + (m.read ? ' seen' : '') + '">' + (m.read ? '✓✓ Seen' : m.delivered ? '✓ Delivered' : '✓ Sent') + '</span>'
         : '';
-      return '<div class="chat-row' + (mine ? ' mine' : '') + '"><div class="chat-bubble' + (mine ? ' mine' : '') + '">' + inner + '</div>' +
+      const selBox = selectMode
+        ? '<input type="checkbox" class="chat-sel" data-sel-msg="' + m.id + '"' + (selectedMsgIds.has(m.id) ? ' checked' : '') + '>'
+        : '';
+      return '<div class="chat-row' + (mine ? ' mine' : '') + (selectMode ? ' selecting' : '') + '">' + selBox + '<div class="chat-bubble' + (mine ? ' mine' : '') + '">' + inner + '</div>' +
         '<div class="chat-meta' + (mine ? ' mine' : '') + '">' + esc(mine ? (m.senderName || 'Dispatch') : (c ? c.driver.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + status + '</div></div>';
     }).join('') : '<p class="empty">No messages yet.</p>';
+    thread.querySelectorAll('[data-sel-msg]').forEach(cb => cb.addEventListener('change', () => {
+      const id = parseInt(cb.dataset.selMsg, 10);
+      if (cb.checked) selectedMsgIds.add(id); else selectedMsgIds.delete(id);
+      updateDelBar();
+    }));
     thread.querySelectorAll('[data-att-open]').forEach(el => el.addEventListener('click', () => {
       const m = list.find(x => x.attachment && x.attachment.fileId === parseInt(el.dataset.attOpen, 10));
       if (m) downloadFile(m.attachment.url, m.attachment.filename, true, m.attachment.mimeType);
@@ -2395,7 +2448,12 @@ async function viewDispatch(main) {
     if (!state.dispatchDriverId || state.adminView !== 'dispatch') return;
     try {
       const msgs = await api('/api/admin/messages/' + state.dispatchDriverId);
-      renderThread(Array.isArray(msgs) ? msgs : []);
+      threadList = Array.isArray(msgs) ? msgs : [];
+      // Drop selections for messages that no longer exist.
+      const alive = new Set(threadList.map(m => m.id));
+      [...selectedMsgIds].forEach(id => { if (!alive.has(id)) selectedMsgIds.delete(id); });
+      updateDelBar();
+      renderThread(threadList);
     } catch { /* keep the old thread visible on a transient failure */ }
   };
 
@@ -2412,6 +2470,22 @@ async function viewDispatch(main) {
     renderHead();
     renderContext();
   };
+
+  const delBtn = document.getElementById('chatDelBtn');
+  if (delBtn) delBtn.addEventListener('click', async () => {
+    const ids = [...selectedMsgIds];
+    if (!ids.length || !state.dispatchDriverId) return;
+    if (!confirm('Delete ' + ids.length + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone? The driver will no longer see them either.')) return;
+    try {
+      const r = await api('/api/admin/messages/' + state.dispatchDriverId, { method: 'DELETE', body: JSON.stringify({ ids }) });
+      toast('Deleted ' + (r && r.deleted != null ? r.deleted : ids.length) + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone.', 'ok');
+      exitSelectMode();
+      loadThread();
+      refreshConvos();
+    } catch (err) { showError(err); }
+  });
+  const delCancel = document.getElementById('chatDelCancel');
+  if (delCancel) delCancel.addEventListener('click', exitSelectMode);
 
   const chip = document.getElementById('chatAttachChip');
   const fileInput = document.getElementById('chatFile');
