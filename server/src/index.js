@@ -4812,7 +4812,7 @@ async function backfillDocDates() {
     // dates are corrected to what the document itself says — including
     // clearing a wrong expiry on NO EXPIRY documents. Detection that
     // finds nothing leaves hand-entered dates untouched.
-    const marker = 'doc-dates-recheck-2026-11-16-v3';
+    const marker = 'doc-dates-recheck-2026-11-16-v4';
     if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
     const log = (m) => console.log('doc dates recheck: ' + m);
     const jobs = [
@@ -5927,6 +5927,45 @@ function ocrPdfImagesQueued(buf) {
   ocrQueue = run.catch(() => {});
   return run;
 }
+async function ocrPdfPages(buf) {
+  // Rasterize the pages and OCR the renders. Filled forms printed to
+  // PDF (e.g. ACORD certificates via Microsoft Print to PDF) keep their
+  // values as vector glyphs — no usable text layer and no embedded
+  // image — so only a rendered page shows them. The canvas package is
+  // an optional pdfjs dependency: if it is absent, skip quietly.
+  let canvasMod;
+  try { canvasMod = await import('@napi-rs/canvas'); } catch { return ''; }
+  if (!globalThis.DOMMatrix && canvasMod.DOMMatrix) globalThis.DOMMatrix = canvasMod.DOMMatrix;
+  if (!globalThis.Path2D && canvasMod.Path2D) globalThis.Path2D = canvasMod.Path2D;
+  if (!globalThis.ImageData && canvasMod.ImageData) globalThis.ImageData = canvasMod.ImageData;
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
+  const worker = await createWorker('eng', undefined, {
+    errorHandler: (e) => console.error('page-raster tesseract error', e),
+  });
+  try {
+    let out = '';
+    const pages = Math.min(doc.numPages, 3);
+    for (let p = 1; p <= pages; p++) {
+      const page = await doc.getPage(p);
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = canvasMod.createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const { data } = await worker.recognize(canvas.toBuffer('image/png'));
+      out += '\n' + (data.text || '');
+    }
+    return out;
+  } finally {
+    try { await worker.terminate(); } catch { /* already gone */ }
+  }
+}
+function ocrPdfPagesQueued(buf) {
+  const run = ocrQueue.then(() => ocrPdfPages(buf));
+  ocrQueue = run.catch(() => {});
+  return run;
+}
 async function getPdfImage(page, name) {
   const grab = (objs) => new Promise((resolve) => {
     let done = false;
@@ -6081,6 +6120,17 @@ async function detectDocDatesFull(buf) {
         console.log('doc dates: OCR pass found dates', found);
       }
     } catch (e) { console.error('doc dates OCR pass failed', e); }
+  }
+  if (!found.issuedDate && !found.expiryDate && isPdf) {
+    try {
+      const rasterText = cleanRateText(await ocrPdfPagesQueued(buf));
+      const rasterFound = detectDocDates(rasterText);
+      if (rasterFound.issuedDate || rasterFound.expiryDate) {
+        found = rasterFound;
+        noExpiry = /no\s+expir\w*/i.test(rasterText);
+        console.log('doc dates: page-raster OCR found dates', found);
+      }
+    } catch (e) { console.error('doc dates page-raster OCR failed', e); }
   }
   return { found, noExpiry };
 }
