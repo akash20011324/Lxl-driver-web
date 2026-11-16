@@ -732,12 +732,25 @@ function deleteMessagesForEveryone(rows) {
   }
   return ids.length;
 }
+// Delete-for-everyone window (owner's rule, 2026-11-15): a message can
+// only be deleted for everyone within 7 minutes of being sent. After
+// that it stays in the thread for both sides.
+const DELETE_WINDOW_MS = 7 * 60 * 1000;
 function pickMessageRows(driverId, ids) {
   const clean = (Array.isArray(ids) ? ids : []).map(Number).filter(n => Number.isFinite(n) && n > 0);
   if (!clean.length) return null;
   return db
     .prepare('SELECT * FROM messages WHERE driverId = ? AND id IN (' + clean.map(() => '?').join(',') + ')')
     .all(driverId, ...clean);
+}
+function splitDeletable(rows) {
+  const fresh = [];
+  let oldCount = 0;
+  for (const r of rows) {
+    if (Date.now() - Date.parse(r.createdAt) <= DELETE_WINDOW_MS) fresh.push(r);
+    else oldCount++;
+  }
+  return { fresh, oldCount };
 }
 
 driver.get('/messages', (req, res) => {
@@ -777,7 +790,9 @@ driver.post('/messages/attachment', upload.single('file'), (req, res) => {
 driver.delete('/messages', (req, res) => {
   const rows = pickMessageRows(req.user.id, (req.body || {}).ids);
   if (!rows) return err(res, 400, 'ids are required');
-  res.json({ ok: true, deleted: deleteMessagesForEveryone(rows) });
+  const { fresh, oldCount } = splitDeletable(rows);
+  if (!fresh.length) return err(res, 400, 'Messages older than 7 minutes can no longer be deleted for everyone.');
+  res.json({ ok: true, deleted: deleteMessagesForEveryone(fresh), skippedOld: oldCount });
 });
 
 driver.get('/chat-wallpaper', (req, res) => {
@@ -966,6 +981,18 @@ driver.post('/location', (req, res) => {
   // dispatch messages waiting count as delivered to the device.
   db.prepare("UPDATE messages SET deliveredAt = ? WHERE driverId = ? AND sender = 'dispatch' AND deliveredAt IS NULL").run(now(), req.user.id);
   res.json({ ok: true });
+});
+
+const PUSH_SOUNDS = ['alarm', 'bell', 'horn', 'ring', 'chime'];
+driver.get('/push-sound', (req, res) => {
+  const row = db.prepare('SELECT pushSound FROM users WHERE id = ?').get(req.user.id);
+  res.json({ sound: row && row.pushSound ? row.pushSound : null, options: PUSH_SOUNDS });
+});
+driver.post('/push-sound', (req, res) => {
+  const s = (req.body || {}).sound;
+  if (s !== null && !PUSH_SOUNDS.includes(s)) return err(res, 400, 'Unknown sound');
+  db.prepare('UPDATE users SET pushSound = ? WHERE id = ?').run(s, req.user.id);
+  res.json({ ok: true, sound: s });
 });
 
 driver.post('/push-token', (req, res) => {
@@ -1999,7 +2026,9 @@ admin.delete('/messages/:driverId', (req, res) => {
   if (!driverUser) return err(res, 404, 'Driver not found');
   const rows = pickMessageRows(driverUser.id, (req.body || {}).ids);
   if (!rows) return err(res, 400, 'ids are required');
-  res.json({ ok: true, deleted: deleteMessagesForEveryone(rows) });
+  const { fresh, oldCount } = splitDeletable(rows);
+  if (!fresh.length) return err(res, 400, 'Messages older than 7 minutes can no longer be deleted for everyone.');
+  res.json({ ok: true, deleted: deleteMessagesForEveryone(fresh), skippedOld: oldCount });
 });
 
 admin.get('/chat-wallpaper', (req, res) => {

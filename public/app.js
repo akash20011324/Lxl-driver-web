@@ -233,6 +233,9 @@ const EQUIP_DOC_LABELS = {
 };
 const EQUIP_DOC_TYPES_ALL = Object.keys(EQUIP_DOC_LABELS);
 const EQUIP_DOC_CORE = ['cab_card', 'insurance', 'annual_inspection', 'ifta'];
+// Trailers have NO IFTA license (owner's rule, 2026-11-15) — IFTA is the
+// truck's. Trailer tiles: cab card, insurance, annual inspection only.
+const EQUIP_DOC_CORE_TRAILER = ['cab_card', 'insurance', 'annual_inspection'];
 
 /* Status for an expiry date (YYYY-MM-DD), judged on the viewer's local
    calendar day: Expired / Expires today / Expires in N days (red up to a
@@ -292,7 +295,8 @@ async function viewUnitDocuments(main) {
     else if (st.key === 'soon') nSoon++;
     else if (st.key === 'expired') nExpired++;
   }
-  const nMissing = EQUIP_DOC_CORE.filter(t => !byType.has(t)).length;
+  const CORE = target.type === 'trailer' ? EQUIP_DOC_CORE_TRAILER : EQUIP_DOC_CORE;
+  const nMissing = CORE.filter(t => !byType.has(t)).length;
   const countdown = (d) => {
     const st = equipDocStatus(d.expiryDate);
     if (st.key === 'expired') return 'Expired ' + fmtExpiry(d.expiryDate);
@@ -318,11 +322,11 @@ async function viewUnitDocuments(main) {
     '<span class="doc-pill grey">Missing</span></div>' +
     '<div class="ud-count">Not uploaded yet</div>' +
     '<div class="ud-acts"><button class="btn btn-sm" type="button" data-tile-pick="' + t + '">Upload</button></div></div>';
-  const coreTiles = EQUIP_DOC_CORE.map(t => {
+  const coreTiles = CORE.map(t => {
     const ds = byType.get(t) || [];
     return ds.length ? ds.map(tileHtml).join('') : missingTile(t);
   }).join('');
-  const extraTiles = list.filter(d => !EQUIP_DOC_CORE.includes(d.docType)).map(tileHtml).join('');
+  const extraTiles = list.filter(d => !CORE.includes(d.docType)).map(tileHtml).join('');
   main.innerHTML = '<button class="btn btn-ghost btn-sm" id="udBack" type="button">← Trucks &amp; Trailers</button>' +
     '<div class="rc-head"><h1>Documents — ' + esc(unit.unitNumber) + '</h1>' +
     (unit.yardStatus === 'road' ? '<span class="pill blue">On the Road</span>' : '<span class="pill green">In the Yard</span>') + '</div>' +
@@ -337,7 +341,7 @@ async function viewUnitDocuments(main) {
     '<div class="card"><h3>Add another document</h3>' +
     '<form class="unit-doc-form" id="udAddForm">' +
     '<div class="field"><label>Document type</label><select name="docType">' +
-    EQUIP_DOC_TYPES_ALL.map(t => '<option value="' + t + '">' + EQUIP_DOC_LABELS[t] + '</option>').join('') +
+    EQUIP_DOC_TYPES_ALL.filter(t => target.type !== 'trailer' || t !== 'ifta').map(t => '<option value="' + t + '">' + EQUIP_DOC_LABELS[t] + '</option>').join('') +
     '</select></div>' +
     '<div class="field"><label>File *</label><input type="file" name="file" required></div>' +
     '<div class="field"><label>Note</label><input name="note"></div>' +
@@ -2407,8 +2411,9 @@ async function viewDispatch(main) {
       const status = mine
         ? ' · <span class="tick' + (m.read ? ' seen' : '') + '">' + (m.read ? '✓✓ Seen' : m.delivered ? '✓ Delivered' : '✓ Sent') + '</span>'
         : '';
+      const tooOld = Date.now() - Date.parse(m.createdAt) > 7 * 60 * 1000;
       const selBox = selectMode
-        ? '<input type="checkbox" class="chat-sel" data-sel-msg="' + m.id + '"' + (selectedMsgIds.has(m.id) ? ' checked' : '') + '>'
+        ? '<input type="checkbox" class="chat-sel" data-sel-msg="' + m.id + '"' + (selectedMsgIds.has(m.id) ? ' checked' : '') + (tooOld ? ' disabled title="Older than 7 minutes — can no longer be deleted for everyone"' : '') + '>'
         : '';
       return '<div class="chat-row' + (mine ? ' mine' : '') + (selectMode ? ' selecting' : '') + '">' + selBox + '<div class="chat-bubble' + (mine ? ' mine' : '') + '">' + inner + '</div>' +
         '<div class="chat-meta' + (mine ? ' mine' : '') + '">' + esc(mine ? (m.senderName || 'Dispatch') : (c ? c.driver.name : 'Driver')) + ' · ' + fmtDate(m.createdAt) + status + '</div></div>';
@@ -2478,7 +2483,7 @@ async function viewDispatch(main) {
     if (!confirm('Delete ' + ids.length + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone? The driver will no longer see them either.')) return;
     try {
       const r = await api('/api/admin/messages/' + state.dispatchDriverId, { method: 'DELETE', body: JSON.stringify({ ids }) });
-      toast('Deleted ' + (r && r.deleted != null ? r.deleted : ids.length) + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone.', 'ok');
+      toast('Deleted ' + (r && r.deleted != null ? r.deleted : ids.length) + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone.' + (r && r.skippedOld ? ' ' + r.skippedOld + ' skipped — older than 7 minutes.' : ''), 'ok');
       exitSelectMode();
       loadThread();
       refreshConvos();
