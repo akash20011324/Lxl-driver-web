@@ -30,12 +30,34 @@ export async function notifyDriver(db, driverId, type, title, body) {
     console.error('[push] failed to read push token:', err.message);
     return;
   }
-  if (!token || !Expo.isExpoPushToken(token)) return;
+  if (!token) {
+    console.log('[push] driver ' + driverId + ' has NO push token — in-app notification only');
+    return;
+  }
+  if (!Expo.isExpoPushToken(token)) {
+    console.log('[push] driver ' + driverId + ' push token is not a valid Expo token — in-app only');
+    return;
+  }
 
   try {
     const chunks = expo.chunkPushNotifications([{ to: token, title, body, sound: 'default', priority: 'high', channelId: 'lxl-default', data: { type } }]);
     for (const chunk of chunks) {
-      await expo.sendPushNotificationsAsync(chunk);
+      const tickets = await expo.sendPushNotificationsAsync(chunk);
+      console.log('[push] tickets for driver ' + driverId + ': ' + JSON.stringify(tickets));
+      const ids = (tickets || []).filter(t => t && t.status === 'ok' && t.id).map(t => t.id);
+      if (ids.length) {
+        // Delivery receipts land a few seconds later; log any APNs-level
+        // error (DeviceNotRegistered, InvalidCredentials, ...) so a
+        // silent phone can be diagnosed from the server logs.
+        setTimeout(async () => {
+          try {
+            const receipts = await expo.getPushNotificationReceiptsAsync(ids);
+            console.log('[push] receipts for driver ' + driverId + ': ' + JSON.stringify(receipts));
+          } catch (e) {
+            console.error('[push] receipt check failed:', e.message);
+          }
+        }, 5000);
+      }
     }
   } catch (err) {
     console.error('[push] Expo send failed (non-fatal):', err.message);

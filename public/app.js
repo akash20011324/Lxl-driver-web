@@ -1550,6 +1550,8 @@ async function viewAdmins(main) {
 
 /* ---------- Trucks & Trailers (yard board + paperwork) ---------- */
 async function viewEquipment(main) {
+  document.body.classList.add('loads-bg'); // reefer dock-row photo + liquid glass (removed on view switch)
+  ensureLoadsBgLayer();
   const [trucks, trailers, drivers] = await Promise.all([
     api('/api/admin/trucks'), api('/api/admin/trailers'), api('/api/admin/drivers'),
   ]);
@@ -1642,16 +1644,18 @@ function unitCard(u, type, pair) {
     : stat('DRIVER', u.driverName || 'None') +
       stat('TRUCK', pair ? pair.unitNumber : '—') +
       stat('PLATE', u.plate || '—');
-  return '<div class="unit-card" data-unit="' + type + '" data-id="' + u.id + '">' +
-    '<div class="flex-between"><span class="unit-no">' + esc(u.unitNumber) + '</span>' +
-    (u.yardStatus === 'road' ? '<span class="pill blue">On the Road</span>' : '<span class="pill green">In the Yard</span>') + '</div>' +
+  return '<div class="unit-card tile" data-unit="' + type + '" data-id="' + u.id + '">' +
+    '<div class="tile-stripe ' + (u.yardStatus === 'road' ? 'road' : 'yard') + '"></div>' +
+    '<div class="tile-body">' +
+    '<span class="tile-status ' + (u.yardStatus === 'road' ? 'road' : 'yard') + '">' + (u.yardStatus === 'road' ? '● ON THE ROAD' : '● IN THE YARD') + '</span>' +
+    '<div class="tile-num">' + esc(u.unitNumber) + '</div>' +
     '<p class="muted small">' + esc(desc || '—') + (u.vin ? ' · VIN ' + esc(u.vin) : '') + (type === 'truck' && u.plate ? ' · Plate ' + esc(u.plate) : '') + '</p>' +
     '<div class="unit-stats">' + stats + '</div>' +
     '<div class="row">' +
+    '<button class="btn btn-blue btn-sm" data-doc-btn>Documents</button>' +
     '<button class="btn btn-ghost btn-sm" data-yard-toggle>Move to ' + (u.yardStatus === 'road' ? 'Yard' : 'Road') + '</button>' +
     '<select data-assign-select>' + driverOpts + '</select>' +
-    '<button class="btn btn-ghost btn-sm" data-assign-btn>Assign</button>' +
-    '<button class="btn btn-ghost btn-sm" data-doc-btn>Documents</button>' +
+    '<button class="btn btn-gold btn-sm" data-assign-btn>Assign</button>' +
     '</div>' +
     (type === 'truck'
       ? '<div class="row"><label class="small" for="odo-' + u.id + '">Odometer (mi)</label>' +
@@ -1660,7 +1664,7 @@ function unitCard(u, type, pair) {
         (u.odometerUpdatedAt ? '<span class="muted small">Updated ' + esc(fmtDate(u.odometerUpdatedAt)) + '</span>' : '') +
         '</div>'
       : '') +
-    '</div>';
+    '</div></div>';
 }
 function bindUnitCards(main, type) {
   const base = type === 'truck' ? '/api/admin/trucks' : '/api/admin/trailers';
