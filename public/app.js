@@ -225,6 +225,200 @@ function openWallpaperEditor(file, onSet) {
   }));
 }
 
+/* ---------- Unit (equipment) documents: expiry + status ---------- */
+const EQUIP_DOC_LABELS = {
+  cab_card: 'Cab Card', registration: 'Registration', insurance: 'Insurance',
+  annual_inspection: 'Annual Inspection', ifta: 'IFTA License', title: 'Title',
+  permit: 'Permit', other: 'Other',
+};
+const EQUIP_DOC_TYPES_ALL = Object.keys(EQUIP_DOC_LABELS);
+const EQUIP_DOC_CORE = ['cab_card', 'insurance', 'annual_inspection', 'ifta', 'registration'];
+
+/* Status for an expiry date (YYYY-MM-DD), judged on the viewer's local
+   calendar day: Expired / Expires today / Expires in N days (red up to a
+   week, amber up to a month) / Active / no expiry on file. */
+function equipDocStatus(expiryDate) {
+  if (!expiryDate) return { key: 'none', label: 'No expiry date', cls: 'grey' };
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expiryDate);
+  if (!m) return { key: 'none', label: 'No expiry date', cls: 'grey' };
+  const exp = new Date(+m[1], +m[2] - 1, +m[3]);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((exp - today) / 86400000);
+  if (days < 0) return { key: 'expired', label: 'Expired', cls: 'red', days };
+  if (days === 0) return { key: 'soon', label: 'Expires today', cls: 'red', days };
+  if (days <= 7) return { key: 'soon', label: 'Expires in ' + days + (days === 1 ? ' day' : ' days'), cls: 'red', days };
+  if (days <= 30) return { key: 'soon', label: 'Expires in ' + days + ' days', cls: 'amber', days };
+  return { key: 'active', label: 'Active', cls: 'green', days };
+}
+
+function fmtExpiry(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+  if (!m) return '';
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return months[+m[2] - 1] + ' ' + (+m[3]) + ', ' + m[1];
+}
+
+/* ---------- Unit documents page (per truck / trailer) ----------
+   Opened from the Documents button on a Trucks & Trailers card — its
+   OWN page, nothing to do with the load Documents (BOLs). Tiles for the
+   core papers (cab card, insurance, annual inspection, IFTA,
+   registration) plus anything else on file. The server reads the issue
+   and expiry dates off the upload by itself; the tiles show the dates
+   with a live status: green Active, yellow expiring, red Expired. */
+async function viewUnitDocuments(main) {
+  const target = state.unitDocsTarget;
+  if (!target) { renderAdminView('equipment'); return; }
+  const [trucks, trailers, docs] = await Promise.all([
+    api('/api/admin/trucks').catch(() => []),
+    api('/api/admin/trailers').catch(() => []),
+    api('/api/admin/equipment-documents?unitType=' + target.type + '&unitId=' + target.id).catch(() => []),
+  ]);
+  const unit = (target.type === 'truck' ? (trucks || []) : (trailers || [])).find(u => u.id === target.id);
+  if (!unit) { toast('That unit no longer exists.', 'err'); renderAdminView('equipment'); return; }
+  const list = Array.isArray(docs) ? docs : [];
+  const desc = target.type === 'truck'
+    ? [unit.year, unit.make, unit.model].filter(Boolean).join(' ')
+    : [unit.year, unit.kind].filter(Boolean).join(' ');
+  const byType = new Map();
+  for (const d of list) {
+    if (!byType.has(d.docType)) byType.set(d.docType, []);
+    byType.get(d.docType).push(d);
+  }
+  let nActive = 0, nSoon = 0, nExpired = 0;
+  for (const d of list) {
+    const st = equipDocStatus(d.expiryDate);
+    if (st.key === 'active') nActive++;
+    else if (st.key === 'soon') nSoon++;
+    else if (st.key === 'expired') nExpired++;
+  }
+  const nMissing = EQUIP_DOC_CORE.filter(t => !byType.has(t)).length;
+  const countdown = (d) => {
+    const st = equipDocStatus(d.expiryDate);
+    if (st.key === 'expired') return 'Expired ' + fmtExpiry(d.expiryDate);
+    if (st.key === 'soon' || st.key === 'active') return st.days + (st.days === 1 ? ' day' : ' days') + ' left · expires ' + fmtExpiry(d.expiryDate);
+    return 'No expiry date — add it below';
+  };
+  const tileHtml = (d) => {
+    const st = equipDocStatus(d.expiryDate);
+    return '<div class="ud-tile ' + st.cls + '">' +
+      '<div class="ud-tile-top"><span class="ud-tile-name">' + esc(EQUIP_DOC_LABELS[d.docType] || d.docType) + '</span>' +
+      '<span class="doc-pill ' + st.cls + '">' + st.label + '</span></div>' +
+      '<div class="ud-file">' + esc(d.filename || '') + (d.note ? ' · ' + esc(d.note) : '') + '</div>' +
+      '<div class="ud-count">' + countdown(d) + '</div>' +
+      '<div class="ud-dates">' +
+      '<label>Issued<input type="date" data-issued-input="' + d.id + '" value="' + esc(d.issuedDate || '') + '"></label>' +
+      '<label>Expires<input type="date" data-exp-input="' + d.id + '" value="' + esc(d.expiryDate || '') + '"></label></div>' +
+      '<div class="ud-acts"><button class="btn btn-ghost btn-sm" type="button" data-unit-doc-view="' + d.id + '">View</button>' +
+      '<button class="btn btn-ghost btn-sm" type="button" data-tile-pick="' + d.docType + '">Replace</button>' +
+      '<button class="btn btn-danger btn-sm" type="button" data-unit-doc-del="' + d.id + '">Delete</button></div></div>';
+  };
+  const missingTile = (t) =>
+    '<div class="ud-tile missing"><div class="ud-tile-top"><span class="ud-tile-name">' + EQUIP_DOC_LABELS[t] + '</span>' +
+    '<span class="doc-pill grey">Missing</span></div>' +
+    '<div class="ud-count">Not uploaded yet</div>' +
+    '<div class="ud-acts"><button class="btn btn-sm" type="button" data-tile-pick="' + t + '">Upload</button></div></div>';
+  const coreTiles = EQUIP_DOC_CORE.map(t => {
+    const ds = byType.get(t) || [];
+    return ds.length ? ds.map(tileHtml).join('') : missingTile(t);
+  }).join('');
+  const extraTiles = list.filter(d => !EQUIP_DOC_CORE.includes(d.docType)).map(tileHtml).join('');
+  main.innerHTML = '<button class="btn btn-ghost btn-sm" id="udBack" type="button">← Trucks &amp; Trailers</button>' +
+    '<div class="rc-head"><h1>Documents — ' + esc(unit.unitNumber) + '</h1>' +
+    (unit.yardStatus === 'road' ? '<span class="pill blue">On the Road</span>' : '<span class="pill green">In the Yard</span>') + '</div>' +
+    '<p class="muted">' + esc((target.type === 'truck' ? 'Truck' : 'Trailer') + (desc ? ' · ' + desc : '') + (unit.driverName ? ' · Driver: ' + unit.driverName : '')) + '</p>' +
+    '<div class="ud-summary">' +
+    '<span class="doc-pill green">' + nActive + ' Active</span>' +
+    '<span class="doc-pill amber">' + nSoon + ' Expiring</span>' +
+    '<span class="doc-pill red">' + nExpired + ' Expired</span>' +
+    '<span class="doc-pill grey">' + nMissing + ' Missing</span></div>' +
+    '<p class="small muted">Upload a photo or scan of a paper and the dates are read off it automatically — check them on the tile and fix any date with the date boxes.</p>' +
+    '<div class="ud-grid">' + coreTiles + extraTiles + '</div>' +
+    '<div class="card"><h3>Add another document</h3>' +
+    '<form class="unit-doc-form" id="udAddForm">' +
+    '<div class="field"><label>Document type</label><select name="docType">' +
+    EQUIP_DOC_TYPES_ALL.map(t => '<option value="' + t + '">' + EQUIP_DOC_LABELS[t] + '</option>').join('') +
+    '</select></div>' +
+    '<div class="field"><label>File *</label><input type="file" name="file" required></div>' +
+    '<div class="field"><label>Note</label><input name="note"></div>' +
+    '<button class="btn btn-sm" type="submit">Upload</button></form></div>' +
+    '<input type="file" id="udTileFile" hidden>';
+  document.getElementById('udBack').addEventListener('click', () => renderAdminView('equipment'));
+  const uploadFor = async (docType, file) => {
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('unitType', target.type);
+    fd.append('unitId', String(target.id));
+    fd.append('docType', docType);
+    try {
+      const r = await api('/api/admin/equipment-documents', { method: 'POST', body: fd });
+      const label = EQUIP_DOC_LABELS[docType] || docType;
+      if (r && r.detected && (r.detected.expiryDate || r.detected.issuedDate)) {
+        toast(label + ' saved — dates read automatically' +
+          (r.detected.issuedDate ? ' · issued ' + fmtExpiry(r.detected.issuedDate) : '') +
+          (r.detected.expiryDate ? ' · expires ' + fmtExpiry(r.detected.expiryDate) : '') + '.', 'ok');
+      } else {
+        toast(label + ' saved — no dates found on it; add them on the tile.', 'ok');
+      }
+      renderAdminView('unitDocs');
+    } catch (err) { showError(err); }
+  };
+  const tileFile = document.getElementById('udTileFile');
+  let pendingType = null;
+  main.querySelectorAll('[data-tile-pick]').forEach(b => b.addEventListener('click', () => {
+    pendingType = b.dataset.tilePick;
+    tileFile.value = '';
+    tileFile.click();
+  }));
+  tileFile.addEventListener('change', () => {
+    if (pendingType && tileFile.files && tileFile.files[0]) uploadFor(pendingType, tileFile.files[0]);
+    pendingType = null;
+  });
+  main.querySelectorAll('[data-unit-doc-view]').forEach(b => b.addEventListener('click', () => {
+    const d = list.find(x => String(x.id) === b.dataset.unitDocView);
+    if (d) downloadFile(d.url, d.filename, true, d.mimeType);
+  }));
+  main.querySelectorAll('[data-unit-doc-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Delete this document?')) return;
+    try {
+      await api('/api/admin/equipment-documents/' + b.dataset.unitDocDel, { method: 'DELETE' });
+      toast('Document deleted.', 'ok');
+      renderAdminView('unitDocs');
+    } catch (err) { showError(err); }
+  }));
+  const patchDate = async (id, body) => {
+    try {
+      await api('/api/admin/equipment-documents/' + id, { method: 'PATCH', body: JSON.stringify(body) });
+      toast('Date saved.', 'ok');
+      renderAdminView('unitDocs');
+    } catch (err) { showError(err); }
+  };
+  main.querySelectorAll('[data-exp-input]').forEach(inp => inp.addEventListener('change', () =>
+    patchDate(inp.dataset.expInput, { expiryDate: inp.value || null })));
+  main.querySelectorAll('[data-issued-input]').forEach(inp => inp.addEventListener('change', () =>
+    patchDate(inp.dataset.issuedInput, { issuedDate: inp.value || null })));
+  document.getElementById('udAddForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const file = form.file.files && form.file.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('unitType', target.type);
+    fd.append('unitId', String(target.id));
+    fd.append('docType', form.docType.value);
+    if (form.note.value) fd.append('note', form.note.value);
+    try {
+      const r = await api('/api/admin/equipment-documents', { method: 'POST', body: fd });
+      const label = EQUIP_DOC_LABELS[form.docType.value] || 'Document';
+      if (r && r.detected && r.detected.expiryDate) toast(label + ' saved — expires ' + fmtExpiry(r.detected.expiryDate) + ' (read automatically).', 'ok');
+      else toast(label + ' saved.', 'ok');
+      renderAdminView('unitDocs');
+    } catch (err) { showError(err); }
+  });
+}
+
 async function downloadFile(url, filename, view, mimeType) {
   try {
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
@@ -770,6 +964,7 @@ async function renderAdminView(view) {
     else if (view === 'equipment') await viewEquipment(main);
     else if (view === 'loads') await viewLoads(main);
     else if (view === 'documents') await viewDocuments(main);
+    else if (view === 'unitDocs') await viewUnitDocuments(main);
     else if (view === 'requests') await viewRequests(main);
     else if (view === 'dispatch') await viewDispatch(main);
     else if (view === 'locations') await viewLocations(main);
@@ -1365,11 +1560,16 @@ async function viewEquipment(main) {
   const roadCount = tList.concat(rList).filter(u => u.yardStatus === 'road').length;
   const chip = (key, label, n) => '<button class="chip' + (state.yardFilter === key ? ' active' : '') +
     '" data-yard="' + key + '">' + esc(label) + ' (' + n + ')</button>';
-  main.innerHTML = '<h1>Trucks &amp; Trailers</h1>' +
+  const pairFor = (u, type) => {
+    if (!u.driverId) return null;
+    const pool = type === 'truck' ? rList : tList;
+    return pool.find(x => x.driverId === u.driverId) || null;
+  };
+  main.innerHTML = '<div class="rc-head"><h1>Trucks &amp; Trailers</h1>' +
+    '<button class="btn" id="addTruckToggle" type="button">+ Add truck</button></div>' +
     '<div class="chips">' + chip('all', 'All units', tList.length + rList.length) +
     chip('yard', 'In the Yard', yardCount) + chip('road', 'On the Road', roadCount) + '</div>' +
-    '<h2>Trucks</h2><div id="truckList">' + tList.map(u => unitCard(u, 'truck')).join('') + '</div>' +
-    '<div class="card"><h3>Add truck</h3><form id="addTruckForm"><div class="form-row">' +
+    '<div class="card" id="addTruckCard" hidden><h3>Add truck</h3><form id="addTruckForm"><div class="form-row">' +
     '<div class="field"><label>Unit number *</label><input name="unitNumber" required></div>' +
     '<div class="field"><label>Make</label><input name="make"></div>' +
     '<div class="field"><label>Model</label><input name="model"></div>' +
@@ -1377,19 +1577,29 @@ async function viewEquipment(main) {
     '<div class="field"><label>Plate</label><input name="plate"></div>' +
     '<div class="field"><label>VIN</label><input name="vin"></div>' +
     '</div><div class="form-actions"><button class="btn" type="submit">Add truck</button></div></form></div>' +
-    '<h2>Trailers</h2><div id="trailerList">' + rList.map(u => unitCard(u, 'trailer')).join('') + '</div>' +
-    '<div class="card"><h3>Add trailer</h3><form id="addTrailerForm"><div class="form-row">' +
+    '<div class="unit-grid">' + tList.map(u => unitCard(u, 'truck', pairFor(u, 'truck'))).join('') + '</div>' +
+    '<div class="rc-head"><h2>Trailers</h2>' +
+    '<button class="btn" id="addTrailerToggle" type="button">+ Add trailer</button></div>' +
+    '<div class="card" id="addTrailerCard" hidden><h3>Add trailer</h3><form id="addTrailerForm"><div class="form-row">' +
     '<div class="field"><label>Unit number *</label><input name="unitNumber" required></div>' +
-    '<div class="field"><label>Kind / type</label><input name="kind" placeholder="e.g. Dry van"></div>' +
+    '<div class="field"><label>Kind / type</label><input name="kind" placeholder="e.g. Reefer"></div>' +
     '<div class="field"><label>Year</label><input name="year" type="number"></div>' +
     '<div class="field"><label>Plate</label><input name="plate"></div>' +
     '<div class="field"><label>VIN</label><input name="vin"></div>' +
-    '</div><div class="form-actions"><button class="btn" type="submit">Add trailer</button></div></form></div>';
+    '</div><div class="form-actions"><button class="btn" type="submit">Add trailer</button></div></form></div>' +
+    '<div class="unit-grid">' + rList.map(u => unitCard(u, 'trailer', pairFor(u, 'trailer'))).join('') + '</div>';
 
   main.querySelectorAll('[data-yard]').forEach(b => b.addEventListener('click', () => {
     state.yardFilter = b.dataset.yard;
     renderAdminView('equipment');
   }));
+  const toggleCard = (btnId, cardId) => {
+    const btn = document.getElementById(btnId);
+    const card = document.getElementById(cardId);
+    if (btn && card) btn.addEventListener('click', () => { card.hidden = !card.hidden; });
+  };
+  toggleCard('addTruckToggle', 'addTruckCard');
+  toggleCard('addTrailerToggle', 'addTrailerCard');
   bindUnitCards(main, 'truck');
   bindUnitCards(main, 'trailer');
   document.getElementById('addTruckForm').addEventListener('submit', async (e) => {
@@ -1416,25 +1626,32 @@ function unitVisible(u) {
   if (state.yardFilter === 'all') return true;
   return u.yardStatus === state.yardFilter;
 }
-function unitCard(u, type) {
+function unitCard(u, type, pair) {
   if (!unitVisible(u)) return '';
   const desc = type === 'truck'
     ? [u.year, u.make, u.model].filter(Boolean).join(' ')
     : [u.year, u.kind].filter(Boolean).join(' ');
   const driverOpts = '<option value="">— Unassigned —</option>' + state.driversCache.map(d =>
     '<option value="' + d.id + '"' + (u.driverId === d.id ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('');
-  const key = type + '-' + u.id;
-  const open = state.expandedPaperwork[key];
+  const stat = (lbl, val, gold) => '<div class="unit-stat"><div class="lbl">' + lbl + '</div>' +
+    '<div class="v' + (gold ? ' gold' : '') + '">' + esc(val) + '</div></div>';
+  const stats = type === 'truck'
+    ? stat('DRIVER', u.driverName || 'None') +
+      stat('TRAILER', pair ? pair.unitNumber : '—') +
+      stat('ODOMETER', u.odometerMi != null ? Number(u.odometerMi).toLocaleString('en-US') + ' mi' : '—', true)
+    : stat('DRIVER', u.driverName || 'None') +
+      stat('TRUCK', pair ? pair.unitNumber : '—') +
+      stat('PLATE', u.plate || '—');
   return '<div class="unit-card" data-unit="' + type + '" data-id="' + u.id + '">' +
     '<div class="flex-between"><span class="unit-no">' + esc(u.unitNumber) + '</span>' +
     (u.yardStatus === 'road' ? '<span class="pill blue">On the Road</span>' : '<span class="pill green">In the Yard</span>') + '</div>' +
-    '<p class="muted small">' + esc(desc || '—') + (u.plate ? ' · Plate ' + esc(u.plate) : '') + (u.vin ? ' · VIN ' + esc(u.vin) : '') + '</p>' +
-    '<p class="small">Assigned driver: <strong>' + esc(u.driverName || 'None') + '</strong></p>' +
+    '<p class="muted small">' + esc(desc || '—') + (u.vin ? ' · VIN ' + esc(u.vin) : '') + (type === 'truck' && u.plate ? ' · Plate ' + esc(u.plate) : '') + '</p>' +
+    '<div class="unit-stats">' + stats + '</div>' +
     '<div class="row">' +
     '<button class="btn btn-ghost btn-sm" data-yard-toggle>Move to ' + (u.yardStatus === 'road' ? 'Yard' : 'Road') + '</button>' +
     '<select data-assign-select>' + driverOpts + '</select>' +
     '<button class="btn btn-ghost btn-sm" data-assign-btn>Assign</button>' +
-    '<button class="btn btn-ghost btn-sm" data-paperwork-btn>' + (open ? 'Hide paperwork' : 'Paperwork') + '</button>' +
+    '<button class="btn btn-ghost btn-sm" data-doc-btn>Documents</button>' +
     '</div>' +
     (type === 'truck'
       ? '<div class="row"><label class="small" for="odo-' + u.id + '">Odometer (mi)</label>' +
@@ -1443,13 +1660,12 @@ function unitCard(u, type) {
         (u.odometerUpdatedAt ? '<span class="muted small">Updated ' + esc(fmtDate(u.odometerUpdatedAt)) + '</span>' : '') +
         '</div>'
       : '') +
-    '<div class="docs-list" data-paperwork></div></div>';
+    '</div>';
 }
 function bindUnitCards(main, type) {
   const base = type === 'truck' ? '/api/admin/trucks' : '/api/admin/trailers';
   main.querySelectorAll('.unit-card[data-unit="' + type + '"]').forEach(card => {
     const id = card.dataset.id;
-    const key = type + '-' + id;
     card.querySelector('[data-yard-toggle]').addEventListener('click', async () => {
       const cur = card.querySelector('.pill').textContent.indexOf('Road') !== -1 ? 'road' : 'yard';
       try {
@@ -1466,6 +1682,10 @@ function bindUnitCards(main, type) {
         toast(driverId ? 'Driver assigned.' : 'Driver unassigned.', 'ok');
         renderAdminView('equipment');
       } catch (err) { showError(err); }
+    });
+    card.querySelector('[data-doc-btn]').addEventListener('click', () => {
+      state.unitDocsTarget = { type, id: parseInt(id, 10) };
+      renderAdminView('unitDocs');
     });
     if (type === 'truck') {
       const odoInput = card.querySelector('[data-odo-input]');
@@ -1485,50 +1705,6 @@ function bindUnitCards(main, type) {
         } catch (err) { showError(err); }
       });
     }
-    card.querySelector('[data-paperwork-btn]').addEventListener('click', async () => {
-      state.expandedPaperwork[key] = !state.expandedPaperwork[key];
-      const box = card.querySelector('[data-paperwork]');
-      if (!state.expandedPaperwork[key]) { box.innerHTML = ''; card.querySelector('[data-paperwork-btn]').textContent = 'Paperwork'; return; }
-      card.querySelector('[data-paperwork-btn]').textContent = 'Hide paperwork';
-      box.innerHTML = '<p class="muted small">Loading paperwork…</p>';
-      try {
-        const docs = await api('/api/admin/equipment-documents?unitType=' + type + '&unitId=' + id);
-        const list = Array.isArray(docs) ? docs : [];
-        box.innerHTML = (list.length ? '<div class="table-wrap"><table><thead><tr><th>Type</th><th>File</th><th>Note</th><th>Date</th><th></th></tr></thead><tbody>' +
-          list.map(d => '<tr><td>' + esc(d.docType) + '</td><td>' + esc(d.filename) + '</td><td>' + esc(d.note || '—') + '</td><td>' + fmtDateOnly(d.createdAt) + '</td>' +
-          '<td><button class="btn btn-ghost btn-sm" data-view-doc="' + d.id + '">View</button> ' +
-          '<button class="btn btn-danger btn-sm" data-del-doc="' + d.id + '">Delete</button></td></tr>').join('') + '</tbody></table></div>'
-          : '<p class="empty">No paperwork on file for this unit.</p>') +
-          '<form class="inline-form mt" data-doc-form><div class="field"><label>Document type</label><select name="docType">' +
-          ['registration', 'insurance', 'annual_inspection', 'title', 'permit', 'other'].map(t => '<option value="' + t + '">' + t.replace('_', ' ') + '</option>').join('') +
-          '</select></div><div class="field"><label>File *</label><input type="file" name="file" required></div>' +
-          '<div class="field"><label>Note</label><input name="note"></div>' +
-          '<button class="btn btn-sm" type="submit">Upload</button></form>';
-        box.querySelectorAll('[data-view-doc]').forEach(b => b.addEventListener('click', () => {
-          const d = list.find(x => String(x.id) === b.dataset.viewDoc);
-          if (d) downloadFile(d.url, d.filename, true, d.mimeType);
-        }));
-        box.querySelectorAll('[data-del-doc]').forEach(b => b.addEventListener('click', async () => {
-          if (!confirm('Delete this document?')) return;
-          try { await api('/api/admin/equipment-documents/' + b.dataset.delDoc, { method: 'DELETE' }); toast('Document deleted.', 'ok'); state.expandedPaperwork[key] = false; renderAdminView('equipment'); }
-          catch (err) { showError(err); }
-        }));
-        box.querySelector('[data-doc-form]').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const fd = new FormData(e.target);
-          fd.append('unitType', type);
-          fd.append('unitId', id);
-          try {
-            await api('/api/admin/equipment-documents', { method: 'POST', body: fd });
-            toast('Document uploaded.', 'ok');
-            state.expandedPaperwork[key] = false;
-            renderAdminView('equipment');
-          } catch (err) { showError(err); }
-        });
-      } catch (err) { box.innerHTML = '<p class="empty">Could not load paperwork.</p>'; showError(err); }
-    });
-    // Auto-open paperwork if it was open before a re-render.
-    if (state.expandedPaperwork[key]) card.querySelector('[data-paperwork-btn]').click();
   });
 }
 
@@ -1826,6 +2002,7 @@ async function viewDocuments(main) {
   main.innerHTML = '<div class="docs-page" id="docsPage">' +
     '<div class="rc-head"><h1>Documents</h1>' +
     '<input id="docsSearch" class="docs-search" type="search" placeholder="Search load # — e.g. 2038499" autocomplete="off"></div>' +
+
     '<p class="docs-quote">“Every mile counts. Every paper proves it.”</p>' +
     (shown.length ? shown.map(sectionHtml).join('') : '<div class="card"><p class="empty">No documents yet.</p></div>') +
     '<p class="docs-nomatch" id="docsNoMatch" hidden>No load matches that number.</p>' +

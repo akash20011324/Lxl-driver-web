@@ -1075,3 +1075,48 @@ body.loads-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .wp-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .wp-set { background: var(--blue, #1E40AF); color: #fff; border: none; border-radius: 10px; padding: 9px 18px; font-weight: 700; cursor: pointer; }
 .wp-set:disabled { opacity: 0.55; cursor: default; }
+
+/* Documents: loads/units switch + unit documents with expiry status */
+.docs-tabs { display: inline-flex; gap: 6px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); padding: 4px; border-radius: 999px; margin-bottom: 16px; }
+.docs-tab { border: none; background: transparent; color: #c7d2e4; font-weight: 700; font-size: 13px; padding: 8px 18px; border-radius: 999px; cursor: pointer; }
+.docs-tab.on { background: #1E40AF; color: #fff; }
+.doc-pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+.doc-pill.red { background: rgba(220, 38, 38, 0.22); color: #f87171; border: 1px solid rgba(220, 38, 38, 0.5); }
+.doc-pill.amber { background: rgba(217, 119, 6, 0.22); color: #fbbf24; border: 1px solid rgba(217, 119, 6, 0.5); }
+.doc-pill.green { background: rgba(22, 163, 74, 0.22); color: #4ade80; border: 1px solid rgba(22, 163, 74, 0.5); }
+.doc-pill.grey { background: rgba(255, 255, 255, 0.08); color: #aeb9cc; border: 1px solid rgba(255, 255, 255, 0.16); }
+.unit-doc-card { margin-bottom: 16px; }
+.unit-doc-row { display: grid; grid-template-columns: 150px 1fr 240px auto; gap: 12px; align-items: center; padding: 10px 4px; border-top: 1px solid rgba(255, 255, 255, 0.07); }
+.unit-doc-row.missing { opacity: 0.75; }
+.unit-doc-label { font-weight: 700; font-size: 13.5px; }
+.unit-doc-exp { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.unit-doc-exp input[type="date"], .table-wrap input[type="date"] { background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.16); color: #e7edf7; border-radius: 8px; padding: 5px 8px; font-size: 12.5px; color-scheme: dark; }
+.unit-doc-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.07); padding-top: 12px; }
+@media (max-width: 760px) { .unit-doc-row { grid-template-columns: 1fr; } }
+
+/* Unit documents page (per truck/trailer): tiles with status colors */
+.ud-summary { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 14px; }
+.ud-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-bottom: 16px; }
+.ud-tile { background: rgba(16, 22, 38, 0.82); border: 1px solid rgba(255, 255, 255, 0.12); border-left: 4px solid rgba(255, 255, 255, 0.25); border-radius: 14px; padding: 14px 16px; backdrop-filter: blur(10px); }
+.ud-tile.green { border-left-color: #22c55e; }
+.ud-tile.amber { border-left-color: #f59e0b; }
+.ud-tile.red { border-left-color: #ef4444; }
+.ud-tile.grey { border-left-color: rgba(255, 255, 255, 0.25); }
+.ud-tile.missing { border-style: dashed; border-left-style: solid; opacity: 0.85; }
+.ud-tile-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ud-tile-name { font-weight: 800; font-size: 15px; }
+.ud-file { color: #aeb9cc; font-size: 12.5px; margin-top: 4px; word-break: break-all; }
+.ud-count { font-weight: 700; font-size: 13.5px; margin-top: 8px; }
+.ud-dates { display: flex; gap: 10px; margin-top: 10px; }
+.ud-dates label { flex: 1; font-size: 11px; font-weight: 700; color: #8fa0ba; text-transform: uppercase; letter-spacing: 0.04em; }
+.ud-dates input[type="date"] { display: block; width: 100%; margin-top: 4px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.16); color: #e7edf7; border-radius: 8px; padding: 6px 8px; font-size: 12.5px; color-scheme: dark; }
+.ud-acts { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+
+/* Trucks & Trailers: big glass cards, same for trailers (no photos) */
+.unit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.unit-card { background: rgba(16, 22, 38, 0.82); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px; padding: 18px; margin-bottom: 0; backdrop-filter: blur(12px); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); }
+.unit-card .unit-no { font-size: 24px; font-weight: 800; }
+.unit-stats { display: flex; gap: 28px; flex-wrap: wrap; margin: 14px 0 4px; padding: 12px 0; border-top: 1px solid rgba(255, 255, 255, 0.08); border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.unit-stat .lbl { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; color: #8fa0ba; }
+.unit-stat .v { font-size: 16.5px; font-weight: 800; margin-top: 3px; }
+.unit-stat .v.gold { color: #F2B705; }

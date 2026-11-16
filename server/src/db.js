@@ -176,9 +176,11 @@ CREATE TABLE IF NOT EXISTS equipment_documents (
   unitType TEXT NOT NULL CHECK (unitType IN ('truck', 'trailer')),
   unitId INTEGER NOT NULL,
   unitNumber TEXT NOT NULL,
-  docType TEXT NOT NULL CHECK (docType IN ('registration', 'insurance', 'annual_inspection', 'title', 'permit', 'other')),
+  docType TEXT NOT NULL CHECK (docType IN ('cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'other')),
   note TEXT,
   fileId INTEGER NOT NULL REFERENCES files(id),
+  expiryDate TEXT,
+  issuedDate TEXT,
   createdAt TEXT NOT NULL
 );
 
@@ -394,6 +396,53 @@ export function openDb(dataDir) {
       );
       db.exec('DROP TABLE documents');
       db.exec('ALTER TABLE documents_new RENAME TO documents');
+      db.exec('COMMIT');
+    } catch (e) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // already rolled back
+      }
+      throw e;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+  // Migrate equipment_documents: add the expiryDate column and widen the
+  // docType CHECK (cab card + IFTA). SQLite cannot alter a CHECK in place,
+  // so rebuild the table when the new types are missing.
+  const eqCols = db.prepare('PRAGMA table_info(equipment_documents)').all();
+  if (eqCols.length && !eqCols.some(c => c.name === 'expiryDate')) {
+    db.exec('ALTER TABLE equipment_documents ADD COLUMN expiryDate TEXT');
+  }
+  const eqCols2 = db.prepare('PRAGMA table_info(equipment_documents)').all();
+  if (eqCols2.length && !eqCols2.some(c => c.name === 'issuedDate')) {
+    db.exec('ALTER TABLE equipment_documents ADD COLUMN issuedDate TEXT');
+  }
+  const eqTable = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'equipment_documents'")
+    .get();
+  if (eqTable && !eqTable.sql.includes('cab_card')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.exec(`CREATE TABLE equipment_documents_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  unitType TEXT NOT NULL CHECK (unitType IN ('truck', 'trailer')),
+  unitId INTEGER NOT NULL,
+  unitNumber TEXT NOT NULL,
+  docType TEXT NOT NULL CHECK (docType IN ('cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'other')),
+  note TEXT,
+  fileId INTEGER NOT NULL REFERENCES files(id),
+  expiryDate TEXT,
+  issuedDate TEXT,
+  createdAt TEXT NOT NULL
+)`);
+      db.exec(
+        'INSERT INTO equipment_documents_new (id, unitType, unitId, unitNumber, docType, note, fileId, expiryDate, issuedDate, createdAt) SELECT id, unitType, unitId, unitNumber, docType, note, fileId, expiryDate, issuedDate, createdAt FROM equipment_documents',
+      );
+      db.exec('DROP TABLE equipment_documents');
+      db.exec('ALTER TABLE equipment_documents_new RENAME TO equipment_documents');
       db.exec('COMMIT');
     } catch (e) {
       try {

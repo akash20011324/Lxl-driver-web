@@ -262,6 +262,8 @@ function serializeEquipmentDoc(d) {
     unitNumber: d.unitNumber,
     docType: d.docType,
     note: d.note ?? null,
+    expiryDate: d.expiryDate ?? null,
+    issuedDate: d.issuedDate ?? null,
     filename: d.originalFilename,
     mimeType: d.mimeType,
     url: `/files/${d.fileId}`,
@@ -452,10 +454,30 @@ app.post('/api/auth/login', (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.passwordHash))
     return err(res, 401, 'Invalid phone number, email or password');
   if (!user.active) return err(res, 403, 'Account is deactivated');
+  // A driver signing in is heading out: their truck and trailer move to
+  // On the Road on their own (owner's rule, 2026-11-15).
+  if (user.role === 'driver') {
+    try {
+      db.prepare("UPDATE trucks SET yardStatus = 'road' WHERE driverId = ?").run(user.id);
+      db.prepare("UPDATE trailers SET yardStatus = 'road' WHERE driverId = ?").run(user.id);
+    } catch { /* never block a sign-in */ }
+  }
   res.json({ user: publicUser(user), token: createSession(user.id) });
 });
 
 app.post('/api/auth/logout', auth, (req, res) => {
+  // A driver signing out is off duty and back at the yard: their truck and
+  // trailer move to In the Yard on their own (owner's rule, 2026-11-15).
+  if (req.user && req.user.role === 'driver') {
+    try {
+      const t = db.prepare("UPDATE trucks SET yardStatus = 'yard' WHERE driverId = ? AND yardStatus != 'yard'").run(req.user.id);
+      db.prepare("UPDATE trailers SET yardStatus = 'yard' WHERE driverId = ?").run(req.user.id);
+      if (t.changes) {
+        const truck = db.prepare('SELECT unitNumber FROM trucks WHERE driverId = ?').get(req.user.id);
+        notifyAdmins('equipment', 'Truck back in the yard', (req.user.name || 'A driver') + ' signed out — truck ' + (truck ? truck.unitNumber : '') + ' moved to In the Yard.').catch(() => {});
+      }
+    } catch { /* never block a sign-out */ }
+  }
   db.prepare('DELETE FROM sessions WHERE token = ?').run(req.token);
   res.json({ ok: true });
 });
@@ -2956,6 +2978,91 @@ admin.delete('/rate-confirmations/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Equipment document date auto-detection -------------------------------
+// Read the issue + expiry dates off an uploaded cab card / insurance /
+// inspection so the admin does not have to type them. PDFs via pdf.js
+// text, photos via tesseract OCR (same guarded pattern as receipt-amount:
+// the errorHandler is REQUIRED or a bad image kills the process). Never
+// throws — on any failure it returns {} and the dates stay blank for
+// manual entry.
+async function extractFileText(buf) {
+  const isPdf = buf.length >= 4 && buf.subarray(0, 4).toString('ascii') === '%PDF';
+  const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  const isPng = buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+  if (isPdf) return cleanRateText(await pdfTextFromBuffer(buf));
+  if ((isJpeg || isPng) && buf.length > 1024) {
+    const worker = await createWorker('eng', undefined, {
+      errorHandler: (e) => console.error('equipment-doc tesseract worker error', e),
+    });
+    try {
+      const { data } = await worker.recognize(buf);
+      return cleanRateText(data.text || '');
+    } finally {
+      try { await worker.terminate(); } catch { /* already gone */ }
+    }
+  }
+  return '';
+}
+
+const MONTHS_RX = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+function toIso(y, m, d) {
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+  if (y < 2015 || y > new Date().getUTCFullYear() + 7) return null;
+  return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+function findAllDates(text) {
+  const out = [];
+  const push = (iso, idx) => { if (iso) out.push({ iso, idx }); };
+  let m;
+  const rxNum = /\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\b/g;
+  while ((m = rxNum.exec(text))) push(toIso(+m[3], +m[1], +m[2]), m.index);
+  const rxNum2 = /\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{2})\b/g;
+  while ((m = rxNum2.exec(text))) push(toIso(2000 + (+m[3]), +m[1], +m[2]), m.index);
+  const rxIso = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+  while ((m = rxIso.exec(text))) push(toIso(+m[1], +m[2], +m[3]), m.index);
+  const rxMon = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/gi;
+  while ((m = rxMon.exec(text))) push(toIso(+m[3], MONTHS_RX[m[1].slice(0, 3).toLowerCase()], +m[2]), m.index);
+  const rxMon2 = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})\b/gi;
+  while ((m = rxMon2.exec(text))) push(toIso(+m[3], MONTHS_RX[m[2].slice(0, 3).toLowerCase()], +m[1]), m.index);
+  return out.sort((a, b) => a.idx - b.idx);
+}
+function dateNearLabel(text, dates, labelRx) {
+  const m = labelRx.exec(text);
+  if (!m) return null;
+  const after = dates.find(d => d.idx >= m.index && d.idx - m.index <= 48);
+  return after ? after.iso : null;
+}
+function detectDocDates(text) {
+  if (!text) return {};
+  const dates = findAllDates(text);
+  if (!dates.length) return {};
+  let expiry = dateNearLabel(text, dates, /expir\w*|valid\s+(through|until|thru|to)|exp\.?\s*date|coverage\s+(ends|through|until)/i);
+  let issued = dateNearLabel(text, dates, /issu\w*|effective|date\s+issued|inception/i);
+  const uniq = [...new Set(dates.map(d => d.iso))].sort();
+  if (!expiry && uniq.length) expiry = uniq[uniq.length - 1];
+  if (!issued && uniq.length > 1) issued = uniq[0];
+  if (issued && expiry && issued > expiry) issued = null;
+  if (issued === expiry) issued = null;
+  const out = {};
+  if (issued) out.issuedDate = issued;
+  if (expiry) out.expiryDate = expiry;
+  return out;
+}
+async function detectDatesForFile(filePath) {
+  try {
+    const buf = fs.readFileSync(filePath);
+    const text = await extractFileText(buf);
+    const found = detectDocDates(text);
+    console.log('equipment-doc dates', { bytes: buf.length, textLen: text.length, ...found });
+    return found;
+  } catch (e) {
+    console.error('equipment-doc date detection failed', e);
+    return {};
+  }
+}
+
 admin.get('/equipment-documents', (req, res) => {
   const { unitType, unitId } = req.query;
   let rows;
@@ -2975,10 +3082,12 @@ admin.get('/equipment-documents', (req, res) => {
   res.json(rows.map(serializeEquipmentDoc));
 });
 
-const EQUIP_DOC_TYPES = ['registration', 'insurance', 'annual_inspection', 'title', 'permit', 'other'];
+const EQUIP_DOC_TYPES = ['cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'other'];
+const EXPIRY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-admin.post('/equipment-documents', upload.single('file'), (req, res) => {
-  const { unitType, unitId, docType, note } = req.body || {};
+admin.post('/equipment-documents', upload.single('file'), async (req, res) => {
+  const { unitType, unitId, docType, note, expiryDate } = req.body || {};
+  if (expiryDate && !EXPIRY_RE.test(expiryDate)) return err(res, 400, 'expiryDate must be YYYY-MM-DD');
   if (!req.file) return err(res, 400, 'file is required');
   if (unitType !== 'truck' && unitType !== 'trailer') return err(res, 400, 'unitType must be "truck" or "trailer"');
   if (!unitId) return err(res, 400, 'unitId is required');
@@ -2989,13 +3098,54 @@ admin.post('/equipment-documents', upload.single('file'), (req, res) => {
   const fileId = insertFileRow(req.file, 'equipment', null, null);
   const id = db
     .prepare(
-      'INSERT INTO equipment_documents (unitType, unitId, unitNumber, docType, note, fileId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO equipment_documents (unitType, unitId, unitNumber, docType, note, fileId, expiryDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     )
-    .run(unitType, unitId, unit.unitNumber, docType, note ?? null, fileId, now()).lastInsertRowid;
+    .run(unitType, unitId, unit.unitNumber, docType, note ?? null, fileId, expiryDate || null, now()).lastInsertRowid;
+  // Auto-read the dates off the document when the admin did not type
+  // them (or did not type both). Detection never fails the upload.
+  let detected = {};
+  {
+    detected = await detectDatesForFile(req.file.path);
+    const fillExpiry = !expiryDate && detected.expiryDate ? detected.expiryDate : null;
+    const fillIssued = detected.issuedDate || null;
+    if (fillExpiry || fillIssued) {
+      db.prepare('UPDATE equipment_documents SET expiryDate = COALESCE(?, expiryDate), issuedDate = COALESCE(?, issuedDate) WHERE id = ?')
+        .run(fillExpiry, fillIssued, id);
+    }
+  }
   const row = db
     .prepare('SELECT e.*, f.originalFilename, f.mimeType FROM equipment_documents e JOIN files f ON f.id = e.fileId WHERE e.id = ?')
     .get(id);
-  res.status(201).json(serializeEquipmentDoc(row));
+  const out = serializeEquipmentDoc(row);
+  out.detected = detected;
+  res.status(201).json(out);
+});
+
+admin.patch('/equipment-documents/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM equipment_documents WHERE id = ?').get(req.params.id);
+  if (!row) return err(res, 404, 'Equipment document not found');
+  const body = req.body || {};
+  const hasExp = Object.prototype.hasOwnProperty.call(body, 'expiryDate');
+  const hasIss = Object.prototype.hasOwnProperty.call(body, 'issuedDate');
+  if (!hasExp && !hasIss) return err(res, 400, 'Nothing to update');
+  const sets = [];
+  const vals = [];
+  if (hasExp) {
+    if (body.expiryDate && !EXPIRY_RE.test(body.expiryDate)) return err(res, 400, 'expiryDate must be YYYY-MM-DD');
+    sets.push('expiryDate = ?');
+    vals.push(body.expiryDate || null);
+  }
+  if (hasIss) {
+    if (body.issuedDate && !EXPIRY_RE.test(body.issuedDate)) return err(res, 400, 'issuedDate must be YYYY-MM-DD');
+    sets.push('issuedDate = ?');
+    vals.push(body.issuedDate || null);
+  }
+  vals.push(row.id);
+  db.prepare('UPDATE equipment_documents SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals);
+  const updated = db
+    .prepare('SELECT e.*, f.originalFilename, f.mimeType FROM equipment_documents e JOIN files f ON f.id = e.fileId WHERE e.id = ?')
+    .get(row.id);
+  res.json(serializeEquipmentDoc(updated));
 });
 
 admin.delete('/equipment-documents/:id', (req, res) => {
