@@ -2955,7 +2955,7 @@ async function outlookAccessToken(user) {
 }
 
 async function outlookGraph(accessToken, path) {
-  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+  const res = await fetch(path.startsWith('http') ? path : `https://graph.microsoft.com/v1.0${path}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const data = await res.json().catch(() => ({}));
@@ -3276,6 +3276,13 @@ async function backfillRateConDetails() {
 }
 
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
+  // No duplicates, ever: the same file (by sha256 fingerprint) is the
+  // same rate confirmation, whichever mailbox or upload it came from.
+  const fileHash = fileBuffer ? crypto.createHash('sha256').update(fileBuffer).digest('hex') : null;
+  if (fileHash) {
+    const dup = db.prepare('SELECT r.*, f.originalFilename, f.mimeType FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId WHERE r.fileHash = ?').get(fileHash);
+    if (dup) { const out = serializeRateCon(dup); out.duplicate = true; return out; }
+  }
   // Pick a load and the file is named from the load — no typing. Typed
   // fields still win when given (older clients send them).
   let load = null;
@@ -3298,6 +3305,10 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
   if ((!broker || rateCents == null) && fileBuffer) detected = await extractRateConDetails(fileBuffer, subject);
   const finalBroker = broker ?? detected.broker ?? null;
   const finalRate = rateCents != null ? Number(rateCents) : (detected.rateCents ?? null);
+  if (finalRate != null) {
+    const dup = db.prepare('SELECT r.*, f.originalFilename, f.mimeType FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId WHERE r.reference = ? AND r.rateCents = ? AND r.pickupDate = ? AND r.deliveryDate = ?').get(ref, finalRate, pDate, dDate);
+    if (dup) { const out = serializeRateCon(dup); out.duplicate = true; return out; }
+  }
   let fileId = null;
   if (fileBuffer) {
     // Avoid clobbering an existing file with the same auto-generated name.
@@ -3316,7 +3327,7 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
   }
   const id = db
     .prepare(
-      'INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId, fileHash, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     .run(
       ref,
@@ -3328,6 +3339,7 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
       dDate,
       finalRate,
       fileId,
+      fileHash,
       now(),
     ).lastInsertRowid;
   const row = db
@@ -3410,11 +3422,18 @@ function extractRcLoadFields(text, subject) {
   const all = `${subject || ''}\n${text || ''}`;
   const lxl = all.match(/LXL[-\s]?(\d{4,})/i);
   const labeled = all.match(/(?:load|order|reference|ref|pro|shipment|trip|booking)\s*(?:#|no\.?|number|id)?\s*[:#]\s*([A-Z0-9][A-Z0-9-]{3,20})/i);
+  let loadRef = labeled ? labeled[1].toUpperCase() : null;
+  if (!loadRef && subject) {
+    const sm = subject.match(/(?:load|invoice|po|ref(?:erence)?)\s*#?\s*(\d{5,10}(?:-\d{1,3})?)/i)
+      || subject.match(/(\d{5,10}(?:-\d{1,3})?)\s*$/)
+      || (/confirmation/i.test(subject) ? subject.match(/\b(\d{6,10}(?:-\d{1,3})?)\b/) : null);
+    if (sm) loadRef = sm[1].toUpperCase();
+  }
   const truck = all.match(/(?:truck|tractor)\s*(?:#|no\.?|number|unit)?\s*[:#]\s*(\d{3,5})/i);
   const trailer = all.match(/trailer\s*(?:#|no\.?|number|unit)?\s*[:#]\s*(\d{3,5})/i);
   return {
     lxlRef: lxl ? 'LXL-' + lxl[1] : null,
-    loadRef: labeled ? labeled[1].toUpperCase() : null,
+    loadRef,
     truckNo: truck ? truck[1] : null,
     trailerNo: trailer ? trailer[1] : null,
     driverHint: /\bakash/i.test(all) ? 'akash' : /\barsh/i.test(all) ? 'arsh' : null,
@@ -3439,83 +3458,205 @@ function resolveImportedDriverId(f) {
   return null;
 }
 
+function extractScheduleRefs(text) {
+  // OTR "Schedule of Accounts" PDFs list each paid load by its invoice /
+  // load number — the same number the broker puts on the rate
+  // confirmation. Collect those numbers; ignore money (decimals,
+  // $-prefixed), date fragments, and our own MC number.
+  const refs = new Set();
+  const t = text || '';
+  for (const m of t.matchAll(/\b\d{6,10}(?:-\d{1,3})?\b/g)) {
+    const tok = m[0];
+    const before = t.slice(Math.max(0, m.index - 4), m.index);
+    if (/MC-?\s*$/.test(before)) continue;
+    if (/\$\s*$/.test(before)) continue;
+    const after = t.slice(m.index + tok.length, m.index + tok.length + 3);
+    if (/^\.\d/.test(after) || /^\//.test(after)) continue;
+    refs.add(tok.toUpperCase());
+    const stripped = tok.replace(/^0+/, '');
+    if (stripped) refs.add(stripped.toUpperCase());
+  }
+  return refs;
+}
+
+function refKey(ref) {
+  if (!ref) return null;
+  return String(ref).toUpperCase().trim().replace(/^0+(?=\d)/, '');
+}
+
+// Bulk-import runs live in memory (single-instance server). Phase 1
+// reads every OTR schedule in every connected mailbox and builds the
+// set of PAID load numbers; phase 2 imports only the rate
+// confirmations whose load number is in that set. A cancelled load is
+// never on a schedule, so its rate confirmation is held out.
+const rcImportRuns = new Map();
+function rcImportRun(runId) {
+  const nowMs = Date.now();
+  for (const [k, v] of rcImportRuns) if (nowMs - v.startedAt > 30 * 60 * 1000) rcImportRuns.delete(k);
+  if (runId && rcImportRuns.has(runId)) return rcImportRuns.get(runId);
+  const run = {
+    id: crypto.randomBytes(8).toString('hex'),
+    startedAt: nowMs,
+    paidRefs: new Set(),
+    scheduleHashes: new Set(),
+    examined: new Set(),
+    schedules: 0,
+    mailboxes: db.prepare('SELECT id, name, outlookEmail FROM users WHERE outlookRefreshToken IS NOT NULL ORDER BY isMainAdmin DESC, id ASC').all(),
+    mailboxErrors: [],
+  };
+  rcImportRuns.set(run.id, run);
+  return run;
+}
+
 admin.post('/rate-confirmations/import-all', async (req, res) => {
   try {
-    const user = getUserById(req.user.id);
-    const accessToken = await outlookAccessToken(user);
-    const cursor = (req.body && req.body.cursor) || null;
-    let url = '/me/messages?$top=50&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,hasAttachments';
-    if (cursor) url += '&$skiptoken=' + encodeURIComponent(cursor);
-    const page = await outlookGraph(accessToken, url);
-    let nextCursor = null;
-    if (page['@odata.nextLink']) {
-      try { nextCursor = new URL(page['@odata.nextLink']).searchParams.get('$skiptoken'); } catch { /* no cursor */ }
+    const body = req.body || {};
+    let state = null;
+    if (body.cursor) {
+      try { state = JSON.parse(Buffer.from(String(body.cursor), 'base64url').toString('utf8')); } catch { state = null; }
     }
-    const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, skippedSubjects: [] };
-    let examined = 0;
-    for (const m of (page.value || [])) {
-      if (!m.hasAttachments || examined >= 12) continue;
-      examined += 1;
+    if (!state || typeof state !== 'object' || !state.phase) state = { runId: null, phase: 'sched', m: 0, link: null };
+    const run = rcImportRun(state.runId);
+    state.runId = run.id;
+    const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [] };
+    const deadline = Date.now() + 40000;
+    let processed = 0;
+    const finish = (done) => {
+      const nextCursor = done ? null : Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
+      if (done) rcImportRuns.delete(run.id);
+      res.json({
+        ...counts,
+        phase: state.phase,
+        mailboxes: run.mailboxes.map((u) => u.outlookEmail || u.name),
+        mailboxErrors: run.mailboxErrors,
+        schedules: run.schedules,
+        paidLoads: run.paidRefs.size,
+        nextCursor,
+        done,
+      });
+    };
+    while (Date.now() < deadline) {
+      if (state.m >= run.mailboxes.length) {
+        if (state.phase === 'sched') { state.phase = 'rc'; state.m = 0; state.link = null; continue; }
+        return finish(true);
+      }
+      const mbUser = getUserById(run.mailboxes[state.m].id);
+      let accessToken;
       try {
-        if (db.prepare('SELECT id FROM rate_confirmations WHERE outlookMessageId = ?').get(m.id)) { counts.alreadyHave += 1; continue; }
-        const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
-        const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')));
-        if (!files.length) continue;
-        const att = files[0];
-        const { fileBuffer } = await outlookAttachmentBuffer(user, m.id, att.id);
-        let text = '';
-        try { text = await extractFileText(fileBuffer); } catch { /* unreadable file */ }
+        accessToken = await outlookAccessToken(mbUser);
+      } catch {
+        const label = mbUser.outlookEmail || mbUser.name;
+        if (!run.mailboxErrors.includes(label)) run.mailboxErrors.push(label);
+        state.m += 1; state.link = null; continue;
+      }
+      const pageUrl = state.link || '/me/messages?$top=50&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,hasAttachments';
+      const page = await outlookGraph(accessToken, pageUrl);
+      const messages = page.value || [];
+      let budgetHit = false;
+      for (const m of messages) {
+        if (Date.now() >= deadline || processed >= 10) { budgetHit = true; break; }
         const subject = m.subject || '';
-        const isRc = /rate\s+confirmation|load\s+confirmation|rate\s+agreement/i.test(text) || /rate\s+confirmation|load\s+confirmation/i.test(subject);
-        if (!isRc) { counts.notRc += 1; continue; }
-        const f = extractRcLoadFields(text, subject);
-        let load = null;
-        if (f.lxlRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.lxlRef);
-        if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.loadRef);
-        if (!load && (f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
-          const driverId = resolveImportedDriverId(f);
-          if (driverId) {
-            const p = f.places[0];
-            const d = f.places[f.places.length - 1];
-            const pDate = f.dates[0];
-            const dDate = f.dates[f.dates.length - 1] || f.dates[0];
-            const id = db.prepare(
-              "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
-            ).run(f.lxlRef || f.loadRef, driverId,
-              `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
-              `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
-              'Imported from a rate confirmation email', `${dDate}T17:00:00`, now()).lastInsertRowid;
-            load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
-            counts.loadsCreated += 1;
+        const exKey = state.phase + ':' + state.m + ':' + m.id;
+        if (state.phase === 'sched') {
+          if (!/schedule has posted/i.test(subject) || !m.hasAttachments) continue;
+          if (run.examined.has(exKey)) continue;
+          run.examined.add(exKey);
+          processed += 1;
+          try {
+            const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
+            for (const a of (atts.value || [])) {
+              if (!a.id || !((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || ''))) continue;
+              const { fileBuffer } = await outlookAttachmentBuffer(mbUser, m.id, a.id);
+              if (!fileBuffer || !fileBuffer.length) continue;
+              const h = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+              if (run.scheduleHashes.has(h)) continue;
+              run.scheduleHashes.add(h);
+              const text = await extractFileText(fileBuffer).catch(() => '');
+              const refs = extractScheduleRefs(text);
+              if (refs.size) { run.schedules += 1; for (const r of refs) run.paidRefs.add(r); }
+            }
+          } catch { /* unreadable schedule — totals only */ }
+        } else {
+          if (!m.hasAttachments) continue;
+          if (run.examined.has(exKey)) continue;
+          run.examined.add(exKey);
+          if (db.prepare('SELECT id FROM rate_confirmations WHERE outlookMessageId = ?').get(m.id)) { counts.alreadyHave += 1; continue; }
+          processed += 1;
+          try {
+            const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
+            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')));
+            let handled = false;
+            for (const att of files) {
+              const { fileBuffer } = await outlookAttachmentBuffer(mbUser, m.id, att.id);
+              if (!fileBuffer || !fileBuffer.length) continue;
+              let text = '';
+              try { text = await extractFileText(fileBuffer); } catch { /* unreadable file */ }
+              const isRc = /rate\s+confirmation|load\s+confirmation|rate\s+agreement/i.test(text) || /rate\s+confirmation|load\s+confirmation/i.test(subject);
+              if (!isRc) continue;
+              handled = true;
+              const f = extractRcLoadFields(text, subject);
+              const key = refKey(f.loadRef) || refKey(f.lxlRef);
+              if (!key || !run.paidRefs.has(key)) {
+                counts.heldOut += 1;
+                if (counts.heldOutSubjects.length < 10) counts.heldOutSubjects.push(subject);
+                break;
+              }
+              let load = null;
+              if (f.lxlRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.lxlRef);
+              if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.loadRef);
+              if (!load && (f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
+                const driverId = resolveImportedDriverId(f);
+                if (driverId) {
+                  const p = f.places[0];
+                  const d = f.places[f.places.length - 1];
+                  const pDate = f.dates[0];
+                  const dDate = f.dates[f.dates.length - 1] || f.dates[0];
+                  const id = db.prepare(
+                    "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+                  ).run(f.lxlRef || f.loadRef, driverId,
+                    `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
+                    `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
+                    'Imported from a rate confirmation email', `${dDate}T17:00:00`, now()).lastInsertRowid;
+                  load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
+                  counts.loadsCreated += 1;
+                }
+              }
+              if (load) {
+                if (db.prepare('SELECT id FROM rate_confirmations WHERE loadId = ?').get(load.id)) { counts.alreadyHave += 1; break; }
+                const row = await createRateCon({ loadId: load.id, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
+                if (row.duplicate) counts.alreadyHave += 1;
+                else { db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id); counts.imported += 1; }
+              } else if ((f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
+                const p = f.places[0];
+                const d = f.places[f.places.length - 1];
+                const row = await createRateCon({ reference: f.lxlRef || f.loadRef, pickupState: p.state, deliveryState: d.state, pickupDate: f.dates[0], deliveryDate: f.dates[f.dates.length - 1] || f.dates[0], fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
+                if (row.duplicate) counts.alreadyHave += 1;
+                else { db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id); counts.imported += 1; }
+              } else {
+                counts.skipped += 1;
+                if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject);
+              }
+              break;
+            }
+            if (!handled) counts.notRc += 1;
+          } catch (e) {
+            counts.skipped += 1;
+            if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject + ' (error)');
           }
         }
-        if (load) {
-          if (db.prepare('SELECT id FROM rate_confirmations WHERE loadId = ?').get(load.id)) { counts.alreadyHave += 1; continue; }
-          const row = await createRateCon({ loadId: load.id, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
-          db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id);
-          counts.imported += 1;
-        } else if ((f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
-          const p = f.places[0];
-          const d = f.places[f.places.length - 1];
-          const row = await createRateCon({ reference: f.lxlRef || f.loadRef, pickupState: p.state, deliveryState: d.state, pickupDate: f.dates[0], deliveryDate: f.dates[f.dates.length - 1] || f.dates[0], fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
-          db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id);
-          counts.imported += 1;
-        } else {
-          counts.skipped += 1;
-          if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject);
-        }
-      } catch (e) {
-        counts.skipped += 1;
-        if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push((m.subject || '') + ' (error)');
       }
+      if (budgetHit) return finish(false); // re-fetch this page next call; examined-set + dedupe make it harmless
+      state.link = page['@odata.nextLink'] || null;
+      if (!state.link) state.m += 1;
     }
-    res.json({ ...counts, nextCursor, done: !nextCursor });
+    return finish(false);
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
     console.error('ratecon import-all failed', e);
     return err(res, 500, 'Import failed — try again');
   }
 });
+
 
 admin.post('/rate-confirmations/from-outlook', async (req, res) => {
   try {

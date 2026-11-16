@@ -331,6 +331,12 @@ export function openDb(dataDir) {
     if (rcCols.length && !rcCols.some((c) => c.name === 'outlookMessageId'))
       db.exec('ALTER TABLE rate_confirmations ADD COLUMN outlookMessageId TEXT');
   } catch { /* table may not exist yet on a brand-new database */ }
+  // Duplicate-proofing: every rate con file is fingerprinted (sha256).
+  try {
+    const rcCols2 = db.prepare('PRAGMA table_info(rate_confirmations)').all();
+    if (rcCols2.length && !rcCols2.some((c) => c.name === 'fileHash'))
+      db.exec('ALTER TABLE rate_confirmations ADD COLUMN fileHash TEXT');
+  } catch { /* table may not exist yet on a brand-new database */ }
   // Migrate databases created before phone sign-in: add the normalized
   // phone column (fresh databases get it from the schema above) and
   // backfill it from the stored display phone numbers.

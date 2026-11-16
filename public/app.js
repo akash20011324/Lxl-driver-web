@@ -3885,30 +3885,44 @@ async function viewRateCons(main) {
   if (rcImportAll) rcImportAll.addEventListener('click', async () => {
     const status = document.getElementById('rcImportStatus');
     rcImportAll.disabled = true;
-    const tot = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0 };
+    const tot = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0 };
     const skippedSubjects = [];
+    const heldOutSubjects = [];
     let cursor = null;
+    let mailboxes = [];
+    let schedules = 0;
+    let paidLoads = 0;
     try {
-      for (let round = 0; round < 60; round++) {
-        if (status) status.textContent = 'Importing… ' + tot.imported + ' rate confirmations in so far (this reads your whole mailbox, it can take a few minutes).';
+      for (let round = 0; round < 300; round++) {
+        if (status) status.textContent = 'Working… first every OTR schedule is read to build the paid-load list, then only rate confirmations on that list come in. ' + tot.imported + ' imported so far (this reads whole mailboxes — it can take a few minutes).';
         const r = await api('/api/admin/rate-confirmations/import-all', { method: 'POST', body: JSON.stringify({ cursor }) });
         tot.imported += r.imported || 0;
         tot.loadsCreated += r.loadsCreated || 0;
         tot.alreadyHave += r.alreadyHave || 0;
         tot.notRc += r.notRc || 0;
         tot.skipped += r.skipped || 0;
+        tot.heldOut += r.heldOut || 0;
         (r.skippedSubjects || []).forEach((x) => { if (skippedSubjects.length < 10) skippedSubjects.push(x); });
+        (r.heldOutSubjects || []).forEach((x) => { if (heldOutSubjects.length < 10) heldOutSubjects.push(x); });
+        if (Array.isArray(r.mailboxes) && r.mailboxes.length) mailboxes = r.mailboxes;
+        if (typeof r.schedules === 'number') schedules = r.schedules;
+        if (typeof r.paidLoads === 'number') paidLoads = r.paidLoads;
         cursor = r.nextCursor;
         if (r.done || !cursor) break;
       }
-      if (status) status.textContent = 'Done — imported ' + tot.imported + ' rate confirmations and created ' + tot.loadsCreated + ' past loads (completed, assigned to their drivers). ' +
-        tot.alreadyHave + ' were already there. ' + tot.notRc + ' emails were not rate confirmations.' +
+      if (status) status.textContent = 'Done — scanned mailbox(es): ' + (mailboxes.join(', ') || 'none connected') + '. ' +
+        'Found ' + schedules + ' OTR schedules covering ' + paidLoads + ' paid loads. ' +
+        'Imported ' + tot.imported + ' rate confirmations and created ' + tot.loadsCreated + ' past loads (completed, assigned to their drivers). ' +
+        tot.alreadyHave + ' were already there (a duplicate is never imported twice). ' +
+        (tot.heldOut ? tot.heldOut + ' rate confirmations were LEFT OUT — their load is not on any OTR schedule (cancelled or not paid yet)' + (heldOutSubjects.length ? ': ' + heldOutSubjects.join(' · ') : '') + '. ' : '') +
+        tot.notRc + ' emails were not rate confirmations.' +
         (tot.skipped ? ' ' + tot.skipped + ' could not be read fully' + (skippedSubjects.length ? ': ' + skippedSubjects.join(' · ') : '') + '.' : '');
-      toast('Import finished: ' + tot.imported + ' rate confirmations, ' + tot.loadsCreated + ' loads created.', 'ok');
+      toast('Import finished: ' + tot.imported + ' rate confirmations, ' + tot.loadsCreated + ' loads created, ' + tot.heldOut + ' held out.', 'ok');
       setTimeout(() => renderAdminView('ratecons'), 2500);
     } catch (err) { showError(err); if (status) status.textContent = 'Import stopped — you can run it again, already-imported ones are skipped.'; }
     rcImportAll.disabled = false;
   });
+
   async function loadOutlookMessages(search) {
     const picker = document.getElementById('outlookPicker');
     if (!picker) return;
