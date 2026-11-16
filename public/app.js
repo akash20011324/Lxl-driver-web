@@ -78,7 +78,8 @@ function fmtDate(s) {
 }
 function fmtDateOnly(s) {
   if (!s) return '—';
-  const d = new Date(s);
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
+  const d = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date(s);
   return isNaN(d) ? esc(s) : d.toLocaleDateString();
 }
 /* Load route cell: warehouse names (when set) on the bold line, street
