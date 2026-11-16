@@ -4690,6 +4690,29 @@ async function adjudicateRateCons8() {
   } catch (e) { console.error('rc adjudication8 failed', e); }
 }
 
+// One-time removal (2026-11-16): the four IEL dispatch-sheet loads
+// (LXL-3020150, LXL-3012815, LXL-3002349, LXL-3127767) come out of
+// the Loads list on the owner's instruction — their documents are
+// dispatch sheets, not rate confirmations. Their rate con rows are
+// already gone (same ruling). LXL-TEST1 is NOT touched.
+async function removeDispatchSheetLoads() {
+  try {
+    const marker = 'remove-dispatch-sheet-loads-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication9: ' + m);
+    const refs = ['LXL-3020150', 'LXL-3012815', 'LXL-3002349', 'LXL-3127767'];
+    for (const ref of refs) {
+      const load = db.prepare('SELECT id FROM loads WHERE reference = ?').get(ref);
+      if (!load) { log(ref + ': load not found, skipped'); continue; }
+      const docs = db.prepare('DELETE FROM documents WHERE loadId = ?').run(load.id);
+      db.prepare('DELETE FROM loads WHERE id = ?').run(load.id);
+      log(ref + ': load deleted' + (docs.changes ? ' (with ' + docs.changes + ' document row(s))' : ''));
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication9 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -6278,7 +6301,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
