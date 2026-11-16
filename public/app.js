@@ -1975,7 +1975,7 @@ async function viewDispatch(main) {
       '<span class="chat-head-unit">' + (c.truck ? 'Truck ' + esc(c.truck.unitNumber) : '') +
       (c.trailer ? ' · Trailer ' + esc(c.trailer.unitNumber) : '') + '</span>' +
       '<span class="chat-head-wp"><button class="chat-wp-btn" id="chatWpBtn" type="button" title="Change chat wallpaper">🖼 Wallpaper</button>' +
-      (state.chatWpServerUrl ? '<button class="chat-wp-btn" id="chatWpReset" type="button" title="Remove wallpaper">✕</button>' : '') + '</span>';
+      '<button class="chat-wp-btn" id="chatWpReset" type="button" title="Remove wallpaper"' + (state.chatWpServerUrl ? '' : ' disabled') + '>✕ Remove</button></span>';
     const wpBtn = document.getElementById('chatWpBtn');
     if (wpBtn) wpBtn.addEventListener('click', () => document.getElementById('chatWpFile').click());
     const wpReset = document.getElementById('chatWpReset');
