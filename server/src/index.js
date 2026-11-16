@@ -4807,34 +4807,46 @@ async function removeOutlookFactoring2() {
 // driver document still missing a date and fill only the blanks.
 async function backfillDocDates() {
   try {
-    const marker = 'doc-dates-backfill-2026-11-16';
+    // v2 (owner, 2026-11-16): a full re-check, not just filling blanks.
+    // Every uploaded document is re-read and its stored issued/expiry
+    // dates are corrected to what the document itself says — including
+    // clearing a wrong expiry on NO EXPIRY documents. Detection that
+    // finds nothing leaves hand-entered dates untouched.
+    const marker = 'doc-dates-recheck-2026-11-16-v2';
     if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
-    const log = (m) => console.log('doc dates backfill: ' + m);
+    const log = (m) => console.log('doc dates recheck: ' + m);
     const jobs = [
       ['equipment_documents', 'equipment doc'],
       ['driver_documents', 'driver doc'],
     ];
     for (const [table, label] of jobs) {
       const rows = db.prepare(
-        'SELECT d.id, d.expiryDate, d.issuedDate, f.storedFilename FROM ' + table + ' d JOIN files f ON f.id = d.fileId WHERE d.expiryDate IS NULL OR d.issuedDate IS NULL'
+        'SELECT d.id, d.expiryDate, d.issuedDate, f.storedFilename FROM ' + table + ' d JOIN files f ON f.id = d.fileId'
       ).all();
       for (const r of rows) {
-        const found = await detectDatesForFile(path.join(UPLOADS_DIR, r.storedFilename));
-        const fillExpiry = !r.expiryDate && found.expiryDate ? found.expiryDate : null;
-        const fillIssued = !r.issuedDate && found.issuedDate ? found.issuedDate : null;
-        if (fillExpiry || fillIssued) {
-          db.prepare('UPDATE ' + table + ' SET expiryDate = COALESCE(?, expiryDate), issuedDate = COALESCE(?, issuedDate) WHERE id = ?')
-            .run(fillExpiry, fillIssued, r.id);
-          log(label + ' ' + r.id + ': issued=' + (fillIssued || '(kept)') + ' expiry=' + (fillExpiry || '(kept)'));
+        let text = '';
+        try { text = await extractFileText(fs.readFileSync(path.join(UPLOADS_DIR, r.storedFilename))); } catch { /* unreadable file: keep stored dates */ }
+        if (!text) { log(label + ' ' + r.id + ': no readable text — stored dates kept'); continue; }
+        const found = detectDocDates(text);
+        const noExpiry = /no\s+expir\w*/i.test(text);
+        if (!found.issuedDate && !found.expiryDate && !noExpiry) { log(label + ' ' + r.id + ': no dates in document — stored dates kept'); continue; }
+        let newIssued = r.issuedDate, newExpiry = r.expiryDate;
+        if (found.issuedDate) newIssued = found.issuedDate;
+        if (found.expiryDate) newExpiry = found.expiryDate;
+        if (noExpiry) newExpiry = null;
+        if (newIssued !== r.issuedDate || newExpiry !== r.expiryDate) {
+          db.prepare('UPDATE ' + table + ' SET issuedDate = ?, expiryDate = ? WHERE id = ?')
+            .run(newIssued, newExpiry, r.id);
+          log(label + ' ' + r.id + ': issued ' + (r.issuedDate || '—') + ' -> ' + (newIssued || '—') + ', expiry ' + (r.expiryDate || '—') + ' -> ' + (newExpiry || '—'));
         } else {
-          log(label + ' ' + r.id + ': still no dates found');
+          log(label + ' ' + r.id + ': dates already match the document');
         }
       }
-      if (!rows.length) log(label + ': nothing missing dates');
+      if (!rows.length) log(label + ': no documents');
     }
     db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
     log('done');
-  } catch (e) { console.error('doc dates backfill failed', e); }
+  } catch (e) { console.error('doc dates recheck failed', e); }
 }
 
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
