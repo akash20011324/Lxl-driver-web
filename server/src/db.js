@@ -325,6 +325,12 @@ export function openDb(dataDir) {
     if (ceCols.length && !ceCols.some((c) => c.name === 'loadId'))
       db.exec('ALTER TABLE cash_entries ADD COLUMN loadId INTEGER REFERENCES loads(id)');
   } catch { /* table may not exist yet on a brand-new database */ }
+  // Bulk RC import: remember which Outlook message each rate con came from.
+  try {
+    const rcCols = db.prepare('PRAGMA table_info(rate_confirmations)').all();
+    if (rcCols.length && !rcCols.some((c) => c.name === 'outlookMessageId'))
+      db.exec('ALTER TABLE rate_confirmations ADD COLUMN outlookMessageId TEXT');
+  } catch { /* table may not exist yet on a brand-new database */ }
   // Migrate databases created before phone sign-in: add the normalized
   // phone column (fresh databases get it from the schema above) and
   // backfill it from the stored display phone numbers.

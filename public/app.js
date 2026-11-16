@@ -3767,7 +3767,7 @@ async function viewRateCons(main) {
     api('/api/admin/loads').catch(() => []),
     api('/api/admin/outlook/status').catch(() => ({ configured: false, connected: false, email: null })),
   ]);
-  const list = Array.isArray(rcs) ? rcs : [];
+  const list = (Array.isArray(rcs) ? rcs : []).slice().sort((a, b) => String(b.pickupDate || '').localeCompare(String(a.pickupDate || '')));
   const loadList = (Array.isArray(loads) ? loads : []).filter(l => l && l.reference);
   const shortPlace = (a) => (a || '').split(',').pop().replace(/\s*\d{5}(-\d{4})?\s*$/, '').trim();
   const stateOf = (a) => { const m = (a || '').match(/\b([A-Z]{2})\s+\d{5}/); return m ? m[1] : ''; };
@@ -3808,7 +3808,8 @@ async function viewRateCons(main) {
     (outlook && outlook.configured
       ? (outlook.connected
         ? '<p class="small">Connected as <strong>' + esc(outlook.email || '') + '</strong> — pick the RC email, then the file.</p>' +
-          '<div class="form-actions"><button class="btn btn-sm" id="outlookPick">Pick from Outlook</button> <button class="btn btn-ghost btn-sm" id="outlookDisconnect">Disconnect</button></div>'
+          '<div class="form-actions"><button class="btn btn-sm" id="outlookPick">Pick from Outlook</button> <button class="btn btn-sm" id="rcImportAll">Import ALL rate confirmations</button> <button class="btn btn-ghost btn-sm" id="outlookDisconnect">Disconnect</button></div>' +
+          '<p id="rcImportStatus" class="small mt"></p>'
         : '<p class="small muted">Connect your Outlook mailbox — then the RC comes straight from the email you pick, no downloading.</p>' +
           '<div class="form-actions"><button class="btn btn-sm" id="outlookConnect">Connect Outlook</button></div>')
       : '<p class="small muted">Outlook email is not set up on the server yet.</p>') +
@@ -3880,6 +3881,34 @@ async function viewRateCons(main) {
   });
   const outlookPick = document.getElementById('outlookPick');
   if (outlookPick) outlookPick.addEventListener('click', () => loadOutlookMessages(''));
+  const rcImportAll = document.getElementById('rcImportAll');
+  if (rcImportAll) rcImportAll.addEventListener('click', async () => {
+    const status = document.getElementById('rcImportStatus');
+    rcImportAll.disabled = true;
+    const tot = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0 };
+    const skippedSubjects = [];
+    let cursor = null;
+    try {
+      for (let round = 0; round < 60; round++) {
+        if (status) status.textContent = 'Importing… ' + tot.imported + ' rate confirmations in so far (this reads your whole mailbox, it can take a few minutes).';
+        const r = await api('/api/admin/rate-confirmations/import-all', { method: 'POST', body: JSON.stringify({ cursor }) });
+        tot.imported += r.imported || 0;
+        tot.loadsCreated += r.loadsCreated || 0;
+        tot.alreadyHave += r.alreadyHave || 0;
+        tot.notRc += r.notRc || 0;
+        tot.skipped += r.skipped || 0;
+        (r.skippedSubjects || []).forEach((x) => { if (skippedSubjects.length < 10) skippedSubjects.push(x); });
+        cursor = r.nextCursor;
+        if (r.done || !cursor) break;
+      }
+      if (status) status.textContent = 'Done — imported ' + tot.imported + ' rate confirmations and created ' + tot.loadsCreated + ' past loads (completed, assigned to their drivers). ' +
+        tot.alreadyHave + ' were already there. ' + tot.notRc + ' emails were not rate confirmations.' +
+        (tot.skipped ? ' ' + tot.skipped + ' could not be read fully' + (skippedSubjects.length ? ': ' + skippedSubjects.join(' · ') : '') + '.' : '');
+      toast('Import finished: ' + tot.imported + ' rate confirmations, ' + tot.loadsCreated + ' loads created.', 'ok');
+      setTimeout(() => renderAdminView('ratecons'), 2500);
+    } catch (err) { showError(err); if (status) status.textContent = 'Import stopped — you can run it again, already-imported ones are skipped.'; }
+    rcImportAll.disabled = false;
+  });
   async function loadOutlookMessages(search) {
     const picker = document.getElementById('outlookPicker');
     if (!picker) return;

@@ -1730,7 +1730,7 @@ admin.delete('/cashflow/entries/:id', (req, res) => {
 });
 
 function detectCashAmountCents(text) {
-  const labels = ['NET PAYMENT', 'NET PAID', 'TOTAL PAID', 'AMOUNT PAID', 'PAYMENT AMOUNT', 'AMOUNT DUE', 'TOTAL DUE', 'BALANCE DUE', 'TOTAL AMOUNT', 'GRAND TOTAL', 'TOTAL'];
+  const labels = ['NET PAYMENT', 'NET PAID', 'TOTAL PAID', 'AMOUNT PAID', 'PAYMENT AMOUNT', 'NET AMOUNT', 'SCHEDULE TOTAL', 'TOTAL NET', 'AMOUNT DUE', 'TOTAL DUE', 'BALANCE DUE', 'TOTAL AMOUNT', 'GRAND TOTAL', 'TOTAL'];
   const lines = String(text || '').split(/\r?\n/);
   const money = /\$\s?([\d,]+\.\d{2})/;
   for (const label of labels) {
@@ -1750,6 +1750,7 @@ function detectCashAmountCents(text) {
 
 function suggestCashKind(subject, from) {
   const s = `${subject || ''} ${from || ''}`.toLowerCase();
+  if (s.includes('otr') || (s.includes('schedule') && /(complet|paid|payment|fund)/.test(s))) return { direction: 'in', category: 'Factoring payment' };
   if (s.includes('pilot')) return { direction: 'out', category: 'Fuel (Pilot weekly)' };
   if (/toll|e-zpass|ezpass|prepass|bestpass|pay by plate/.test(s)) return { direction: 'out', category: 'Tolls' };
   if (/parking|park/.test(s)) return { direction: 'out', category: 'Parking' };
@@ -3369,6 +3370,149 @@ admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
 
 // Pull the RC file from the signed-in admin's own Outlook mailbox instead
 // of uploading it: pick the email, pick the attachment, pick the load.
+// --- Bulk rate-confirmation import helpers ---------------------------------
+// The owner's mailbox holds every broker rate confirmation. Each RC also
+// carries the load itself (reference, route, dates, truck/trailer, driver
+// name), so importing one rebuilds the historical load as COMPLETED with
+// everything in its place — and the RC on it feeds Cash Flow's booked total.
+function rcNormDate(y, mo, d) {
+  const yy = Number(y) < 100 ? 2000 + Number(y) : Number(y);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${yy}-${p(mo)}-${p(d)}`;
+}
+function extractRcDates(text) {
+  const out = [];
+  const push = (v) => { if (v && !out.includes(v)) out.push(v); };
+  const re = /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/g;
+  let m;
+  while ((m = re.exec(text))) push(rcNormDate(m[3], m[1], m[2]));
+  const months = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  const re2 = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})/gi;
+  while ((m = re2.exec(text))) push(rcNormDate(m[3], months[m[1].slice(0, 3).toLowerCase()], m[2]));
+  return out;
+}
+function extractRcPlaces(text) {
+  const out = [];
+  const re = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const city = m[1].trim().replace(/\s+/g, ' ');
+    const key = city + '|' + m[2];
+    if (!out.some((p) => p.city + '|' + p.state === key)) out.push({ city, state: m[2], zip: m[3] });
+  }
+  return out;
+}
+function extractRcLoadFields(text, subject) {
+  const all = `${subject || ''}\n${text || ''}`;
+  const lxl = all.match(/LXL[-\s]?(\d{4,})/i);
+  const labeled = all.match(/(?:load|order|reference|ref|pro|shipment|trip|booking)\s*(?:#|no\.?|number|id)?\s*[:#]\s*([A-Z0-9][A-Z0-9-]{3,20})/i);
+  const truck = all.match(/(?:truck|tractor)\s*(?:#|no\.?|number|unit)?\s*[:#]\s*(\d{3,5})/i);
+  const trailer = all.match(/trailer\s*(?:#|no\.?|number|unit)?\s*[:#]\s*(\d{3,5})/i);
+  return {
+    lxlRef: lxl ? 'LXL-' + lxl[1] : null,
+    loadRef: labeled ? labeled[1].toUpperCase() : null,
+    truckNo: truck ? truck[1] : null,
+    trailerNo: trailer ? trailer[1] : null,
+    driverHint: /\bakash/i.test(all) ? 'akash' : /\barsh/i.test(all) ? 'arsh' : null,
+    places: extractRcPlaces(text || ''),
+    dates: extractRcDates(text || ''),
+  };
+}
+function resolveImportedDriverId(f) {
+  if (f.driverHint) {
+    const d = db.prepare("SELECT id FROM users WHERE role = 'driver' AND active = 1 AND LOWER(name) LIKE ?")
+      .get('%' + f.driverHint + '%');
+    if (d) return d.id;
+  }
+  if (f.truckNo) {
+    const t = db.prepare('SELECT driverId FROM trucks WHERE unitNumber = ?').get(f.truckNo);
+    if (t && t.driverId) return t.driverId;
+  }
+  if (f.trailerNo) {
+    const t = db.prepare('SELECT driverId FROM trailers WHERE unitNumber = ?').get(f.trailerNo);
+    if (t && t.driverId) return t.driverId;
+  }
+  return null;
+}
+
+admin.post('/rate-confirmations/import-all', async (req, res) => {
+  try {
+    const user = getUserById(req.user.id);
+    const accessToken = await outlookAccessToken(user);
+    const cursor = (req.body && req.body.cursor) || null;
+    let url = '/me/messages?$top=50&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,hasAttachments';
+    if (cursor) url += '&$skiptoken=' + encodeURIComponent(cursor);
+    const page = await outlookGraph(accessToken, url);
+    let nextCursor = null;
+    if (page['@odata.nextLink']) {
+      try { nextCursor = new URL(page['@odata.nextLink']).searchParams.get('$skiptoken'); } catch { /* no cursor */ }
+    }
+    const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, skippedSubjects: [] };
+    let examined = 0;
+    for (const m of (page.value || [])) {
+      if (!m.hasAttachments || examined >= 12) continue;
+      examined += 1;
+      try {
+        if (db.prepare('SELECT id FROM rate_confirmations WHERE outlookMessageId = ?').get(m.id)) { counts.alreadyHave += 1; continue; }
+        const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
+        const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')));
+        if (!files.length) continue;
+        const att = files[0];
+        const { fileBuffer } = await outlookAttachmentBuffer(user, m.id, att.id);
+        let text = '';
+        try { text = await extractFileText(fileBuffer); } catch { /* unreadable file */ }
+        const subject = m.subject || '';
+        const isRc = /rate\s+confirmation|load\s+confirmation|rate\s+agreement/i.test(text) || /rate\s+confirmation|load\s+confirmation/i.test(subject);
+        if (!isRc) { counts.notRc += 1; continue; }
+        const f = extractRcLoadFields(text, subject);
+        let load = null;
+        if (f.lxlRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.lxlRef);
+        if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.loadRef);
+        if (!load && (f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
+          const driverId = resolveImportedDriverId(f);
+          if (driverId) {
+            const p = f.places[0];
+            const d = f.places[f.places.length - 1];
+            const pDate = f.dates[0];
+            const dDate = f.dates[f.dates.length - 1] || f.dates[0];
+            const id = db.prepare(
+              "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+            ).run(f.lxlRef || f.loadRef, driverId,
+              `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
+              `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
+              'Imported from a rate confirmation email', `${dDate}T17:00:00`, now()).lastInsertRowid;
+            load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
+            counts.loadsCreated += 1;
+          }
+        }
+        if (load) {
+          if (db.prepare('SELECT id FROM rate_confirmations WHERE loadId = ?').get(load.id)) { counts.alreadyHave += 1; continue; }
+          const row = await createRateCon({ loadId: load.id, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
+          db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id);
+          counts.imported += 1;
+        } else if ((f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
+          const p = f.places[0];
+          const d = f.places[f.places.length - 1];
+          const row = await createRateCon({ reference: f.lxlRef || f.loadRef, pickupState: p.state, deliveryState: d.state, pickupDate: f.dates[0], deliveryDate: f.dates[f.dates.length - 1] || f.dates[0], fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
+          db.prepare('UPDATE rate_confirmations SET outlookMessageId = ? WHERE id = ?').run(m.id, row.id);
+          counts.imported += 1;
+        } else {
+          counts.skipped += 1;
+          if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push(subject);
+        }
+      } catch (e) {
+        counts.skipped += 1;
+        if (counts.skippedSubjects.length < 10) counts.skippedSubjects.push((m.subject || '') + ' (error)');
+      }
+    }
+    res.json({ ...counts, nextCursor, done: !nextCursor });
+  } catch (e) {
+    if (e.status) return err(res, e.status, e.message);
+    console.error('ratecon import-all failed', e);
+    return err(res, 500, 'Import failed — try again');
+  }
+});
+
 admin.post('/rate-confirmations/from-outlook', async (req, res) => {
   try {
     const { loadId, messageId, attachmentId, subject } = req.body || {};
