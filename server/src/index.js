@@ -1487,9 +1487,8 @@ function trackPageHtml(mapsKey) {
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; background: #05070d; color: #eef2f8; }
   .wrap { max-width: 880px; margin: 0 auto; padding: 18px 14px 40px; }
-  .brand { display: flex; align-items: baseline; gap: 10px; border-bottom: 2px solid #F2B705; padding-bottom: 10px; }
-  .brand .lxl { font-size: 30px; font-weight: 800; letter-spacing: 1px; color: #fff; }
-  .brand .lxl span { color: #F2B705; }
+  .brand { display: flex; align-items: center; gap: 10px; border-bottom: 2px solid #F2B705; padding-bottom: 10px; }
+  .brand img.logo { height: 40px; width: auto; display: block; }
   .brand .co { color: #9fb0c9; font-size: 14px; }
   .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; margin-top: 14px; }
   .ref { font-size: 22px; font-weight: 700; color: #4DA3FF; }
@@ -1515,7 +1514,7 @@ function trackPageHtml(mapsKey) {
 </head>
 <body>
 <div class="wrap">
-  <div class="brand"><div class="lxl">LXL <span>&#8599;</span></div><div class="co">Lubana Xpress LLC &middot; Live load tracking</div></div>
+  <div class="brand"><img class="logo" src="/assets/logo.png" alt="LXL"><div class="co">Lubana Xpress LLC &middot; Live load tracking</div></div>
   <div id="app"><p class="muted" style="padding:20px 4px">Loading tracking&hellip;</p></div>
   <div class="foot">Tracking provided by Lubana Xpress LLC &middot; This page refreshes automatically</div>
 </div>
