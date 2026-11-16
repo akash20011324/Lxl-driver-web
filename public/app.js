@@ -3882,14 +3882,13 @@ async function viewRateCons(main) {
     '<div class="rc-stat"><div class="num">' + fmtMoney(avgCents) + '</div><div class="lab">Average load</div></div></div>';
   main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>Rate Confirmations</h1><button class="btn" id="rcAddBtn" aria-expanded="false">+ Add RC</button></div>' + rcStats + '<div id="rcAddWrap" style="display:none">' +
     '<div class="card"><h2>Upload rate confirmation</h2>' +
-    (loadList.length ? '<form id="rcForm">' +
+    '<form id="rcForm">' +
     '<div class="form-row">' +
     '<div class="field"><label>File *</label><input type="file" name="file" id="rcFile" required></div>' +
-    '<div class="field"><label>Load *</label><select name="loadId" id="rcLoad" required>' + loadOptions + '</select></div>' +
-    '</div><p class="small muted">Pick the load — the file is automatically renamed to <code id="rcPreview"></code>.</p>' +
+    '<div class="field"><label>Load</label><select name="loadId" id="rcLoad"><option value="">✨ Create the load automatically from this RC</option>' + loadOptions + '</select></div>' +
+    '</div><p class="small muted">Auto: the system reads the RC and creates the load — LXL reference, pickup and delivery city/state, driver from the RC — and the file is renamed to <code id="rcPreview"></code>. Or pick an existing load to attach it to.</p>' +
     '<div class="form-actions"><button class="btn" type="submit">Upload</button></div>' +
-    '<p id="rcResult" class="small mt"></p></form>'
-    : '<p class="empty">No loads yet — assign a load first, then upload its rate confirmation here.</p>') +
+    '<p id="rcResult" class="small mt"></p></form>' +
     '</div>' +
     '<div class="card"><h2>From Outlook email</h2>' +
     (outlook && outlook.configured
@@ -3925,7 +3924,7 @@ async function viewRateCons(main) {
       const pickedName = (state.rcOutlook && state.rcOutlook.name) || (f && f.files && f.files[0] ? f.files[0].name : '');
       const ext = pickedName ? (pickedName.split('.').pop() || 'pdf') : 'pdf';
       const pv = document.getElementById('rcPreview');
-      if (pv) pv.textContent = previewName(l, ext);
+      if (pv) pv.textContent = l ? previewName(l, ext) : '(named from the RC)';
     };
     document.getElementById('rcLoad').addEventListener('change', updatePreview);
     document.getElementById('rcFile').addEventListener('change', updatePreview);
@@ -3942,8 +3941,9 @@ async function viewRateCons(main) {
           res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
         }
         const saved = (res && (res.filename || (res.rateConfirmation && res.rateConfirmation.filename))) || '';
-        document.getElementById('rcResult').textContent = saved ? 'Saved as: ' + saved : 'Uploaded.';
-        toast('Rate confirmation uploaded' + (saved ? ' as ' + saved : '') + '.', 'ok');
+        const loadMsg = res && res.loadReference ? (res.loadCreated ? ' Load ' + res.loadReference + ' created: ' + (res.loadRoute || '') + '.' : ' Attached to load ' + res.loadReference + '.') : '';
+        document.getElementById('rcResult').textContent = (saved ? 'Saved as: ' + saved : 'Uploaded.') + loadMsg;
+        toast('Rate confirmation uploaded' + (saved ? ' as ' + saved : '') + '.' + loadMsg, 'ok');
         renderAdminView('ratecons');
       } catch (err) { showError(err); }
     });
@@ -4077,7 +4077,7 @@ async function viewRateCons(main) {
               const ext = (b.dataset.outlookAttName.split('.').pop() || 'pdf');
               pv.textContent = previewName(l, ext);
             }
-            toast('Attachment selected — pick the load and Upload.', 'ok');
+            toast('Attachment selected — press Upload: the load is created automatically from the RC, or pick a load first to attach it.', 'ok');
           }));
         } catch (err) { box.innerHTML = '<p class="empty">Could not load attachments.</p>'; showError(err); }
       }));

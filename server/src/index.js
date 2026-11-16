@@ -6,6 +6,7 @@ import cors from 'cors';
 import multer from 'multer';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -3415,6 +3416,34 @@ function detectRateCents(text) {
   return best;
 }
 
+
+function detectRateCentsDetailed(text) {
+  // Same detection as detectRateCents, but reports whether the amount
+  // came from a labeled rate field and the text around the match, so
+  // the cleanup pass can tell a real rate from a stray big number.
+  const patterns = [
+    /TOTAL\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /FLAT\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) {
+      const c = amountToCents(m[1]);
+      if (c != null) return { cents: c, labeled: true, context: text.slice(Math.max(0, m.index - 30), m.index + m[0].length + 30) };
+    }
+  }
+  let best = null;
+  let bestIdx = -1;
+  let bestRaw = '';
+  for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
+    const c = amountToCents(m[1]);
+    if (c != null && (best == null || c > best)) { best = c; bestIdx = m.index; bestRaw = m[0]; }
+  }
+  return { cents: best, labeled: false, context: bestIdx >= 0 ? text.slice(Math.max(0, bestIdx - 70), bestIdx + bestRaw.length + 30) : '' };
+}
+
 function detectReceiptTotalCents(text) {
   // Receipt totals are smaller than rate-cons ($1–$10,000: a fuel fill,
   // a toll, a parking fee). Keyword-anchored first, then the largest
@@ -3632,6 +3661,268 @@ async function verifyRateConStates() {
   }
 }
 
+// One-time repair: a few rate confirmations imported before the
+// date validation carry impossible stored dates ("365-24-07T...").
+// Re-read those documents and restore real pickup/delivery dates
+// (falling back to the linked load's dates). Runs once.
+function isRealIsoDate(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s || ''))) return false;
+  const d = new Date(s + 'T12:00:00Z');
+  return !isNaN(d) && d.toISOString().slice(0, 10) === s;
+}
+async function repairRateConDates() {
+  try {
+    db.prepare('CREATE TABLE IF NOT EXISTS one_off_jobs (name TEXT PRIMARY KEY, doneAt TEXT)').run();
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get('rc-date-repair-2026-11-16')) return;
+    const rows = db.prepare(
+      `SELECT r.id, r.reference, r.pickupDate, r.deliveryDate, r.loadId, f.storedFilename
+       FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId`,
+    ).all();
+    let fixed = 0;
+    for (const row of rows) {
+      const badP = !isRealIsoDate(row.pickupDate);
+      const badD = !isRealIsoDate(row.deliveryDate);
+      if (!badP && !badD) continue;
+      let p = badP ? null : row.pickupDate;
+      let d = badD ? null : row.deliveryDate;
+      try {
+        if (row.storedFilename) {
+          const buf = fs.readFileSync(path.join(UPLOADS_DIR, row.storedFilename));
+          const text = await extractFileText(buf);
+          const dates = extractRcDates(text || '');
+          if (dates.length) {
+            if (!p) p = dates[0];
+            if (!d) d = dates[dates.length - 1];
+          }
+        }
+      } catch (e) { /* fall through to the load fallback */ }
+      if ((!p || !d) && row.loadId) {
+        const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(row.loadId);
+        if (load) {
+          if (!p) p = dateInZone(load.pickupAt, load.pickupTimezone);
+          if (!d) d = dateInZone(load.deliveryAt, load.deliveryTimezone);
+        }
+      }
+      if (p && d && isRealIsoDate(p) && isRealIsoDate(d)) {
+        db.prepare('UPDATE rate_confirmations SET pickupDate = ?, deliveryDate = ? WHERE id = ?').run(p, d, row.id);
+        fixed += 1;
+        console.log(`rc dates: ${row.reference} ${row.pickupDate} -> ${row.deliveryDate} repaired to ${p} -> ${d}`);
+      } else {
+        console.log(`rc dates: ${row.reference} still unrepairable (pickup=${row.pickupDate}, delivery=${row.deliveryDate})`);
+      }
+    }
+    db.prepare('INSERT OR REPLACE INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run('rc-date-repair-2026-11-16', now());
+    console.log(`rc dates: repaired ${fixed} rate cons`);
+  } catch (e) {
+    console.error('rc dates repair failed', e);
+  }
+}
+
+// One-time Rate Cons cleanup (owner, 2026-11-16: "Clean up the Rate
+// Cons list", "Check all the rate confirmation", "Not all the loads
+// are added", "the pickup and delivery states [are] wrongs").
+// Re-reads EVERY stored rate confirmation and, from its document:
+// fixes pickup/delivery states and the linked imported load's route,
+// repairs impossible dates, corrects rates that a labeled rate field
+// proves wrong, renames word-only junk references to the document's
+// real load number, deletes junk rows with no load number in the
+// document, merges duplicate rows for the same load (the file-hash
+// check cannot catch copies whose misread rate differed), and
+// creates the completed load for every rate con that lacks one
+// (driver: name on the RC, else truck number, else trailer number).
+// Big or ambiguous rates are logged, never guessed. Runs once.
+async function cleanupRateCons() {
+  try {
+    db.prepare('CREATE TABLE IF NOT EXISTS one_off_jobs (name TEXT PRIMARY KEY, doneAt TEXT)').run();
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get('rc-cleanup-2026-11-16')) return;
+    const rows = db.prepare('SELECT r.*, f.storedFilename FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId').all();
+    const info = new Map();
+    let statesFixed = 0, loadRoutesFixed = 0, datesFixed = 0, ratesFixed = 0;
+    let junkDeleted = 0, renamed = 0, dupDeleted = 0, dupLoadsDeleted = 0, loadsCreated = 0, loadsLinked = 0;
+    const fileShared = (fileId, exceptId) => fileId ? db.prepare('SELECT COUNT(*) AS c FROM rate_confirmations WHERE fileId = ? AND id != ?').get(fileId, exceptId).c : 0;
+    const deleteRcRow = (row) => {
+      db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(row.id);
+      if (row.fileId && !fileShared(row.fileId, row.id)) {
+        const f = db.prepare('SELECT * FROM files WHERE id = ?').get(row.fileId);
+        db.prepare('DELETE FROM files WHERE id = ?').run(row.fileId);
+        if (f) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename)); } catch { /* already gone */ } }
+      }
+    };
+    // Phase A: re-read every document; fix states, load routes, dates, proven rates.
+    for (const row of rows) {
+      let text = '';
+      if (row.storedFilename) {
+        try { text = await extractFileText(fs.readFileSync(path.join(UPLOADS_DIR, row.storedFilename))); } catch { text = ''; }
+      }
+      const fields = extractRcLoadFields(text || '', '');
+      const route = extractRcRouteAnchored(text || '');
+      const det = detectRateCentsDetailed(text || '');
+      info.set(row.id, { text, fields, route, det });
+      if (route) {
+        const [pu, dl] = route;
+        if (pu.state !== row.pickupState || dl.state !== row.deliveryState) {
+          db.prepare('UPDATE rate_confirmations SET pickupState = ?, deliveryState = ? WHERE id = ?').run(pu.state, dl.state, row.id);
+          row.pickupState = pu.state; row.deliveryState = dl.state; statesFixed += 1;
+          console.log(`rc cleanup: ${row.reference} states corrected to ${pu.state}->${dl.state}`);
+        }
+        if (row.loadId) {
+          const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(row.loadId);
+          if (load && load.notes === 'Imported from a rate confirmation email') {
+            const np = `${pu.city}, ${pu.state}${pu.zip ? ' ' + pu.zip : ''}`;
+            const nd = `${dl.city}, ${dl.state}${dl.zip ? ' ' + dl.zip : ''}`;
+            if (np !== load.pickupLocation || nd !== load.deliveryLocation) {
+              db.prepare('UPDATE loads SET pickupLocation = ?, deliveryLocation = ?, pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE id = ?').run(np, nd, load.id);
+              loadRoutesFixed += 1;
+              console.log(`rc cleanup: load ${load.reference} route corrected to ${np} -> ${nd}`);
+            }
+          }
+        }
+      }
+      if (!isRealIsoDate(row.pickupDate) || !isRealIsoDate(row.deliveryDate)) {
+        const dates = fields.dates;
+        const p = isRealIsoDate(row.pickupDate) ? row.pickupDate : (dates[0] || null);
+        const d = isRealIsoDate(row.deliveryDate) ? row.deliveryDate : (dates[dates.length - 1] || dates[0] || null);
+        if (p && d) {
+          db.prepare('UPDATE rate_confirmations SET pickupDate = ?, deliveryDate = ? WHERE id = ?').run(p, d, row.id);
+          row.pickupDate = p; row.deliveryDate = d; datesFixed += 1;
+          console.log(`rc cleanup: ${row.reference} dates repaired to ${p} -> ${d}`);
+        }
+      }
+      if (det.labeled && det.cents != null && det.cents !== row.rateCents) {
+        if (det.cents <= 1500000 && (row.rateCents == null || row.rateCents <= 1500000)) {
+          console.log(`rc cleanup: ${row.reference} rate ${row.rateCents} corrected to ${det.cents} (labeled: ${JSON.stringify(det.context)})`);
+          db.prepare('UPDATE rate_confirmations SET rateCents = ? WHERE id = ?').run(det.cents, row.id);
+          row.rateCents = det.cents; ratesFixed += 1;
+        } else {
+          console.log(`rc cleanup: ${row.reference} BIG RATE DISPUTE stored=${row.rateCents} labeled=${det.cents} context: ${JSON.stringify(det.context)} (left unchanged)`);
+        }
+      } else if (row.rateCents != null && row.rateCents > 1500000) {
+        console.log(`rc cleanup: ${row.reference} BIG RATE $${(row.rateCents / 100).toFixed(2)} labeled=${det.labeled} detected=${det.cents} context: ${JSON.stringify(det.context || '(none)')}`);
+      } else if (!det.labeled && det.cents != null && row.rateCents != null && det.cents !== row.rateCents) {
+        console.log(`rc cleanup: ${row.reference} rate mismatch stored=${row.rateCents} fallback-detected=${det.cents} (kept stored)`);
+      }
+    }
+    // Phase B: junk references (no digits — a word the parser grabbed).
+    const keyOf = (ref) => refKey(String(ref || '').replace(/^LXL-?/i, ''));
+    for (const row of rows) {
+      const inf = info.get(row.id);
+      row._junk = !/\d/.test(String(row.reference || ''));
+      row._docKey = inf && inf.fields.loadRef ? refKey(inf.fields.loadRef) : null;
+      if (!row._junk && row._docKey && row._docKey !== keyOf(row.reference)) {
+        console.log(`rc cleanup: ${row.reference} document shows load number ${inf.fields.loadRef} (kept stored reference)`);
+      }
+    }
+    for (const row of rows) {
+      if (!row._junk || row._docKey) continue;
+      // No load number anywhere in the document: not a usable rate con.
+      if (row.loadId) {
+        const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(row.loadId);
+        if (load && load.notes === 'Imported from a rate confirmation email' && load.reference === row.reference) {
+          const docs = db.prepare('SELECT COUNT(*) AS c FROM documents WHERE loadId = ?').get(load.id).c;
+          if (docs === 0) { db.prepare('DELETE FROM loads WHERE id = ?').run(load.id); dupLoadsDeleted += 1; }
+        }
+      }
+      deleteRcRow(row);
+      info.delete(row.id);
+      row._deleted = true;
+      junkDeleted += 1;
+      console.log(`rc cleanup: deleted junk rate con ${row.reference} (no load number in its document)`);
+    }
+    // Phase C: rename lone junk rows to the real number; merge duplicates.
+    const groups = new Map();
+    for (const row of rows) {
+      if (row._deleted) continue;
+      const key = row._junk ? row._docKey : keyOf(row.reference);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    for (const group of groups.values()) {
+      if (group.length === 1 && group[0]._junk) {
+        const row = group[0];
+        const newRef = lxlLoadRef(info.get(row.id).fields.loadRef);
+        if (row.loadId) {
+          const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(row.loadId);
+          if (load && load.notes === 'Imported from a rate confirmation email' && load.reference === row.reference) {
+            db.prepare('UPDATE loads SET reference = ? WHERE id = ?').run(newRef, load.id);
+          }
+        }
+        db.prepare('UPDATE rate_confirmations SET reference = ? WHERE id = ?').run(newRef, row.id);
+        console.log(`rc cleanup: junk reference ${row.reference} renamed to ${newRef}`);
+        row.reference = newRef; renamed += 1;
+        continue;
+      }
+      if (group.length < 2) continue;
+      const scored = group.map((row) => {
+        const inf = info.get(row.id);
+        let score = 0;
+        if (inf.det.labeled && inf.det.cents === row.rateCents) score += 2;
+        if (row.loadId) score += 1;
+        if (!row._junk) score += 1;
+        return { row, score };
+      }).sort((a, b) => b.score - a.score || a.row.id - b.row.id);
+      const kept = scored[0].row;
+      for (const { row: loser } of scored.slice(1)) {
+        if (loser.loadId && loser.loadId !== kept.loadId) {
+          const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(loser.loadId);
+          if (load) {
+            const docs = db.prepare('SELECT COUNT(*) AS c FROM documents WHERE loadId = ?').get(load.id).c;
+            const otherRc = db.prepare('SELECT COUNT(*) AS c FROM rate_confirmations WHERE loadId = ? AND id != ?').get(load.id, loser.id).c;
+            if (load.notes === 'Imported from a rate confirmation email' && docs === 0 && otherRc === 0) {
+              db.prepare('DELETE FROM loads WHERE id = ?').run(load.id);
+              dupLoadsDeleted += 1;
+              console.log(`rc cleanup: deleted duplicate load ${load.reference} (from duplicate rate con ${loser.reference})`);
+            } else if (!kept.loadId) {
+              db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(load.id, kept.id);
+              kept.loadId = load.id;
+              console.log(`rc cleanup: rate con ${kept.reference} now linked to load ${load.reference} (kept from the duplicate)`);
+            }
+          }
+        }
+        deleteRcRow(loser);
+        info.delete(loser.id);
+        loser._deleted = true;
+        dupDeleted += 1;
+        console.log(`rc cleanup: deleted duplicate rate con ${loser.reference} (kept the other copy for ${kept.reference})`);
+      }
+    }
+    // Phase D: every remaining rate con gets its load.
+    const remaining = db.prepare('SELECT * FROM rate_confirmations').all();
+    const stillMissing = [];
+    for (const row of remaining) {
+      if (row.loadId) continue;
+      const existing = db.prepare('SELECT * FROM loads WHERE reference = ?').get(row.reference);
+      if (existing) {
+        db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(existing.id, row.id);
+        loadsLinked += 1;
+        console.log(`rc cleanup: ${row.reference} linked to its existing load`);
+        continue;
+      }
+      const inf = info.get(row.id);
+      if (!inf) { stillMissing.push(row.reference + ' (document unreadable)'); continue; }
+      const f = inf.fields;
+      if (f.places.length < 2 || f.dates.length < 1) { stillMissing.push(`${row.reference} (places=${f.places.length} dates=${f.dates.length})`); continue; }
+      const driverId = resolveImportedDriverId(f);
+      if (!driverId) { stillMissing.push(row.reference + ' (no driver name or truck/trailer number on the rate con)'); continue; }
+      const p = f.places[0];
+      const d = f.places[f.places.length - 1];
+      const pDate = f.dates[0];
+      const dDate = f.dates[f.dates.length - 1] || f.dates[0];
+      const id = db.prepare(
+        "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+      ).run(row.reference, driverId, `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
+        `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
+        'Imported from a rate confirmation email', `${dDate}T17:00:00`, now()).lastInsertRowid;
+      db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(id, row.id);
+      loadsCreated += 1;
+      console.log(`rc cleanup: created load for ${row.reference} (${p.city}, ${p.state} -> ${d.city}, ${d.state})`);
+    }
+    db.prepare('INSERT OR REPLACE INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run('rc-cleanup-2026-11-16', now());
+    console.log(`rc cleanup: checked ${rows.length} rate cons — states fixed ${statesFixed}, load routes fixed ${loadRoutesFixed}, dates fixed ${datesFixed}, rates fixed ${ratesFixed}, junk deleted ${junkDeleted}, references renamed ${renamed}, duplicates deleted ${dupDeleted}, duplicate loads deleted ${dupLoadsDeleted}, loads created ${loadsCreated}, loads linked ${loadsLinked}, still missing loads ${stillMissing.length}${stillMissing.length ? ' — ' + stillMissing.join('; ') : ''}`);
+  } catch (e) {
+    console.error('rc cleanup failed', e);
+  }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -3727,9 +4018,15 @@ admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
       mimeType = req.file.mimetype;
       fs.unlinkSync(req.file.path);
     }
-    res.status(201).json(
-      await createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType }),
-    );
+    let useLoadId = loadId || null;
+    let auto = null;
+    if (!useLoadId && fileBuffer) {
+      auto = await findOrCreateLoadFromRc(fileBuffer, undefined);
+      if (auto.duplicateRc) return res.status(201).json({ ...serializeRateCon(auto.duplicateRc), duplicate: true });
+      useLoadId = auto.load.id;
+    }
+    const rc = await createRateCon({ loadId: useLoadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType });
+    res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
   } catch (e) {
     if (req.file) {
       try {
@@ -3823,6 +4120,18 @@ function extractRcDates(text) {
 }
 const US_STATE_CODES = new Set(['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY']);
 const US_STATE_NAMES = { ALABAMA: 'AL', ALASKA: 'AK', ARIZONA: 'AZ', ARKANSAS: 'AR', CALIFORNIA: 'CA', COLORADO: 'CO', CONNECTICUT: 'CT', DELAWARE: 'DE', FLORIDA: 'FL', GEORGIA: 'GA', HAWAII: 'HI', IDAHO: 'ID', ILLINOIS: 'IL', INDIANA: 'IN', IOWA: 'IA', KANSAS: 'KS', KENTUCKY: 'KY', LOUISIANA: 'LA', MAINE: 'ME', MARYLAND: 'MD', MASSACHUSETTS: 'MA', MICHIGAN: 'MI', MINNESOTA: 'MN', MISSISSIPPI: 'MS', MISSOURI: 'MO', MONTANA: 'MT', NEBRASKA: 'NE', NEVADA: 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', OHIO: 'OH', OKLAHOMA: 'OK', OREGON: 'OR', PENNSYLVANIA: 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC', 'SOUTH DAKOTA': 'SD', TENNESSEE: 'TN', TEXAS: 'TX', UTAH: 'UT', VERMONT: 'VT', VIRGINIA: 'VA', WASHINGTON: 'WA', 'WEST VIRGINIA': 'WV', WISCONSIN: 'WI', WYOMING: 'WY', 'DISTRICT OF COLUMBIA': 'DC' };
+// ZIP-prefix rescue: OCR (and the odd broker typo) can garble the
+// two-letter state code ("KY" read as "XY"). The ZIP code's first
+// three digits still pin the state, so when the state token is not a
+// valid code but the ZIP prefix maps to exactly one state, trust the
+// ZIP. A valid state token always wins over the ZIP.
+const ZIP3_RANGES = [[5, 5, 'NY'], [10, 27, 'MA'], [28, 29, 'RI'], [30, 38, 'NH'], [39, 49, 'ME'], [50, 59, 'VT'], [60, 69, 'CT'], [70, 89, 'NJ'], [100, 149, 'NY'], [150, 196, 'PA'], [197, 199, 'DE'], [200, 205, 'DC'], [206, 219, 'MD'], [220, 246, 'VA'], [247, 268, 'WV'], [270, 289, 'NC'], [290, 299, 'SC'], [300, 319, 'GA'], [320, 349, 'FL'], [350, 369, 'AL'], [370, 385, 'TN'], [386, 399, 'MS'], [400, 427, 'KY'], [430, 459, 'OH'], [460, 479, 'IN'], [480, 499, 'MI'], [500, 528, 'IA'], [530, 549, 'WI'], [550, 567, 'MN'], [570, 577, 'SD'], [580, 588, 'ND'], [590, 599, 'MT'], [600, 629, 'IL'], [630, 658, 'MO'], [660, 679, 'KS'], [680, 693, 'NE'], [700, 714, 'LA'], [716, 729, 'AR'], [730, 749, 'OK'], [750, 799, 'TX'], [800, 816, 'CO'], [820, 831, 'WY'], [832, 838, 'ID'], [840, 847, 'UT'], [850, 865, 'AZ'], [870, 884, 'NM'], [890, 898, 'NV'], [900, 961, 'CA'], [967, 968, 'HI'], [970, 979, 'OR'], [980, 994, 'WA'], [995, 999, 'AK']];
+function stateFromZip3(z3) {
+  const n = Number(z3);
+  for (const [a, b, st] of ZIP3_RANGES) if (n >= a && n <= b) return st;
+  return null;
+}
+
 function scanRcPlaces(t, base) {
   // Every "City, ST (ZIP)" form in one text, in document order.
   // Brokers write addresses many ways: "City, ST 12345", "City, ST"
@@ -3838,6 +4147,12 @@ function scanRcPlaces(t, base) {
   const nameAlt = Object.keys(US_STATE_NAMES).join('|');
   const reZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
   while ((m = reZip.exec(t))) add(m[1], m[2], m[3], base + m.index);
+  const reZipBad = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
+  while ((m = reZipBad.exec(t))) {
+    if (US_STATE_CODES.has(m[2])) continue;
+    const st = stateFromZip3(m[3].slice(0, 3));
+    if (st) add(m[1], st, m[3], base + m.index);
+  }
   const reNameZip = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\s+(\\d{5})', 'gi');
   while ((m = reNameZip.exec(t))) add(m[1], US_STATE_NAMES[m[2].toUpperCase()], m[3], base + m.index);
   const reName = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\b', 'gi');
@@ -3903,8 +4218,8 @@ function extractRcLoadFields(text, subject) {
       || (/confirmation/i.test(subject) ? subject.match(/\b(\d{6,10}(?:-\d{1,3})?)\b/) : null);
     if (sm) loadRef = sm[1].toUpperCase();
   }
-  const truck = all.match(/(?:truck|tractor)\s*(?:#|no\.?|number|unit)?\s*[:#]\s*(\d{3,5})/i);
-  const trailer = all.match(/trailer\s*(?:#|no\.?|number|unit)?\s*[:#]\s*(\d{3,5})/i);
+  const truck = all.match(/(?:truck|tractor)\s*(?:#|no\.?|number|unit)?\s*[:#]?\s*(\d{3,5})\b/i);
+  const trailer = all.match(/trailer\s*(?:#|no\.?|number|unit)?\s*[:#]?\s*(\d{3,5})\b/i);
   return {
     lxlRef: lxl ? 'LXL-' + lxl[1] : null,
     loadRef,
@@ -3970,7 +4285,7 @@ function saveRcImportRun(run) {
   db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes, cursor, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null, run.epoch || RC_IMPORT_EPOCH);
 }
-const RC_IMPORT_EPOCH = 'parse2-2026-11-16';
+const RC_IMPORT_EPOCH = 'ocr1-2026-11-16';
 function rcImportRun(runId) {
   if (!runId) {
     const latest = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
@@ -4225,11 +4540,49 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
 });
 
 
+// Add-RC auto-load (owner, 2026-11-16): when a dispatcher picks a rate
+// confirmation from email (or uploads the file) without choosing a
+// load, the system creates the load FROM the rate confirmation —
+// LXL- reference from the broker load number, pickup/delivery city +
+// state from the RC's pickup/delivery sections, driver from the name
+// / truck / trailer on the RC — as an ACTIVE load, and files the RC
+// on it. If a load with that reference already exists, the RC simply
+// attaches to it.
+async function findOrCreateLoadFromRc(fileBuffer, subject) {
+  const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+  const dup = db.prepare('SELECT * FROM rate_confirmations WHERE fileHash = ?').get(fileHash);
+  if (dup) return { duplicateRc: dup };
+  const text = await extractFileText(fileBuffer);
+  const f = extractRcLoadFields(text || '', subject || '');
+  const ref = f.lxlRef || (f.loadRef ? lxlLoadRef(f.loadRef) : null);
+  if (!ref) throw Object.assign(new Error('No load number could be read from this rate confirmation — pick the load manually.'), { status: 400 });
+  let load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(ref);
+  if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.loadRef);
+  if (load) return { load, created: false };
+  if (f.places.length < 2 || f.dates.length < 1)
+    throw Object.assign(new Error(`Load ${ref} is new, but its pickup/delivery cities or dates could not be read from the rate confirmation — add the load manually, then attach this RC to it.`), { status: 400 });
+  const driverId = resolveImportedDriverId(f);
+  if (!driverId)
+    throw Object.assign(new Error(`Load ${ref} is new, but no driver name or truck/trailer number could be read from the rate confirmation — add the load manually, then attach this RC to it.`), { status: 400 });
+  const p = f.places[0];
+  const d = f.places[f.places.length - 1];
+  const pDate = f.dates[0];
+  const dDate = f.dates[f.dates.length - 1] || f.dates[0];
+  const id = db.prepare(
+    "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+  ).run(ref, driverId, `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
+    `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
+    'Created from a rate confirmation', now()).lastInsertRowid;
+  load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
+  notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${load.reference}: ${load.pickupLocation} → ${load.deliveryLocation}.`).catch(() => {});
+  return { load, created: true };
+}
+
 admin.post('/rate-confirmations/from-outlook', async (req, res) => {
   try {
     const { loadId, messageId, attachmentId, subject } = req.body || {};
-    if (!loadId || !messageId || !attachmentId)
-      return err(res, 400, 'loadId, messageId and attachmentId are required');
+    if (!messageId || !attachmentId)
+      return err(res, 400, 'messageId and attachmentId are required');
     const user = getUserById(req.user.id);
     const accessToken = await outlookAccessToken(user);
     const att = await outlookGraph(
@@ -4240,9 +4593,15 @@ admin.post('/rate-confirmations/from-outlook', async (req, res) => {
       return err(res, 400, 'That attachment has no file to download — pick a file attachment (PDF).');
     const fileBuffer = Buffer.from(att.contentBytes, 'base64');
     if (!fileBuffer.length) return err(res, 400, 'That attachment is empty.');
-    res.status(201).json(
-      await createRateCon({ loadId, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject }),
-    );
+    let useLoadId = loadId ? Number(loadId) : null;
+    let auto = null;
+    if (!useLoadId) {
+      auto = await findOrCreateLoadFromRc(fileBuffer, subject);
+      if (auto.duplicateRc) return res.status(201).json({ ...serializeRateCon(auto.duplicateRc), duplicate: true });
+      useLoadId = auto.load.id;
+    }
+    const rc = await createRateCon({ loadId: useLoadId, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
+    res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
     console.error('rate-con from outlook failed', e);
@@ -4540,11 +4899,138 @@ admin.delete('/rate-confirmations/:id', (req, res) => {
 // the errorHandler is REQUIRED or a bad image kills the process). Never
 // throws — on any failure it returns {} and the dates stay blank for
 // manual entry.
+// --- OCR for scanned PDFs ---------------------------------------------------
+// Many broker rate cons (most Armstrong ones) are scanned images inside
+// a PDF: no text layer at all, so every text-based check reads them as
+// empty. Pull the embedded page images out with pdf.js and OCR them
+// with the same tesseract setup the photo path uses.
+const PNG_CRC_TABLE = (() => {
+  const table = new Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+function pngCrc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = PNG_CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(pngCrc32(body), 0);
+  return Buffer.concat([len, body, crc]);
+}
+function encodePngRgba(width, height, rgba) {
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0;
+    raw.set(rgba.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw, { level: 6 })),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+function pdfImageToPng(img) {
+  const w = img.width;
+  const h = img.height;
+  const data = img.data;
+  if (!w || !h || !data) return null;
+  const rgba = new Uint8Array(w * h * 4);
+  if (data.length === w * h * 4) {
+    rgba.set(data);
+  } else if (data.length === w * h * 3) {
+    for (let i = 0, j = 0; i < data.length; i += 3, j += 4) { rgba[j] = data[i]; rgba[j + 1] = data[i + 1]; rgba[j + 2] = data[i + 2]; rgba[j + 3] = 255; }
+  } else if (data.length === w * h) {
+    for (let i = 0, j = 0; i < data.length; i++, j += 4) { rgba[j] = rgba[j + 1] = rgba[j + 2] = data[i]; rgba[j + 3] = 255; }
+  } else if (data.length === Math.ceil(w / 8) * h) {
+    const rowBytes = Math.ceil(w / 8);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const bit = (data[y * rowBytes + (x >> 3)] >> (7 - (x & 7))) & 1;
+        const v = bit ? 255 : 0;
+        const j = (y * w + x) * 4;
+        rgba[j] = rgba[j + 1] = rgba[j + 2] = v;
+        rgba[j + 3] = 255;
+      }
+    }
+  } else return null;
+  return encodePngRgba(w, h, rgba);
+}
+async function getPdfImage(page, name) {
+  const grab = (objs) => new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v || null); } };
+    try { objs.get(name, finish); } catch { finish(null); }
+    const t = setTimeout(() => finish(null), 3000);
+    if (t.unref) t.unref();
+  });
+  return (await grab(page.objs)) || (await grab(page.commonObjs));
+}
+async function ocrPdfImages(buf) {
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
+  const worker = await createWorker('eng', undefined, {
+    errorHandler: (e) => console.error('pdf OCR tesseract worker error', e),
+  });
+  let out = '';
+  try {
+    const pages = Math.min(doc.numPages, 3);
+    for (let i = 1; i <= pages; i++) {
+      const page = await doc.getPage(i);
+      const ops = await page.getOperatorList();
+      const names = [];
+      for (let k = 0; k < ops.fnArray.length; k++) {
+        if (ops.fnArray[k] === pdfjs.OPS.paintImageXObject) {
+          const nm = ops.argsArray[k][0];
+          if (!names.includes(nm)) names.push(nm);
+        }
+      }
+      for (const nm of names) {
+        const img = await getPdfImage(page, nm);
+        if (!img || img.width < 200 || img.height < 200) continue;
+        const png = pdfImageToPng(img);
+        if (!png) continue;
+        const { data } = await worker.recognize(png);
+        if (data && data.text) out += data.text + '\n';
+      }
+    }
+  } finally {
+    try { await worker.terminate(); } catch { /* already gone */ }
+  }
+  return out;
+}
+
 async function extractFileText(buf) {
   const isPdf = buf.length >= 4 && buf.subarray(0, 4).toString('ascii') === '%PDF';
   const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
   const isPng = buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
-  if (isPdf) return cleanRateText(await pdfTextFromBuffer(buf));
+  if (isPdf) {
+    const text = cleanRateText(await pdfTextFromBuffer(buf));
+    if (text.length >= 200) return text;
+    // Scanned / image-only PDF: no usable text layer. Read the page
+    // images with OCR instead — slower, but the document still counts.
+    try {
+      const ocr = cleanRateText(await ocrPdfImages(buf));
+      if (ocr.length > text.length) return ocr;
+    } catch (e) {
+      console.error('pdf OCR fallback failed', e);
+    }
+    return text;
+  }
   if ((isJpeg || isPng) && buf.length > 1024) {
     const worker = await createWorker('eng', undefined, {
       errorHandler: (e) => console.error('equipment-doc tesseract worker error', e),
@@ -4994,7 +5480,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void verifyRateConStates();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
