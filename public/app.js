@@ -287,7 +287,7 @@ const ADMIN_VIEWS = [
   ['documents', 'Documents'],
   ['requests', 'Requests'],
   ['dispatch', 'Dispatch'],
-  ['locations', 'Locations'],
+  ['locations', 'Tracking'],
   ['ratecons', 'Rate Cons'],
 ];
 
@@ -1788,7 +1788,7 @@ async function viewLocations(main) {
   document.body.classList.add('loc-bg'); // daytime highway photo + liquid glass (removed on view switch)
   ensureLocBgLayer();
   main.innerHTML = '<div class="loc-page">' +
-    '<div class="loc-head"><h1>Locations</h1><p class="muted">Live locations of your drivers — last known position shows even after a driver signs out. Refreshes every 10 seconds. The road colours on the map are live traffic.</p></div>' +
+    '<div class="loc-head"><h1>Tracking</h1><p class="muted">Live locations of your drivers — last known position shows even after a driver signs out. Refreshes every 10 seconds. The road colours on the map are live traffic.</p></div>' +
     '<div class="loc-layout" id="locLayout">' +
       '<div class="loc-map-panel"><div id="map"></div><p class="small loc-map-note" id="locMapNote" style="display:none"></p></div>' +
       '<div class="loc-search"><input id="locSearch" type="search" placeholder="Search driver — name, truck, trailer or city" autocomplete="off"></div>' +

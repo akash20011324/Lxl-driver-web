@@ -2337,6 +2337,46 @@ admin.get('/outlook/thread', async (req, res) => {
   }
 });
 
+// The sender's Outlook signature lives only in their mailbox (Graph
+// has no signature API), so capture it from their own sent mail: the
+// signature block in the sender's part of a message, before the quoted
+// thread starts. The "Get Outlook for iOS" placeholder is not a
+// signature and is rejected.
+function extractSignatureHtml(html) {
+  if (!html) return null;
+  const own = String(html).split('divRplyFwdMsg')[0];
+  const markers = ['id="ms-outlook-mobile-signature"', "id='ms-outlook-mobile-signature'", 'id="Signature"', 'id="x_Signature"'];
+  let start = -1;
+  for (const mk of markers) {
+    const i = own.indexOf(mk);
+    if (i !== -1) { start = own.lastIndexOf('<div', i); break; }
+  }
+  if (start === -1) return null;
+  let end = own.indexOf('<hr', start);
+  if (end === -1) end = own.length;
+  let block = own.slice(start, end).trim();
+  if (!block || block.includes('aka.ms/o0ukef')) return null;
+  if (!block.endsWith('>')) block = block.slice(0, block.lastIndexOf('>') + 1);
+  return block.length > 40 ? block : null;
+}
+
+// The admin's signature: the stored copy once captured; on first use,
+// capture it from their recent sent mail (newest first) and store it.
+async function getUserSignatureHtml(user, readToken) {
+  if (user.emailSignatureHtml) return user.emailSignatureHtml;
+  try {
+    const data = await outlookGraph(readToken, '/me/mailFolders/sentitems/messages?$top=10&$select=body');
+    for (const msg of data.value || []) {
+      const sig = extractSignatureHtml(msg.body && msg.body.content);
+      if (sig) {
+        db.prepare('UPDATE users SET emailSignatureHtml = ? WHERE id = ?').run(sig, user.id);
+        return sig;
+      }
+    }
+  } catch { /* the signature is optional — send without it */ }
+  return null;
+}
+
 admin.post('/outlook/send-documents', async (req, res) => {
   let draftId = null;
   let sendToken = null;
@@ -2377,8 +2417,11 @@ admin.post('/outlook/send-documents', async (req, res) => {
     const cur = await outlookGraph(sendToken, `/me/messages/${encodeURIComponent(draftId)}?$select=body`);
     const escHtml = note.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
     const existing = (cur.body && cur.body.content) || '';
+    // Append the sender's Outlook signature under the note, the same
+    // place Outlook itself puts it (before the quoted thread).
+    const sigHtml = await getUserSignatureHtml(user, readToken);
     await outlookGraphReq(sendToken, 'PATCH', `/me/messages/${encodeURIComponent(draftId)}`, {
-      body: { contentType: 'html', content: `<p>${escHtml}</p><br>${existing}` },
+      body: { contentType: 'html', content: `<p>${escHtml}</p>` + (sigHtml || '<br>') + existing },
     });
     for (const d of docs) {
       await attachFileToDraft(sendToken, draftId, d);

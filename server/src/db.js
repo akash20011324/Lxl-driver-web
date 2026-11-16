@@ -242,6 +242,13 @@ export function openDb(dataDir) {
   if (!columns.some((c) => c.name === 'sidebarOrder')) {
     db.exec('ALTER TABLE users ADD COLUMN sidebarOrder TEXT');
   }
+  // Migrate databases created before email signatures: the admin's
+  // Outlook signature (HTML), captured from their own sent mail and
+  // appended to Documents sends so portal emails carry it just like
+  // Outlook-sent ones do.
+  if (!columns.some((c) => c.name === 'emailSignatureHtml')) {
+    db.exec('ALTER TABLE users ADD COLUMN emailSignatureHtml TEXT');
+  }
   // Migrate databases created before live speed: add speed (mph) and
   // heading (degrees) to the stored driver location (fresh databases get
   // them from the schema above).
