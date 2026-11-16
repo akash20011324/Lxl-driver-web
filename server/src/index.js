@@ -118,6 +118,8 @@ function serializeTrailer(t) {
     id: t.id,
     unitNumber: t.unitNumber,
     kind: t.kind ?? null,
+    make: t.make ?? null,
+    model: t.model ?? null,
     year: t.year ?? null,
     plate: t.plate ?? null,
     vin: t.vin ?? null,
@@ -3133,6 +3135,88 @@ async function detectDatesForFile(filePath) {
   }
 }
 
+// ---- Cab-card vehicle recognition (owner's ask, 2026-11-15) ----------
+// When a cab card is uploaded for a truck or trailer, read the vehicle
+// off the card — year, make, model (plus VIN and plate when shown) — and
+// fill the unit's EMPTY fields with them, so the year/make/model shows
+// under the unit number on the Trucks & Trailers page. Existing values
+// are never overwritten.
+const VEHICLE_MAKES = [
+  ['KENWORTH', 'Kenworth'], ['FREIGHTLINER', 'Freightliner'], ['PETERBILT', 'Peterbilt'],
+  ['INTERNATIONAL', 'International'], ['VOLVO', 'Volvo'], ['MACK', 'Mack'],
+  ['UTILITY', 'Utility'], ['WABASH', 'Wabash'], ['GREAT DANE', 'Great Dane'],
+  ['HYUNDAI', 'Hyundai'], ['STOUGHTON', 'Stoughton'], ['VANGUARD', 'Vanguard'],
+  ['MANAC', 'Manac'], ['FONTAINE', 'Fontaine'], ['REITNOUER', 'Reitnouer'],
+  ['TRAIL KING', 'Trail King'], ['EAST', 'East'], ['WESTERN STAR', 'Western Star'],
+];
+const VEHICLE_MODELS = [
+  'T680', 'T880', 'T800', 'W900', 'W990', 'T370', 'CASCADIA', 'CORONADO', 'COLUMBIA',
+  'LT625', 'LT', 'PROSTAR', 'DURASTAR', 'VNL 760', 'VNL 860', 'VNL', 'VNR', 'VHD',
+  '579', '567', '389', '379', '589', 'ANTHEM', 'PINNACLE', 'GRANITE',
+  '3000R', '4000D', 'DURAPLATE', 'CHAMPION', 'CHAPARRAL', 'SSL', 'REEFER',
+];
+function detectVehicleInfo(text) {
+  if (!text) return {};
+  const flat = String(text).replace(/\s+/g, ' ');
+  const upper = flat.toUpperCase();
+  const out = {};
+  const vinM = upper.match(/\b[A-HJ-NPR-Z0-9]{17}\b/);
+  if (vinM) out.vin = vinM[0];
+  let make = null;
+  let makeIdx = -1;
+  for (const [raw, canon] of VEHICLE_MAKES) {
+    const i = upper.indexOf(raw);
+    if (i >= 0) { make = canon; makeIdx = i; break; }
+  }
+  if (make) out.make = make;
+  // Year: an explicit label first, then a year printed just before the
+  // make (cab cards commonly read "2021 KENWORTH T680"). Never a bare
+  // year from anywhere on the card — issue/expiry years would poison it.
+  const yrLabel = flat.match(/(?:year|yr)\s*[:#]?\s*((?:19|20)\d{2})\b/i);
+  if (yrLabel) out.year = parseInt(yrLabel[1], 10);
+  else if (makeIdx > 0) {
+    const before = upper.slice(Math.max(0, makeIdx - 24), makeIdx);
+    const yrs = [...before.matchAll(/\b((?:19|20)\d{2})\b/g)];
+    if (yrs.length) out.year = parseInt(yrs[yrs.length - 1][1], 10);
+  }
+  if (out.year && (out.year < 1990 || out.year > new Date().getFullYear() + 1)) delete out.year;
+  // Model: a label wins; otherwise a known model token near the make.
+  // A known token inside the captured text beats the raw capture (OCR
+  // often glues the next field onto it, e.g. "3000R IN" for "3000R VIN:").
+  const modelDisplay = (raw) =>
+    (/\d/.test(raw) || raw.length <= 5 || raw.includes(' ')) ? raw : raw.charAt(0) + raw.slice(1).toLowerCase();
+  const mdlLabel = flat.match(/(?:model|mdl)\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9 \-]{1,14})/i);
+  if (mdlLabel) {
+    const cand = mdlLabel[1].trim().split(/\s{2,}|\b(?:VIN|PLATE|LICENSE|YEAR|MAKE)\b/i)[0].trim();
+    const known = VEHICLE_MODELS.find(mdl => cand.toUpperCase().includes(mdl));
+    if (known) out.model = modelDisplay(known);
+    else if (cand && cand.length >= 2) out.model = cand.split(/\s+/).slice(0, 2).join(' ');
+  }
+  if (!out.model) {
+    const hay = makeIdx >= 0 ? upper.slice(makeIdx, makeIdx + 60) : upper;
+    const known = VEHICLE_MODELS.find(mdl => hay.includes(mdl));
+    if (known) out.model = modelDisplay(known);
+  }
+  const plateM = flat.match(/(?:plate|lic(?:ense)?\s*(?:no\.?|number|#)?)\s*[:#]?\s*([A-Z0-9][A-Z0-9 \-]{3,11})/i);
+  if (plateM) {
+    const p = plateM[1].trim().replace(/\s+/g, ' ');
+    if (/[0-9]/.test(p) && p.length <= 10) out.plate = p;
+  }
+  return out;
+}
+async function detectVehicleForFile(filePath) {
+  try {
+    const buf = fs.readFileSync(filePath);
+    const text = await extractFileText(buf);
+    const found = detectVehicleInfo(text);
+    console.log('cab-card vehicle read', { bytes: buf.length, textLen: text.length, ...found });
+    return found;
+  } catch (e) {
+    console.error('cab-card vehicle detection failed', e);
+    return {};
+  }
+}
+
 admin.get('/equipment-documents', (req, res) => {
   const { unitType, unitId } = req.query;
   let rows;
@@ -3183,11 +3267,35 @@ admin.post('/equipment-documents', upload.single('file'), async (req, res) => {
         .run(fillExpiry, fillIssued, id);
     }
   }
+  // Cab card: read the vehicle off the card and fill the unit's empty
+  // year/make/model/VIN/plate so it shows under the unit number.
+  let vehicle = null;
+  if (docType === 'cab_card') {
+    const found = await detectVehicleForFile(req.file.path);
+    const filled = [];
+    const sets = [];
+    const vals = [];
+    for (const key of ['year', 'make', 'model', 'vin', 'plate']) {
+      if (found[key] != null && (unit[key] == null || unit[key] === '')) {
+        sets.push(key + ' = ?');
+        vals.push(found[key]);
+        filled.push(key);
+      }
+    }
+    if (sets.length) {
+      db.prepare('UPDATE ' + table + ' SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals, unitId);
+      const fresh = db.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(unitId);
+      vehicle = { filled, year: fresh.year ?? null, make: fresh.make ?? null, model: fresh.model ?? null };
+    } else if (Object.keys(found).length) {
+      vehicle = { filled, year: unit.year ?? null, make: unit.make ?? null, model: unit.model ?? null };
+    }
+  }
   const row = db
     .prepare('SELECT e.*, f.originalFilename, f.mimeType FROM equipment_documents e JOIN files f ON f.id = e.fileId WHERE e.id = ?')
     .get(id);
   const out = serializeEquipmentDoc(row);
   out.detected = detected;
+  if (vehicle) out.vehicle = vehicle;
   res.status(201).json(out);
 });
 

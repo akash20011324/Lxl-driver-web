@@ -275,8 +275,20 @@ export function openDb(dataDir) {
   }
   // Per-user chat wallpaper (WhatsApp-style): each admin and driver can
   // set their own chat background picture; stored as a files row.
+  if (!columns.some((c) => c.name === 'pushSound')) {
+    db.exec('ALTER TABLE users ADD COLUMN pushSound TEXT');
+  }
   if (!columns.some((c) => c.name === 'chatWallpaperFileId')) {
     db.exec('ALTER TABLE users ADD COLUMN chatWallpaperFileId INTEGER REFERENCES files(id)');
+  }
+  // Trailers get make/model too (cab-card auto-read fills them, the same
+  // as trucks) — fresh databases still use the base schema above.
+  const trailerColumns = db.prepare('PRAGMA table_info(trailers)').all();
+  if (!trailerColumns.some((c) => c.name === 'make')) {
+    db.exec('ALTER TABLE trailers ADD COLUMN make TEXT');
+  }
+  if (!trailerColumns.some((c) => c.name === 'model')) {
+    db.exec('ALTER TABLE trailers ADD COLUMN model TEXT');
   }
   // Migrate databases created before live speed: add speed (mph) and
   // heading (degrees) to the stored driver location (fresh databases get

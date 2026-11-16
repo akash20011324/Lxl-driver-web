@@ -282,7 +282,7 @@ async function viewUnitDocuments(main) {
   const list = Array.isArray(docs) ? docs : [];
   const desc = target.type === 'truck'
     ? [unit.year, unit.make, unit.model].filter(Boolean).join(' ')
-    : [unit.year, unit.kind].filter(Boolean).join(' ');
+    : (unit.make ? [unit.year, unit.make, unit.model].filter(Boolean).join(' ') : [unit.year, unit.kind].filter(Boolean).join(' '));
   const byType = new Map();
   for (const d of list) {
     if (!byType.has(d.docType)) byType.set(d.docType, []);
@@ -358,6 +358,9 @@ async function viewUnitDocuments(main) {
     try {
       const r = await api('/api/admin/equipment-documents', { method: 'POST', body: fd });
       const label = EQUIP_DOC_LABELS[docType] || docType;
+      if (r && r.vehicle && r.vehicle.filled && r.vehicle.filled.length) {
+        toast('Cab card read: ' + ([r.vehicle.year, r.vehicle.make, r.vehicle.model].filter(Boolean).join(' ') || 'vehicle details') + ' — now shown under the unit number.', 'ok');
+      }
       if (r && r.detected && (r.detected.expiryDate || r.detected.issuedDate)) {
         toast(label + ' saved — dates read automatically' +
           (r.detected.issuedDate ? ' · issued ' + fmtExpiry(r.detected.issuedDate) : '') +
@@ -1652,7 +1655,7 @@ function unitCard(u, type, pair) {
   if (!unitVisible(u)) return '';
   const desc = type === 'truck'
     ? [u.year, u.make, u.model].filter(Boolean).join(' ')
-    : [u.year, u.kind].filter(Boolean).join(' ');
+    : (u.make ? [u.year, u.make, u.model].filter(Boolean).join(' ') : [u.year, u.kind].filter(Boolean).join(' '));
   const driverOpts = '<option value="">— Unassigned —</option>' + state.driversCache.map(d =>
     '<option value="' + d.id + '"' + (u.driverId === d.id ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('');
   const stat = (lbl, val, gold) => '<div class="unit-stat"><div class="lbl">' + lbl + '</div>' +
