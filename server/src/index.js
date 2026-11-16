@@ -1016,7 +1016,7 @@ driver.post('/location', async (req, res) => {
   res.json({ ok: true });
 });
 
-const PUSH_SOUNDS = ['alarm', 'bell', 'horn', 'ring', 'chime'];
+const PUSH_SOUNDS = ['note', 'glass'];
 driver.get('/push-sound', (req, res) => {
   const row = db.prepare('SELECT pushSound FROM users WHERE id = ?').get(req.user.id);
   res.json({ sound: row && row.pushSound ? row.pushSound : null, options: PUSH_SOUNDS });
