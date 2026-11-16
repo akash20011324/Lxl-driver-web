@@ -4946,30 +4946,51 @@ function encodePngRgba(width, height, rgba) {
   ]);
 }
 function pdfImageToPng(img) {
+  // Downscale while converting: a 300-DPI scan is 2550x3300+, and a
+  // full-size RGBA copy plus the OCR engine is what tipped the small
+  // server over during the first OCR import (2026-11-16). Tesseract
+  // reads 1800px-wide pages just as well, at a fraction of the memory.
   const w = img.width;
   const h = img.height;
   const data = img.data;
   if (!w || !h || !data) return null;
-  const rgba = new Uint8Array(w * h * 4);
+  const MAXW = 1800;
+  const tw = Math.min(w, MAXW);
+  const th = Math.max(1, Math.round(h * (tw / w)));
+  let sample;
   if (data.length === w * h * 4) {
-    rgba.set(data);
+    sample = (x, y) => { const i = (y * w + x) * 4; return [data[i], data[i + 1], data[i + 2]]; };
   } else if (data.length === w * h * 3) {
-    for (let i = 0, j = 0; i < data.length; i += 3, j += 4) { rgba[j] = data[i]; rgba[j + 1] = data[i + 1]; rgba[j + 2] = data[i + 2]; rgba[j + 3] = 255; }
+    sample = (x, y) => { const i = (y * w + x) * 3; return [data[i], data[i + 1], data[i + 2]]; };
   } else if (data.length === w * h) {
-    for (let i = 0, j = 0; i < data.length; i++, j += 4) { rgba[j] = rgba[j + 1] = rgba[j + 2] = data[i]; rgba[j + 3] = 255; }
+    sample = (x, y) => { const v = data[y * w + x]; return [v, v, v]; };
   } else if (data.length === Math.ceil(w / 8) * h) {
     const rowBytes = Math.ceil(w / 8);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const bit = (data[y * rowBytes + (x >> 3)] >> (7 - (x & 7))) & 1;
-        const v = bit ? 255 : 0;
-        const j = (y * w + x) * 4;
-        rgba[j] = rgba[j + 1] = rgba[j + 2] = v;
-        rgba[j + 3] = 255;
-      }
-    }
+    sample = (x, y) => { const bit = (data[y * rowBytes + (x >> 3)] >> (7 - (x & 7))) & 1; const v = bit ? 255 : 0; return [v, v, v]; };
   } else return null;
-  return encodePngRgba(w, h, rgba);
+  const rgba = new Uint8Array(tw * th * 4);
+  for (let ty = 0; ty < th; ty++) {
+    const sy = Math.min(h - 1, Math.floor((ty * h) / th));
+    for (let tx = 0; tx < tw; tx++) {
+      const sx = Math.min(w - 1, Math.floor((tx * w) / tw));
+      const [r, g, b] = sample(sx, sy);
+      const j = (ty * tw + tx) * 4;
+      rgba[j] = r;
+      rgba[j + 1] = g;
+      rgba[j + 2] = b;
+      rgba[j + 3] = 255;
+    }
+  }
+  return encodePngRgba(tw, th, rgba);
+}
+// One OCR at a time, process-wide: tesseract workers are heavy, and
+// two import rounds (or an import plus a receipt scan) running OCR
+// concurrently is what knocked the portal over with 502s.
+let ocrQueue = Promise.resolve();
+function ocrPdfImagesQueued(buf) {
+  const run = ocrQueue.then(() => ocrPdfImages(buf));
+  ocrQueue = run.catch(() => {});
+  return run;
 }
 async function getPdfImage(page, name) {
   const grab = (objs) => new Promise((resolve) => {
@@ -4988,7 +5009,7 @@ async function ocrPdfImages(buf) {
   });
   let out = '';
   try {
-    const pages = Math.min(doc.numPages, 3);
+    const pages = Math.min(doc.numPages, 2);
     for (let i = 1; i <= pages; i++) {
       const page = await doc.getPage(i);
       const ops = await page.getOperatorList();
@@ -5024,7 +5045,7 @@ async function extractFileText(buf) {
     // Scanned / image-only PDF: no usable text layer. Read the page
     // images with OCR instead — slower, but the document still counts.
     try {
-      const ocr = cleanRateText(await ocrPdfImages(buf));
+      const ocr = cleanRateText(await ocrPdfImagesQueued(buf));
       if (ocr.length > text.length) return ocr;
     } catch (e) {
       console.error('pdf OCR fallback failed', e);
