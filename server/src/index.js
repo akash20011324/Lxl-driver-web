@@ -6031,7 +6031,13 @@ function detectDocDates(text) {
   if (!text) return {};
   const dates = findAllDates(text);
   if (!dates.length) return {};
-  let expiry = dateNearLabel(text, dates, /expir\w*|valid\s+(through|until|thru|to)|exp\.?\s*date|coverage\s+(ends|through|until)/i);
+  // Permanent documents (e.g. Indiana trailer cab cards) print
+  // "VALIDITY PERIOD 12-OCT-2026 TO NO EXPIRY" — the one date is the
+  // start of validity, never an expiry.
+  if (/no\s+expir\w*/i.test(text)) {
+    const uniq0 = [...new Set(dates.map(d => d.iso))].sort();
+    return uniq0.length ? { issuedDate: uniq0[0] } : {};
+  }  let expiry = dateNearLabel(text, dates, /expir\w*|valid\s+(through|until|thru|to)|exp\.?\s*date|coverage\s+(ends|through|until)/i);
   let issued = dateNearLabel(text, dates, /issu\w*|effective|date\s+issued|inception/i);
   const uniq = [...new Set(dates.map(d => d.iso))].sort();
   if (!expiry && uniq.length) expiry = uniq[uniq.length - 1];

@@ -1144,12 +1144,14 @@ async function viewDashboard(main) {
     '<div class="glass-panel dash-stat"><div class="stat-num">' + pendingReq + '</div><div class="stat-label">Pending requests</div></div>' +
     '</div>' +
     '<div class="dash-main">' +
+    '<div class="dash-left">' +
+    '<div class="glass-panel" style="margin-bottom:14px"><h2 style="margin-top:0">Cash flow — this month</h2><div class="cf-circles">' + (cfDonutHtml || '<p class="empty">No cash flow recorded yet this month.</p>') + bankCircleHtml + '</div></div>' +
     '<div class="dash-drivers"><h2>Drivers</h2>' +
     (list.length ? list.map(d => dashDriverCard(d, activeLoadByDriver[d.id], rcByLoad, locByDriver[d.id] || d.location, isLive(d))).join('') : '<p class="empty">No drivers yet. Add one from the Drivers page.</p>') +
     '</div>' +
+    '</div>' +
     '<div class="dash-track">' +
     '<div class="glass-panel"><h2 style="margin-top:0"><span class="live-dot off" id="dashLiveDot"></span>Live tracking</h2><div id="dashMap" class="dash-map"></div><p class="small muted" id="dashMapNote" style="display:none"></p></div>' +
-    '<div class="glass-panel mt"><h2 style="margin-top:0">Cash flow — this month</h2><div class="cf-circles">' + (cfDonutHtml || '<p class="empty">No cash flow recorded yet this month.</p>') + bankCircleHtml + '</div></div>' +
     '<div class="glass-panel mt" id="dashFleet"></div>' +
     '</div></div>';
   renderAdminSidebar(pendingReq);
