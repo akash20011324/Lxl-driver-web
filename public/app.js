@@ -533,6 +533,8 @@ async function boot() {
   removeDriversBgLayer();
   document.body.classList.remove('admins-bg');
   removeAdminsBgLayer();
+  document.body.classList.remove('requests-bg');
+  removeRequestsBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const app = document.getElementById('app');
@@ -1019,6 +1021,8 @@ async function renderAdminView(view) {
   removeDriversBgLayer();
   document.body.classList.remove('admins-bg');
   removeAdminsBgLayer();
+  document.body.classList.remove('requests-bg');
+  removeRequestsBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
   const main = document.getElementById('adminMain');
@@ -1485,6 +1489,14 @@ function removeTrucksBgLayer() {
 /* Drivers background: the light-trails photo — same pattern. */
 const ADMIN_CARD_COLORS = ['#2563EB', '#9333EA', '#0891B2', '#DB2777', '#EA580C', '#16A34A', '#65A30D', '#DC2626'];
 
+function ensureRequestsBgLayer() {
+  if (!document.getElementById('requestsBgLayer')) {
+    const d = document.createElement('div');
+    d.id = 'requestsBgLayer';
+    document.body.prepend(d);
+  }
+}
+
 function ensureAdminsBgLayer() {
   if (!document.getElementById('adminsBgLayer')) {
     const d = document.createElement('div');
@@ -1506,6 +1518,10 @@ function removeDriversBgLayer() {
 }
 function removeAdminsBgLayer() {
   const layer = document.getElementById('adminsBgLayer');
+  if (layer) layer.remove();
+}
+function removeRequestsBgLayer() {
+  const layer = document.getElementById('requestsBgLayer');
   if (layer) layer.remove();
 }
 /* The Chat background is a real fixed layer too — same pattern. */
@@ -2544,25 +2560,47 @@ async function viewDocuments(main) {
 
 /* ---------- Requests ---------- */
 async function viewRequests(main) {
+  document.body.classList.add('requests-bg'); // dispatch request-board photo + liquid glass (removed on view switch)
+  ensureRequestsBgLayer();
   const reqs = await api('/api/admin/requests');
   const list = Array.isArray(reqs) ? reqs : [];
   const pending = list.filter(r => r.status === 'pending').length;
   renderAdminSidebar(pending);
-  main.innerHTML = '<h1>Requests</h1><p class="muted">' + pending + ' pending.</p>' +
-    '<div class="card"><div class="table-wrap"><table><thead><tr>' +
-    '<th>Driver</th><th>Type</th><th>Reason / details</th><th>Amount</th><th>Status</th><th>Decision</th>' +
-    '</tr></thead><tbody>' +
-    list.map(r => '<tr><td><strong>' + esc(r.driverName || '—') + '</strong></td>' +
-      '<td>' + esc(r.type) + '</td>' +
-      '<td><strong>' + esc(r.reason || '') + '</strong>' + (r.details ? '<br><span class="muted">' + esc(r.details) + '</span>' : '') + (r.adminNote ? '<br><span class="muted">Admin note: ' + esc(r.adminNote) + '</span>' : '') + '</td>' +
-      '<td>' + fmtMoney(r.amountCents) + '</td>' +
-      '<td><span class="pill ' + (r.status === 'pending' ? 'gold' : r.status === 'approved' ? 'green' : 'red') + '">' + esc(r.status) + '</span></td>' +
-      '<td>' + (r.status === 'pending'
-        ? '<input class="small" style="width:130px;margin-bottom:6px" placeholder="Note (optional)" data-note="' + r.id + '"><br>' +
-          '<button class="btn btn-sm" data-approve="' + r.id + '">Approve</button> ' +
-          '<button class="btn btn-danger btn-sm" data-deny="' + r.id + '">Deny</button>'
-        : '<span class="muted small">' + (r.decidedAt ? fmtDate(r.decidedAt) : '') + '</span>') + '</td></tr>').join('') +
-    '</tbody></table></div>' + (list.length ? '' : '<p class="empty">No requests yet.</p>') + '</div>';
+  const typeLabel = (t) => String(t || '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+  const card = (r) => {
+    const color = driverColor(r.driverId);
+    const initial = esc((String(r.driverName || '?').trim().charAt(0) || '?').toUpperCase());
+    const pill = r.status === 'pending' ? '<span class="pill gold">Pending</span>'
+      : r.status === 'approved' ? '<span class="pill green">Approved</span>' : '<span class="pill red">Denied</span>';
+    let foot = '';
+    if (r.status === 'pending') {
+      foot = '<div class="dc-actions rq-actions">' +
+        '<input class="rq-note" data-note="' + r.id + '" placeholder="Note — reason required if denying">' +
+        '<button class="btn btn-sm" data-approve="' + r.id + '">Approve</button> ' +
+        '<button class="btn btn-danger btn-sm" data-deny="' + r.id + '">Deny</button></div>';
+    } else {
+      foot = '<div class="rq-decided">' +
+        (r.adminNote
+          ? (r.status === 'denied'
+            ? '<p class="rq-denied-reason">Decline reason: ' + esc(r.adminNote) + '</p>'
+            : '<p class="small muted">Admin note: ' + esc(r.adminNote) + '</p>')
+          : '') +
+        '<p class="small muted">Decided ' + (r.decidedAt ? fmtDate(r.decidedAt) : '') + '</p></div>';
+    }
+    return '<div class="driver-card">' +
+      '<div class="dc-stripe" style="background:' + color + '"></div>' +
+      '<div class="dc-body">' +
+      '<div class="dc-head"><span class="dc-avatar" style="background:' + color + '">' + initial + '</span>' +
+      '<div><div class="dc-name">' + esc(r.driverName || '—') + '</div><div class="dc-sub">' + esc(typeLabel(r.type)) + '</div></div>' +
+      pill + '</div>' +
+      '<div class="rq-reason">' + esc(r.reason || '') + '</div>' +
+      (r.details ? '<div class="rq-details">' + esc(r.details) + '</div>' : '') +
+      '<div class="rq-amount">' + fmtMoney(r.amountCents) + '</div>' +
+      foot +
+      '</div></div>';
+  };
+  main.innerHTML = '<div class="rc-head"><h1>Requests</h1><span class="muted">' + pending + ' pending</span></div>' +
+    (list.length ? '<div class="driver-grid">' + list.map(card).join('') + '</div>' : '<p class="empty">No requests yet.</p>');
   const decide = async (id, decision) => {
     const noteEl = main.querySelector('[data-note="' + id + '"]');
     try {
@@ -2572,7 +2610,18 @@ async function viewRequests(main) {
     } catch (err) { showError(err); }
   };
   main.querySelectorAll('[data-approve]').forEach(b => b.addEventListener('click', () => decide(b.dataset.approve, 'approved')));
-  main.querySelectorAll('[data-deny]').forEach(b => b.addEventListener('click', () => decide(b.dataset.deny, 'denied')));
+  main.querySelectorAll('[data-deny]').forEach(b => b.addEventListener('click', () => {
+    const id = b.dataset.deny;
+    const noteEl = main.querySelector('[data-note="' + id + '"]');
+    const reason = noteEl ? noteEl.value.trim() : '';
+    if (!reason) {
+      toast('Write the reason for declining in the note box first.', 'error');
+      if (noteEl) noteEl.focus();
+      return;
+    }
+    if (!confirm('Deny this request?\n\nReason: ' + reason)) return;
+    decide(id, 'denied');
+  }));
 }
 
 /* ---------- Dispatch (admin) ---------- */

@@ -1631,6 +1631,10 @@ admin.get('/requests', (_req, res) => {
 admin.post('/requests/:id/decide', (req, res) => {
   const { decision, note } = req.body || {};
   if (decision !== 'approved' && decision !== 'denied') return err(res, 400, 'decision must be "approved" or "denied"');
+  // Denying a request requires a reason (owner's ask, 2026-11-16) — the
+  // driver sees it as the decline reason.
+  if (decision === 'denied' && !(typeof note === 'string' && note.trim()))
+    return err(res, 400, 'A reason is required when denying a request');
   let result;
   try {
     result = withTransaction(db, () => {
