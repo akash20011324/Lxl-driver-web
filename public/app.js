@@ -1594,24 +1594,24 @@ async function viewEquipment(main) {
     '<button class="btn" id="addTruckToggle" type="button">+ Add truck</button></div>' +
     '<div class="chips">' + chip('all', 'All units', tList.length + rList.length) +
     chip('yard', 'In the Yard', yardCount) + chip('road', 'On the Road', roadCount) + '</div>' +
-    '<div class="card" id="addTruckCard" hidden><h3>Add truck</h3><form id="addTruckForm"><div class="form-row">' +
+    '<div class="card add-unit-card" id="addTruckCard" hidden><h3>Add truck</h3><form id="addTruckForm"><div class="form-row">' +
     '<div class="field"><label>Unit number *</label><input name="unitNumber" required></div>' +
     '<div class="field"><label>Make</label><input name="make"></div>' +
     '<div class="field"><label>Model</label><input name="model"></div>' +
     '<div class="field"><label>Year</label><input name="year" type="number"></div>' +
     '<div class="field"><label>Plate</label><input name="plate"></div>' +
     '<div class="field"><label>VIN</label><input name="vin"></div>' +
-    '</div><div class="form-actions"><button class="btn" type="submit">Add truck</button></div></form></div>' +
+    '</div><div class="form-actions"><button class="btn btn-blue" type="submit">Add truck</button><button class="btn btn-ghost" type="button" data-cancel-add="addTruckForm">Cancel</button></div></form></div>' +
     '<div class="unit-grid">' + tList.map(u => unitCard(u, 'truck', pairFor(u, 'truck'))).join('') + '</div>' +
     '<div class="rc-head"><h2>Trailers</h2>' +
     '<button class="btn" id="addTrailerToggle" type="button">+ Add trailer</button></div>' +
-    '<div class="card" id="addTrailerCard" hidden><h3>Add trailer</h3><form id="addTrailerForm"><div class="form-row">' +
+    '<div class="card add-unit-card" id="addTrailerCard" hidden><h3>Add trailer</h3><form id="addTrailerForm"><div class="form-row">' +
     '<div class="field"><label>Unit number *</label><input name="unitNumber" required></div>' +
     '<div class="field"><label>Kind / type</label><input name="kind" placeholder="e.g. Reefer"></div>' +
     '<div class="field"><label>Year</label><input name="year" type="number"></div>' +
     '<div class="field"><label>Plate</label><input name="plate"></div>' +
     '<div class="field"><label>VIN</label><input name="vin"></div>' +
-    '</div><div class="form-actions"><button class="btn" type="submit">Add trailer</button></div></form></div>' +
+    '</div><div class="form-actions"><button class="btn btn-blue" type="submit">Add trailer</button><button class="btn btn-ghost" type="button" data-cancel-add="addTrailerForm">Cancel</button></div></form></div>' +
     '<div class="unit-grid">' + rList.map(u => unitCard(u, 'trailer', pairFor(u, 'trailer'))).join('') + '</div>';
 
   main.querySelectorAll('[data-yard]').forEach(b => b.addEventListener('click', () => {
@@ -1625,6 +1625,14 @@ async function viewEquipment(main) {
   };
   toggleCard('addTruckToggle', 'addTruckCard');
   toggleCard('addTrailerToggle', 'addTrailerCard');
+  // Cancel: throw away whatever was typed and fold the form back up.
+  main.querySelectorAll('[data-cancel-add]').forEach(b => b.addEventListener('click', () => {
+    const form = document.getElementById(b.dataset.cancelAdd);
+    if (!form) return;
+    form.reset();
+    const card = form.closest('.add-unit-card');
+    if (card) card.hidden = true;
+  }));
   bindUnitCards(main, 'truck');
   bindUnitCards(main, 'trailer');
   document.getElementById('addTruckForm').addEventListener('submit', async (e) => {

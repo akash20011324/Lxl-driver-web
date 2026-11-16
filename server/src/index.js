@@ -971,7 +971,7 @@ driver.post('/photo', upload.single('photo'), (req, res) => {
   res.json({ photoUrl });
 });
 
-driver.post('/location', (req, res) => {
+driver.post('/location', async (req, res) => {
   const { lat, lng, speedMph, heading } = req.body || {};
   if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng))
     return err(res, 400, 'lat and lng are required numbers');
@@ -982,6 +982,37 @@ driver.post('/location', (req, res) => {
   // The app is alive on the driver's phone and checking in — any
   // dispatch messages waiting count as delivered to the device.
   db.prepare("UPDATE messages SET deliveredAt = ? WHERE driverId = ? AND sender = 'dispatch' AND deliveredAt IS NULL").run(now(), req.user.id);
+  // BOL departure reminder (owner's ask, 2026-11-15): if the driver was
+  // at the pickup and then leaves/drives off WITHOUT uploading the
+  // pickup BOL, push him once — "Please upload the BOL". State lives on
+  // the load row so it fires exactly once per load.
+  try {
+    const load = db
+      .prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY id DESC LIMIT 1")
+      .get(req.user.id);
+    if (load) {
+      const coords = await ensurePickupCoords(load);
+      if (coords) {
+        const d = distanceMeters(lat, lng, coords.lat, coords.lng);
+        if (d <= 500 && !load.pickupVisitedAt) {
+          db.prepare('UPDATE loads SET pickupVisitedAt = ? WHERE id = ?').run(now(), load.id);
+        } else if (load.pickupVisitedAt && !load.bolReminderAt && d > 800 && (speed == null || speed >= 5)) {
+          const bol = db
+            .prepare("SELECT COUNT(*) AS n FROM documents WHERE loadId = ? AND kind = 'pickup_bol'")
+            .get(load.id);
+          if (!bol || bol.n === 0) {
+            db.prepare('UPDATE loads SET bolReminderAt = ? WHERE id = ?').run(now(), load.id);
+            notifyDriver(
+              db, req.user.id, 'bol_reminder', 'Please upload the BOL',
+              'You left the pickup for load ' + load.reference + ' without uploading the BOL. Please upload the pickup BOL in the app.',
+            ).catch(() => {});
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('bol reminder check failed', e);
+  }
   res.json({ ok: true });
 });
 

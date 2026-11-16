@@ -281,6 +281,15 @@ export function openDb(dataDir) {
   if (!columns.some((c) => c.name === 'chatWallpaperFileId')) {
     db.exec('ALTER TABLE users ADD COLUMN chatWallpaperFileId INTEGER REFERENCES files(id)');
   }
+  // BOL departure reminder state on loads: when the driver was last seen
+  // at the pickup, and when the "please upload the BOL" push was sent.
+  const loadCols2 = db.prepare('PRAGMA table_info(loads)').all();
+  if (!loadCols2.some((c) => c.name === 'pickupVisitedAt')) {
+    db.exec('ALTER TABLE loads ADD COLUMN pickupVisitedAt TEXT');
+  }
+  if (!loadCols2.some((c) => c.name === 'bolReminderAt')) {
+    db.exec('ALTER TABLE loads ADD COLUMN bolReminderAt TEXT');
+  }
   // Trailers get make/model too (cab-card auto-read fills them, the same
   // as trucks) — fresh databases still use the base schema above.
   const trailerColumns = db.prepare('PRAGMA table_info(trailers)').all();
