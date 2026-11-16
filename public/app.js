@@ -227,12 +227,12 @@ function openWallpaperEditor(file, onSet) {
 
 /* ---------- Unit (equipment) documents: expiry + status ---------- */
 const EQUIP_DOC_LABELS = {
-  cab_card: 'Cab Card', registration: 'Registration', insurance: 'Insurance',
+  cab_card: 'Cab Card', insurance: 'Insurance',
   annual_inspection: 'Annual Inspection', ifta: 'IFTA License', title: 'Title',
   permit: 'Permit', other: 'Other',
 };
 const EQUIP_DOC_TYPES_ALL = Object.keys(EQUIP_DOC_LABELS);
-const EQUIP_DOC_CORE = ['cab_card', 'insurance', 'annual_inspection', 'ifta', 'registration'];
+const EQUIP_DOC_CORE = ['cab_card', 'insurance', 'annual_inspection', 'ifta'];
 
 /* Status for an expiry date (YYYY-MM-DD), judged on the viewer's local
    calendar day: Expired / Expires today / Expires in N days (red up to a
