@@ -4139,6 +4139,84 @@ async function adjudicateRateCons2() {
   } catch (e) { console.error('rc adjudication2 failed', e); }
 }
 
+// Adjudication round 3 (2026-11-16): EVERY remaining rate con
+// document was read in the manual pass. More letterhead routes
+// (three IEL "Cincinnati" pickups were really TX / MS / GA), one
+// reversed route (133549), one more weight read as a rate
+// (3002349's $2,694.14 is kilograms), the Mega load's second drop
+// (2784209 ends in Georgia), Hill Bros 3215414 (GA -> PA, as the
+// owner said), and the Tyson load's rate from its Uber Freight
+// booking ($4,000 — the row's file is the BOL Aisha sent).
+async function adjudicateRateCons3() {
+  try {
+    const marker = 'rc-adjudication3-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication3: ' + m);
+    const driverByName = (frag) => db.prepare("SELECT id FROM users WHERE role = 'driver' AND name LIKE ? ORDER BY id LIMIT 1").get('%' + frag + '%');
+    const akash = driverByName('akash');
+    const arsh = driverByName('arsh');
+    const upd = (sql, params, msg) => { const r = db.prepare(sql).run(...params); if (r.changes && msg) log(msg); };
+    // --- rate confirmation rows, from their documents ---
+    upd("UPDATE rate_confirmations SET pickupState = 'GA', deliveryState = 'IN', rateCents = 140000, broker = 'CBR Brokerage, Inc.' WHERE reference = 'LXL-133549'", [], 'LXL-133549: route was reversed — GA -> IN, total payable $1,400 (CBR document)');
+    upd("UPDATE rate_confirmations SET pickupDate = '2026-09-20', broker = 'J&A Transportation LLC' WHERE reference = 'LXL-31366'", [], 'LXL-31366: pickup 2026-09-20, broker J&A Transportation LLC');
+    upd("UPDATE rate_confirmations SET broker = 'Uber Freight' WHERE reference = 'LXL-6679538394'", [], 'LXL-6679538394: broker Uber Freight');
+    upd("UPDATE rate_confirmations SET rateCents = NULL, broker = 'Integrity Express Logistics', pickupState = 'NJ', deliveryDate = '2026-06-29' WHERE reference = 'LXL-3002349'", [], 'LXL-3002349: $2,694.14 was a kg weight — rate cleared; broker IEL; pickup NJ; final delivery 2026-06-29');
+    upd("UPDATE rate_confirmations SET broker = 'Center Valley Logistics Inc' WHERE reference = 'LXL-1902308'", [], 'LXL-1902308: broker Center Valley Logistics Inc');
+    upd("UPDATE rate_confirmations SET pickupState = 'TX', deliveryDate = '2026-06-18' WHERE reference = 'LXL-2999658'", [], 'LXL-2999658: pickup Mount Pleasant TX, delivery 2026-06-18');
+    upd("UPDATE rate_confirmations SET broker = 'American Freight Movers' WHERE reference = 'LXL-3845'", [], 'LXL-3845: broker American Freight Movers');
+    upd("UPDATE rate_confirmations SET pickupState = 'MS', pickupDate = '2026-06-13', deliveryDate = '2026-06-15' WHERE reference = 'LXL-2996825'", [], 'LXL-2996825: pickup Laurel MS 2026-06-13, delivery 2026-06-15');
+    upd("UPDATE rate_confirmations SET pickupState = 'GA', pickupDate = '2026-06-12', deliveryDate = '2026-06-16' WHERE reference = 'LXL-2998288'", [], 'LXL-2998288: pickup Lake City GA 2026-06-12, delivery 2026-06-16');
+    upd("UPDATE rate_confirmations SET pickupDate = '2026-11-12', broker = 'JEAR Logistics, LLC' WHERE reference = 'LXL-1197586'", [], 'LXL-1197586: pickup 2026-11-12, broker JEAR Logistics');
+    upd("UPDATE rate_confirmations SET broker = 'Capital Logistics Inc' WHERE reference = 'LXL-1007821'", [], 'LXL-1007821: broker Capital Logistics Inc');
+    upd("UPDATE rate_confirmations SET deliveryState = 'GA', deliveryDate = '2026-10-28', broker = 'MegaCorp Logistics' WHERE reference = 'LXL-2784209'", [], 'LXL-2784209: final drop Dacula GA 2026-10-28 (owner was right), broker MegaCorp Logistics');
+    upd("UPDATE rate_confirmations SET broker = 'Ascent Global Logistics' WHERE reference = 'LXL-60429234'", [], 'LXL-60429234: broker Ascent Global Logistics');
+    upd("UPDATE rate_confirmations SET pickupState = 'GA', deliveryState = 'PA', pickupDate = '2026-10-17', broker = 'Hill Bros. Logistics, Inc.' WHERE reference = 'LXL-3215414'", [], 'LXL-3215414: Arabi GA -> Pottsville PA (owner was right), broker Hill Bros. Logistics');
+    upd("UPDATE rate_confirmations SET broker = 'Fortus Group Inc' WHERE reference = 'ATL-001229'", [], 'ATL-001229: broker Fortus Group Inc');
+    upd("UPDATE rate_confirmations SET rateCents = 400000, broker = 'Uber Freight' WHERE reference = 'LXL-5010292603'", [], 'LXL-5010292603: rate $4,000.00 from its Uber Freight booking (row file is the BOL)');
+    // --- loads: routes, drivers, dates from the documents ---
+    const fixLoad = (ref, f) => {
+      const load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(ref);
+      if (!load) { log(ref + ': load not found for fix'); return; }
+      const sets = []; const vals = [];
+      if (f.pu) { sets.push('pickupLocation = ?'); vals.push(f.pu); }
+      if (f.dl) { sets.push('deliveryLocation = ?'); vals.push(f.dl); }
+      if (f.puAt) { sets.push('pickupAt = ?'); vals.push(f.puAt); }
+      if (f.dlAt) { sets.push('deliveryAt = ?', 'completedAt = ?'); vals.push(f.dlAt, f.dlAt); }
+      if (f.driver) { sets.push('driverId = ?'); vals.push(f.driver.id); }
+      sets.push('pickupLat = NULL', 'pickupLng = NULL', 'deliveryLat = NULL', 'deliveryLng = NULL');
+      db.prepare('UPDATE loads SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals, load.id);
+      log(ref + ': load fixed from its document');
+    };
+    if (arsh) {
+      fixLoad('LXL-133549', { pu: 'Tifton, GA 31793', dl: 'Shelbyville, IN', puAt: '2026-10-10T09:00:00', dlAt: '2026-10-12T17:00:00', driver: arsh });
+      fixLoad('LXL-1007821', { driver: arsh });
+      fixLoad('LXL-2784209', { dl: 'Dacula, GA 30019', dlAt: '2026-10-28T17:00:00', driver: arsh });
+    }
+    if (akash) {
+      fixLoad('LXL-31366', { puAt: '2026-09-20T09:00:00', driver: akash });
+      fixLoad('LXL-60418390', { dl: 'Sun Valley, CA 91352', driver: akash });
+      fixLoad('LXL-3002349', { pu: 'Elizabeth, NJ 07201', dl: 'Riverside, CA 92507', dlAt: '2026-06-29T17:00:00', driver: akash });
+    }
+    fixLoad('LXL-3215414', { pu: 'Arabi, GA 31712', dl: 'Pottsville, PA 17901', puAt: '2026-10-17T09:00:00' });
+    fixLoad('LXL-1197586', { puAt: '2026-11-12T09:00:00' });
+    // --- loads to create (documents name Akash as driver) ---
+    const createFor = (ref, drv, pu, dl, puDate, dlDate) => {
+      if (!drv) { log(ref + ': driver unresolved — not created'); return; }
+      if (db.prepare('SELECT id FROM loads WHERE reference = ?').get(ref)) { log(ref + ': load already exists'); return; }
+      const puAt = puDate + 'T09:00:00';
+      const dlAt = dlDate + 'T17:00:00';
+      const info = db.prepare("INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, 'America/Indiana/Indianapolis', ?, ?, 'America/Indiana/Indianapolis', 'Imported from a rate confirmation email', 'completed', ?, ?)").run(ref, drv.id, pu, puAt, dl, dlAt, dlAt, new Date().toISOString());
+      db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE reference = ?').run(info.lastInsertRowid, ref);
+      log(ref + ': created completed load (' + pu + ' -> ' + dl + ')');
+    };
+    createFor('LXL-2999658', akash, 'Mount Pleasant, TX 75455', 'South El Monte, CA 91733', '2026-06-16', '2026-06-18');
+    createFor('LXL-2996825', akash, 'Laurel, MS 39440', 'Laredo, TX 78045', '2026-06-13', '2026-06-15');
+    createFor('LXL-2998288', akash, 'Lake City, GA 30260', 'Rancho Cucamonga, CA 91730', '2026-06-12', '2026-06-16');
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication3 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -5721,7 +5799,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
