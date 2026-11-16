@@ -2927,9 +2927,57 @@ function formatDistance(m) {
   return `${(m / 1609.34).toFixed(1)} mi`;
 }
 
-async function geocodeAddress(address) {
+async function geocodeGoogleForward(q) {
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key || !q) return null;
+  try {
+    const r = await fetch(
+      'https://maps.googleapis.com/maps/api/geocode/json?address=' + encodeURIComponent(q) + '&key=' + encodeURIComponent(key),
+      { headers: { Referer: 'https://app.lubanaxpress.com/' } },
+    );
+    const j = await r.json();
+    if (j.status === 'OK' && j.results && j.results[0] && j.results[0].geometry && j.results[0].geometry.location) {
+      const loc = j.results[0].geometry.location;
+      if (Number.isFinite(loc.lat) && Number.isFinite(loc.lng)) return { lat: loc.lat, lng: loc.lng };
+    }
+  } catch { /* fall through to the next source */ }
+  return null;
+}
+
+async function geocodeNominatimAddress(q) {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`,
+      { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' } },
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (!rows || !rows[0]) return null;
+    // A highway-class result is just a point somewhere on the street,
+    // not the address — treat it as a miss.
+    if (rows[0].class === 'highway') return null;
+    const lat = Number(rows[0].lat);
+    const lng = Number(rows[0].lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  } catch {
+    return null;
+  }
+}
+
+async function geocodeAddress(address, warehouse) {
   if (!address) return null;
-  const direct = await geocodeQuery(address);
+  // Google first: rooftop-accurate for street addresses. Nominatim
+  // cannot resolve many US house numbers and drops the pin at a
+  // generic point on the street — that wrong pin blocked a driver
+  // from completing a delivery he was standing at (2026-11-16).
+  if (warehouse) {
+    const byBiz = await geocodeGoogleForward(`${warehouse}, ${address}`);
+    if (byBiz) return byBiz;
+  }
+  const byGoogle = await geocodeGoogleForward(address);
+  if (byGoogle) return byGoogle;
+  const direct = await geocodeNominatimAddress(address);
   if (direct) return direct;
   // Street-level misses are common for rural/industrial addresses —
   // fall back to the city/state/ZIP segment; city-level coordinates
@@ -2967,7 +3015,7 @@ async function geocodeQuery(q) {
 async function ensureDeliveryCoords(load) {
   if (typeof load.deliveryLat === 'number' && typeof load.deliveryLng === 'number')
     return { lat: load.deliveryLat, lng: load.deliveryLng };
-  const coords = await geocodeAddress(load.deliveryLocation);
+  const coords = await geocodeAddress(load.deliveryLocation, load.deliveryWarehouse);
   if (!coords) return null;
   db.prepare('UPDATE loads SET deliveryLat = ?, deliveryLng = ? WHERE id = ?').run(
     coords.lat,
@@ -2982,7 +3030,7 @@ async function ensureDeliveryCoords(load) {
 async function ensurePickupCoords(load) {
   if (typeof load.pickupLat === 'number' && typeof load.pickupLng === 'number')
     return { lat: load.pickupLat, lng: load.pickupLng };
-  const coords = await geocodeAddress(load.pickupLocation);
+  const coords = await geocodeAddress(load.pickupLocation, load.pickupWarehouse);
   if (!coords) return null;
   db.prepare('UPDATE loads SET pickupLat = ?, pickupLng = ? WHERE id = ?').run(
     coords.lat,
@@ -4809,4 +4857,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
+  // Re-derive active loads' gate pins with the current geocoder on
+  // boot: a stale pin from a weaker geocode must not block a delivery.
+  try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
 });
