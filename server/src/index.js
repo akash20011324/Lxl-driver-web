@@ -3394,6 +3394,13 @@ function amountToCents(s) {
 // An amount followed by a weight unit is a WEIGHT, not money — the
 // Armstrong PDFs print "41545.67L" for the load's pounds, and the
 // fallback reader took it for a $41,545.67 rate (2026-11-16).
+// A bare amount (no $) shortly after the word "weight" is the
+// weight column's value, not money (the RXO header row flattens to
+// "Total Weight (lbs.) ... 31928.00" with no unit after the number).
+function nearWeightLabel(text, idx) {
+  return /weight/i.test(text.slice(Math.max(0, idx - 64), idx));
+}
+
 function isWeightAmount(text, idx, len) {
   const tail = text.slice(idx + len, idx + len + 6);
   return /^\s*(?:lbs?|kgs?|tons?)\b/i.test(tail) || /^L\b/.test(tail);
@@ -3406,6 +3413,7 @@ function detectRateCents(text) {
     /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /FLAT\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+(?:\w+\s+)?PAY\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
   ];
   for (const re of patterns) {
@@ -3420,7 +3428,7 @@ function detectRateCents(text) {
   let best = null;
   for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
     const c = amountToCents(m[1]);
-    if (c != null && !isWeightAmount(text, m.index, m[0].length) && (best == null || c > best)) best = c;
+    if (c != null && !isWeightAmount(text, m.index, m[0].length) && (m[0].includes('$') || !nearWeightLabel(text, m.index)) && (best == null || c > best)) best = c;
   }
   return best;
 }
@@ -3435,6 +3443,7 @@ function detectRateCentsDetailed(text) {
     /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /FLAT\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+(?:\w+\s+)?PAY\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
   ];
   for (const re of patterns) {
@@ -3449,7 +3458,7 @@ function detectRateCentsDetailed(text) {
   let bestRaw = '';
   for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
     const c = amountToCents(m[1]);
-    if (c != null && !isWeightAmount(text, m.index, m[0].length) && (best == null || c > best)) { best = c; bestIdx = m.index; bestRaw = m[0]; }
+    if (c != null && !isWeightAmount(text, m.index, m[0].length) && (m[0].includes('$') || !nearWeightLabel(text, m.index)) && (best == null || c > best)) { best = c; bestIdx = m.index; bestRaw = m[0]; }
   }
   return { cents: best, labeled: false, context: bestIdx >= 0 ? text.slice(Math.max(0, bestIdx - 70), bestIdx + bestRaw.length + 30) : '' };
 }
@@ -3600,7 +3609,19 @@ async function backfillRateConDetails() {
         const d = await extractRateConDetails(buf);
         const curBad = !row.broker || isCarrierName(row.broker) || /OTR SOLUTIONS/i.test(row.broker);
         const nb = curBad ? (d.broker ?? null) : row.broker;
-        const nr = row.rateCents != null ? row.rateCents : (d.rateCents ?? null);
+        // Only a LABELED rate may fill a missing rate. The fallback
+        // (largest amount on the page) kept resurrecting weights and
+        // declared values on BOLs and dispatch sheets that print no
+        // rate at all — documents verified by eye stay rate-less.
+        let labeledRate = null;
+        if (row.rateCents == null) {
+          try {
+            const t2 = cleanRateText(await pdfTextFromBuffer(buf));
+            const det = t2 ? detectRateCentsDetailed(t2) : null;
+            if (det && det.labeled) labeledRate = det.cents;
+          } catch { /* keep null */ }
+        }
+        const nr = row.rateCents != null ? row.rateCents : labeledRate;
         if (nb !== row.broker || nr !== row.rateCents) {
           db.prepare('UPDATE rate_confirmations SET broker = ?, rateCents = ? WHERE id = ?').run(nb, nr, row.id);
           console.log(`rate-con backfill: RC ${row.id} broker=${nb} rateCents=${nr}`);
@@ -4217,6 +4238,42 @@ async function adjudicateRateCons3() {
   } catch (e) { console.error('rc adjudication3 failed', e); }
 }
 
+// Adjudication round 4 (2026-11-16): the RXO confirmation uploaded
+// through Add RC was mis-read by the automatic reader — it took the
+// word TOTAL (from the "Order # / Total Weight" column headers) as
+// the load number and the 31,928 lb weight as the rate. The document
+// itself was read in Outlook: RXO load 24237218, Wilmington IL ->
+// Port St Lucie FL, $6,500, driver Akashdeep Singh. Also clears the
+// rates the boot backfill may have refilled onto documents that
+// print no rate (two IEL dispatch sheets and the Coca-Cola BOL).
+async function adjudicateRateCons4() {
+  try {
+    const marker = 'rc-adjudication4-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication4: ' + m);
+    for (const ref of ['LXL-0311311324', 'LXL-3020150', 'LXL-3012815']) {
+      const row = db.prepare('SELECT rateCents FROM rate_confirmations WHERE reference = ?').get(ref);
+      if (row && row.rateCents != null) {
+        db.prepare('UPDATE rate_confirmations SET rateCents = NULL WHERE reference = ?').run(ref);
+        log(ref + ': rate cleared (was ' + row.rateCents + ' — its document prints no rate)');
+      }
+    }
+    const rc = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'TOTAL'").get();
+    if (rc) {
+      db.prepare("UPDATE rate_confirmations SET reference = 'LXL-24237218', broker = 'RXO, Inc.', pickupState = 'IL', deliveryState = 'FL', pickupDate = '2026-09-28', deliveryDate = '2026-09-30', rateCents = 650000 WHERE id = ?").run(rc.id);
+      log('TOTAL rate con renamed to LXL-24237218 (RXO, IL -> FL, $6,500)');
+    }
+    const load = db.prepare("SELECT * FROM loads WHERE reference = 'TOTAL'").get();
+    if (load) {
+      db.prepare("UPDATE loads SET reference = 'LXL-24237218', pickupLocation = 'Wilmington, IL 60481', deliveryLocation = 'Port St Lucie, FL 34987', pickupAt = '2026-09-28T09:00:00', deliveryAt = '2026-09-30T17:00:00', status = 'completed', completedAt = '2026-09-30T17:00:00', pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE id = ?").run(load.id);
+      if (rc) db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE id = ?').run(load.id, rc.id);
+      log('TOTAL load renamed to LXL-24237218 and settled (Wilmington IL -> Port St Lucie FL, completed)');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication4 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -4508,8 +4565,14 @@ function extractRcPlaces(text, subject) {
 function extractRcLoadFields(text, subject) {
   const all = `${subject || ''}\n${text || ''}`;
   const lxl = all.match(/LXL[-\s]?(\d{4,})/i);
-  const labeled = all.match(/(?:load|order|reference|ref|pro|shipment|trip|booking)\s*(?:#|no\.?|number|id)?\s*[:#]\s*([A-Z0-9][A-Z0-9-]{3,20})/i);
-  let loadRef = labeled ? labeled[1].toUpperCase() : null;
+  // Take the first labeled capture that contains a digit — column
+  // headers can put a plain word after a label (the RXO sheet's
+  // "Order #" column is followed by "Total Weight", and the reader
+  // filed the load as "TOTAL").
+  let loadRef = null;
+  for (const m of all.matchAll(/(?:load|order|reference|ref|pro|shipment|trip|booking)\s*(?:#|no\.?|number|id)?\s*[:#]\s*([A-Z0-9][A-Z0-9-]{3,20})/gi)) {
+    if (/\d/.test(m[1])) { loadRef = m[1].toUpperCase(); break; }
+  }
   if (!loadRef && subject) {
     const sm = subject.match(/(?:load|invoice|po|ref(?:erence)?)\s*#?\s*(\d{5,10}(?:-\d{1,3})?)/i)
       || subject.match(/(\d{5,10}(?:-\d{1,3})?)\s*$/)
@@ -5799,7 +5862,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
