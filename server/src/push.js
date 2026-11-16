@@ -24,8 +24,9 @@ export async function notifyDriver(db, driverId, type, title, body) {
 
   let token = null;
   try {
-    const row = db.prepare('SELECT pushToken FROM users WHERE id = ?').get(driverId);
+    const row = db.prepare('SELECT pushToken, pushSound FROM users WHERE id = ?').get(driverId);
     token = row ? row.pushToken : null;
+    var pushSound = row && row.pushSound ? String(row.pushSound) : null;
   } catch (err) {
     console.error('[push] failed to read push token:', err.message);
     return;
@@ -40,7 +41,7 @@ export async function notifyDriver(db, driverId, type, title, body) {
   }
 
   try {
-    const chunks = expo.chunkPushNotifications([{ to: token, title, body, sound: 'default', priority: 'high', channelId: 'lxl-default', data: { type } }]);
+    const chunks = expo.chunkPushNotifications([{ to: token, title, body, sound: pushSound ? pushSound + '.wav' : 'default', priority: 'high', channelId: pushSound ? 'lxl-' + pushSound : 'lxl-default', data: { type } }]);
     for (const chunk of chunks) {
       const tickets = await expo.sendPushNotificationsAsync(chunk);
       console.log('[push] tickets for driver ' + driverId + ': ' + JSON.stringify(tickets));
