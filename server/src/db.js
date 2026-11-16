@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS loads (
   pickupAt TEXT NOT NULL,
   pickupTimezone TEXT NOT NULL,
   pickupNumber TEXT,
+  pickupLat REAL,
+  pickupLng REAL,
   deliveryLocation TEXT NOT NULL,
   deliveryWarehouse TEXT,
   deliveryLat REAL,
@@ -251,6 +253,15 @@ export function openDb(dataDir) {
     db.exec('ALTER TABLE locations ADD COLUMN heading REAL');
   }
   // Migrate databases created before TRC odometer readings: the latest
+  // Pickup coordinates per load (fresh databases get them from the
+  // schema above) — the Loads page progress % needs both route ends.
+  const loadsCoordColumns = db.prepare('PRAGMA table_info(loads)').all();
+  if (!loadsCoordColumns.some((c) => c.name === 'pickupLat')) {
+    db.exec('ALTER TABLE loads ADD COLUMN pickupLat REAL');
+  }
+  if (!loadsCoordColumns.some((c) => c.name === 'pickupLng')) {
+    db.exec('ALTER TABLE loads ADD COLUMN pickupLng REAL');
+  }
   // ELD odometer (and engine hours) per truck, shown live on the admin
   // Locations page (fresh databases get them from the schema above).
   const truckColumns = db.prepare('PRAGMA table_info(trucks)').all();

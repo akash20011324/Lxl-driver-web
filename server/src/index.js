@@ -151,6 +151,7 @@ function serializeLoad(l) {
     completedAt: l.completedAt ?? null,
     truckUnit: unitNumberOf('trucks', l.truckId, l.driverId),
     trailerUnit: unitNumberOf('trailers', l.trailerId, l.driverId),
+    progress: loadProgress(l),
   };
 }
 
@@ -1216,9 +1217,16 @@ admin.post('/trailers/:id/yard-status', (req, res) => {
 });
 
 admin.get('/loads', (_req, res) => {
-  res.json(
-    db.prepare('SELECT * FROM loads ORDER BY createdAt DESC, id DESC').all().map(serializeLoad),
-  );
+  const rows = db.prepare('SELECT * FROM loads ORDER BY createdAt DESC, id DESC').all();
+  // Fill any missing route coords in the background so the progress %
+  // appears on the next refresh.
+  for (const l of rows) {
+    if (l.status === 'active') {
+      if (typeof l.pickupLat !== 'number') void ensurePickupCoords(l);
+      if (typeof l.deliveryLat !== 'number') void ensureDeliveryCoords(l);
+    }
+  }
+  res.json(rows.map(serializeLoad));
 });
 
 admin.post('/loads', (req, res) => {
@@ -1271,6 +1279,7 @@ admin.post('/loads', (req, res) => {
   // Geocode the delivery address in the background so the
   // delivery-location gate has coordinates by delivery day.
   void ensureDeliveryCoords(db.prepare('SELECT * FROM loads WHERE id = ?').get(id));
+  void ensurePickupCoords(db.prepare('SELECT * FROM loads WHERE id = ?').get(id));
   notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${reference}: ${pickupWarehouse || pickupLocation} → ${deliveryWarehouse || deliveryLocation}.`).catch(() => {});
   res.status(201).json(load);
 });
@@ -1318,7 +1327,34 @@ admin.post('/loads/:id/edit', (req, res) => {
   if (clean(deliveryLocation) && clean(deliveryLocation) !== load.deliveryLocation) {
     db.prepare('UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL WHERE id = ?').run(load.id);
   }
+  if (clean(pickupLocation) && clean(pickupLocation) !== load.pickupLocation) {
+    db.prepare('UPDATE loads SET pickupLat = NULL, pickupLng = NULL WHERE id = ?').run(load.id);
+  }
   res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
+});
+
+// Delete a load outright (admin only): the load, its documents and
+// their stored files go; rate confirmations keep their record with the
+// load link cleared. Replaces the old cancel flow in the portal.
+admin.delete('/loads/:id', (req, res) => {
+  const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.id);
+  if (!load) return err(res, 404, 'Load not found');
+  const docs = db.prepare('SELECT * FROM documents WHERE loadId = ?').all(load.id);
+  const storedFiles = docs.map((d) => getFileRow(d.fileId)).filter(Boolean);
+  withTransaction(db, () => {
+    db.prepare('DELETE FROM documents WHERE loadId = ?').run(load.id);
+    for (const d of docs) db.prepare('DELETE FROM files WHERE id = ?').run(d.fileId);
+    db.prepare('UPDATE rate_confirmations SET loadId = NULL WHERE loadId = ?').run(load.id);
+    db.prepare('DELETE FROM loads WHERE id = ?').run(load.id);
+  });
+  for (const f of storedFiles) {
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename));
+    } catch {
+      // file already gone — ignore
+    }
+  }
+  res.json({ ok: true });
 });
 
 admin.get('/requests', (_req, res) => {
@@ -1532,9 +1568,23 @@ function formatDistance(m) {
 
 async function geocodeAddress(address) {
   if (!address) return null;
+  const direct = await geocodeQuery(address);
+  if (direct) return direct;
+  // Street-level misses are common for rural/industrial addresses —
+  // fall back to the city/state/ZIP segment; city-level coordinates
+  // are accurate enough for route distances.
+  const parts = String(address).split(',').map((s) => s.trim()).filter(Boolean);
+  const last = parts[parts.length - 1] || '';
+  const m = last.match(/^(.+?)\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+  if (m) return geocodeQuery(`${m[1]}, ${m[2]} ${m[3]}`);
+  if (parts.length > 1) return geocodeQuery(last);
+  return null;
+}
+
+async function geocodeQuery(q) {
   try {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`,
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`,
       { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' } },
     );
     if (!res.ok) return null;
@@ -1564,6 +1614,42 @@ async function ensureDeliveryCoords(load) {
     load.id,
   );
   return coords;
+}
+
+// Pickup coordinates, same pattern as delivery: stored first, otherwise
+// geocode and cache. The Loads page progress % needs both route ends.
+async function ensurePickupCoords(load) {
+  if (typeof load.pickupLat === 'number' && typeof load.pickupLng === 'number')
+    return { lat: load.pickupLat, lng: load.pickupLng };
+  const coords = await geocodeAddress(load.pickupLocation);
+  if (!coords) return null;
+  db.prepare('UPDATE loads SET pickupLat = ?, pickupLng = ? WHERE id = ?').run(
+    coords.lat,
+    coords.lng,
+    load.id,
+  );
+  return coords;
+}
+
+// How far an active load has travelled toward its delivery, as a whole
+// percentage for the admin Loads page progress line. From the driver's
+// latest GPS fix: the share of the pickup→delivery distance no longer
+// remaining. At the receiver (within the 500 m completion gate) it reads
+// 99; only a completed load reads 100. Null when it cannot be computed
+// (cancelled load, no GPS fix yet, or route coords not geocoded yet).
+function loadProgress(l) {
+  if (l.status === 'completed') return 100;
+  if (l.status !== 'active') return null;
+  if (typeof l.pickupLat !== 'number' || typeof l.pickupLng !== 'number') return null;
+  if (typeof l.deliveryLat !== 'number' || typeof l.deliveryLng !== 'number') return null;
+  const loc = db.prepare('SELECT lat, lng FROM locations WHERE driverId = ?').get(l.driverId);
+  if (!loc) return null;
+  const total = distanceMeters(l.pickupLat, l.pickupLng, l.deliveryLat, l.deliveryLng);
+  if (!Number.isFinite(total) || total < 1000) return null;
+  const remaining = distanceMeters(loc.lat, loc.lng, l.deliveryLat, l.deliveryLng);
+  if (remaining <= 500) return 99;
+  const pct = Math.round(100 * (1 - remaining / total));
+  return Math.max(0, Math.min(98, pct));
 }
 
 // ---------------------------------------------------------------------------

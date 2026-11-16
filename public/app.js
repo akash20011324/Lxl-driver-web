@@ -151,6 +151,8 @@ async function boot() {
   removeDocsBgLayer();
   document.body.classList.remove('loc-bg');
   removeLocBgLayer();
+  document.body.classList.remove('loads-bg');
+  removeLoadsBgLayer();
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page"><p class="muted">Loading…</p></div>';
   // If we already have a token, try to resume the session.
@@ -473,6 +475,8 @@ async function renderAdminView(view) {
   removeDocsBgLayer();
   document.body.classList.remove('loc-bg');
   removeLocBgLayer();
+  document.body.classList.remove('loads-bg');
+  removeLoadsBgLayer();
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -903,6 +907,18 @@ function removeLocBgLayer() {
   const layer = document.getElementById('locBgLayer');
   if (layer) layer.remove();
 }
+/* The Loads background is a real fixed layer too — same pattern. */
+function ensureLoadsBgLayer() {
+  if (!document.getElementById('loadsBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'loadsBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removeLoadsBgLayer() {
+  const layer = document.getElementById('loadsBgLayer');
+  if (layer) layer.remove();
+}
 
 /* ---------- Drivers ---------- */
 async function viewDrivers(main) {
@@ -1229,118 +1245,177 @@ function toLocalInput(iso) {
   const p = n => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
+/* City/state from a location string's last segment:
+   "904 Edwards Dr, Lebanon IN 46052" -> { city: 'Lebanon', state: 'IN' } */
+function cityStateOf(location) {
+  if (!location) return null;
+  const parts = String(location).split(',').map((s) => s.trim()).filter(Boolean);
+  const last = parts[parts.length - 1] || '';
+  const m = last.match(/^(.+?)\s+([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/);
+  if (m) return { city: m[1], state: m[2] };
+  return null;
+}
+
+/* One load as a route card: big city-pair headline, bold blue reference,
+   the route line as a live progress bar (server-computed %), Edit /
+   Reopen / Reactivate / Delete along the bottom. */
+function loadCardHtml(l) {
+  const p = cityStateOf(l.pickupLocation);
+  const d = cityStateOf(l.deliveryLocation);
+  const headline = p && d
+    ? esc(p.city) + ', ' + p.state + ' <span class="lc-arrow">&rarr;</span> ' + esc(d.city) + ', ' + d.state
+    : esc(l.pickupLocation) + ' &rarr; ' + esc(l.deliveryLocation);
+  const pct = typeof l.progress === 'number' ? l.progress : null;
+  const pillCls = l.status === 'active' ? 'blue' : l.status === 'completed' ? 'green' : 'red';
+  return '<div class="load-card">' +
+    '<div class="lc-top"><div class="lc-cities">' + headline + '</div>' +
+    '<span class="pill ' + pillCls + '">' + esc(l.status) + '</span></div>' +
+    '<div class="lc-refrow"><span class="lc-ref">' + esc(l.reference) + '</span>' +
+    '<span class="lc-bol">BOL: ' + esc(l.bolStatus ? (l.bolStatus === 'clean' ? 'Clean' : 'Wrong') : '—') + '</span></div>' +
+    '<div class="lc-route">' +
+      '<div class="lc-end"><div class="lc-tag">PICKUP</div><div class="lc-wh">' + esc(l.pickupWarehouse || l.pickupLocation) + '</div>' +
+      (l.pickupWarehouse ? '<div class="lc-addr">' + esc(l.pickupLocation) + '</div>' : '') +
+      '<div class="lc-date">' + fmtDate(l.pickupAt) + '</div></div>' +
+      '<div class="lc-trackwrap"><div class="lc-track">' +
+        (pct !== null ? '<div class="lc-fill" style="width:' + pct + '%"></div><div class="lc-marker" style="left:' + pct + '%"></div>' : '') +
+      '</div>' + (pct !== null ? '<div class="lc-pct">' + pct + '%</div>' : '') + '</div>' +
+      '<div class="lc-end lc-end-r"><div class="lc-tag">DELIVERY</div><div class="lc-wh">' + esc(l.deliveryWarehouse || l.deliveryLocation) + '</div>' +
+      (l.deliveryWarehouse ? '<div class="lc-addr">' + esc(l.deliveryLocation) + '</div>' : '') +
+      '<div class="lc-date">' + fmtDate(l.deliveryAt) + '</div></div>' +
+    '</div>' +
+    '<div class="lc-bottom"><span class="lc-driver">Driver: ' + esc(l.driverName || '—') +
+      (l.truckUnit ? ' &middot; Truck ' + esc(l.truckUnit) : '') + (l.trailerUnit ? ' &middot; Trailer ' + esc(l.trailerUnit) : '') + '</span>' +
+    '<span class="lc-actions"><button class="btn btn-ghost btn-sm" data-edit-load="' + l.id + '">Edit</button> ' +
+      (l.status === 'completed' ? '<button class="btn btn-ghost btn-sm" data-reopen-load="' + l.id + '">Reopen</button> ' : '') +
+      (l.status === 'cancelled' ? '<button class="btn btn-ghost btn-sm" data-reactivate-load="' + l.id + '">Reactivate</button> ' : '') +
+      '<button class="btn btn-danger-o btn-sm" data-delete-load="' + l.id + '">Delete</button></span></div>' +
+  '</div>';
+}
+
 async function viewLoads(main) {
   state.editingLoadId = null;
+  document.body.classList.add('loads-bg'); // reefer dock-row photo + liquid glass (removed on view switch)
+  ensureLoadsBgLayer();
   const [loads, drivers] = await Promise.all([api('/api/admin/loads'), api('/api/admin/drivers')]);
   state.driversCache = Array.isArray(drivers) ? drivers : [];
   const list = Array.isArray(loads) ? loads : [];
-  main.innerHTML = '<h1>Loads</h1>' +
-    '<div class="card"><h2>Assign load</h2><form id="addLoadForm">' +
-    '<div class="form-row">' +
-    '<div class="field"><label>Driver *</label><select id="al-driver" required>' +
-    state.driversCache.map(d => '<option value="' + d.id + '">' + esc(d.name) + '</option>').join('') + '</select></div>' +
-    '<div class="field"><label>Reference *</label><input id="al-ref" required placeholder="e.g. LXL-2482"></div>' +
-    '<div class="field"><label>Pickup location *</label><input id="al-pickup" required></div>' +
-    '<div class="field"><label>Pickup warehouse name</label><input id="al-pickup-wh" placeholder="e.g. Walmart DC 6094"></div>' +
-    '<div class="field"><label>Pickup date &amp; time *</label><input id="al-pickup-at" type="datetime-local" required></div>' +
-    '<div class="field"><label>Pickup number</label><input id="al-pickup-no"></div>' +
-    '<div class="field"><label>Delivery location *</label><input id="al-delivery" required></div>' +
-    '<div class="field"><label>Delivery warehouse name</label><input id="al-delivery-wh" placeholder="e.g. Amazon PHL6"></div>' +
-    '<div class="field"><label>Delivery date &amp; time *</label><input id="al-delivery-at" type="datetime-local" required></div>' +
-    '<div class="field"><label>Delivery number</label><input id="al-delivery-no"></div>' +
-    '</div><div class="field"><label>Notes</label><textarea id="al-notes" rows="2"></textarea></div>' +
-    '<div class="form-actions"><button class="btn" type="submit">Assign load</button></div></form></div>' +
-    '<div class="card"><div class="table-wrap"><table><thead><tr>' +
-    '<th>Reference</th><th>Driver</th><th>Pickup → Delivery</th><th>Dates</th><th>Status</th><th>BOL</th><th></th>' +
-    '</tr></thead><tbody>' +
-    list.map(l => '<tr><td><strong>' + esc(l.reference) + '</strong></td>' +
-      '<td>' + esc(l.driverName || '—') + '</td>' +
-      '<td>' + routeCell(l) + '</td>' +
-      '<td>' + fmtDate(l.pickupAt) + '<br>' + fmtDate(l.deliveryAt) + '</td>' +
-      '<td><span class="pill ' + (l.status === 'active' ? 'blue' : l.status === 'completed' ? 'green' : 'red') + '">' + esc(l.status) + '</span></td>' +
-      '<td>' + esc(l.bolStatus || '—') + '</td>' +
-      '<td><button class="btn btn-ghost btn-sm" data-edit-load="' + l.id + '">Edit</button> ' + (l.status === 'active'
-        ? '<button class="btn btn-danger btn-sm" data-cancel-load="' + l.id + '">Cancel</button>'
-        : l.status === 'completed'
-          ? '<button class="btn btn-ghost btn-sm" data-reopen-load="' + l.id + '">Reopen</button>'
-        : l.status === 'cancelled'
-          ? '<button class="btn btn-ghost btn-sm" data-reactivate-load="' + l.id + '">Reactivate</button>' : '') + '</td></tr>').join('') +
-    '</tbody></table></div>' + (list.length ? '' : '<p class="empty">No loads yet.</p>') + '</div>';
+  main.innerHTML = '<div class="loads-page">' +
+    '<div class="loads-head"><h1>Loads</h1><button class="btn" type="button" id="toggleAssignBtn">+ Add load</button></div>' +
+    '<div class="card" id="assignCard" hidden><h2>Assign load</h2><form id="addLoadForm">' +
+    '<label>Driver<select id="al-driver" required>' + driverOptions() + '</select></label>' +
+    '<label>Reference<input id="al-ref" required placeholder="e.g. LXL-1001"></label>' +
+    '<label>Pickup location<input id="al-pickup" required placeholder="City, ST or full address"></label>' +
+    '<label>Pickup warehouse name <span class="muted">(optional)</span><input id="al-pickup-wh" placeholder="e.g. Walmart DC 6048"></label>' +
+    '<label>Pickup date &amp; time<input id="al-pickup-at" type="datetime-local" required></label>' +
+    '<label>Pickup number<input id="al-pickup-no" placeholder="Optional"></label>' +
+    '<label>Delivery location<input id="al-delivery" required placeholder="City, ST or full address"></label>' +
+    '<label>Delivery warehouse name <span class="muted">(optional)</span><input id="al-delivery-wh" placeholder="e.g. Costco Depot"></label>' +
+    '<label>Delivery date &amp; time<input id="al-delivery-at" type="datetime-local" required></label>' +
+    '<label>Delivery number<input id="al-delivery-no" placeholder="Optional"></label>' +
+    '<label>Notes<textarea id="al-notes" rows="2" placeholder="Optional"></textarea></label>' +
+    '<button class="btn" type="submit">Assign load</button></form></div>' +
+    (list.length
+      ? '<div class="load-list">' + list.map(loadCardHtml).join('') + '</div>'
+      : '<div class="card"><p class="empty">No loads yet.</p></div>') +
+    '</div>';
 
-  document.getElementById('addLoadForm').addEventListener('submit', async (e) => {
+  const assignCard = document.getElementById('assignCard');
+  const toggleBtn = document.getElementById('toggleAssignBtn');
+  const setAssignOpen = (open) => {
+    assignCard.hidden = !open;
+    toggleBtn.textContent = open ? 'Close' : '+ Add load';
+  };
+  toggleBtn.addEventListener('click', () => setAssignOpen(assignCard.hidden));
+
+  const form = document.getElementById('addLoadForm');
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const v = id => document.getElementById(id).value.trim();
-    if (state.editingLoadId) {
-      const body = {
-        pickupLocation: v('al-pickup'),
-        pickupWarehouse: v('al-pickup-wh') || null,
-        pickupNumber: v('al-pickup-no') || null,
-        deliveryLocation: v('al-delivery'),
-        deliveryWarehouse: v('al-delivery-wh') || null,
-        deliveryNumber: v('al-delivery-no') || null,
-        notes: v('al-notes') || null,
-      };
-      try { await api('/api/admin/loads/' + state.editingLoadId + '/edit', { method: 'POST', body: JSON.stringify(body) }); toast('Load updated.', 'ok'); renderAdminView('loads'); }
-      catch (err) { showError(err); }
-      return;
-    }
+    const pickupAt = document.getElementById('al-pickup-at').value;
+    const deliveryAt = document.getElementById('al-delivery-at').value;
     const body = {
-      driverId: parseInt(v('al-driver'), 10),
-      reference: v('al-ref'),
-      pickupLocation: v('al-pickup'),
-      pickupAt: new Date(v('al-pickup-at')).toISOString(),
-      deliveryLocation: v('al-delivery'),
-      deliveryAt: new Date(v('al-delivery-at')).toISOString(),
+      driverId: Number(document.getElementById('al-driver').value),
+      reference: document.getElementById('al-ref').value.trim(),
+      pickupLocation: document.getElementById('al-pickup').value.trim(),
+      pickupWarehouse: document.getElementById('al-pickup-wh').value.trim() || undefined,
+      pickupAt: pickupAt ? new Date(pickupAt).toISOString() : undefined,
+      pickupTimezone: browserTimezone(),
+      pickupNumber: document.getElementById('al-pickup-no').value.trim() || undefined,
+      deliveryLocation: document.getElementById('al-delivery').value.trim(),
+      deliveryWarehouse: document.getElementById('al-delivery-wh').value.trim() || undefined,
+      deliveryAt: deliveryAt ? new Date(deliveryAt).toISOString() : undefined,
+      deliveryTimezone: browserTimezone(),
+      deliveryNumber: document.getElementById('al-delivery-no').value.trim() || undefined,
+      notes: document.getElementById('al-notes').value.trim() || undefined,
     };
-    if (v('al-pickup-wh')) body.pickupWarehouse = v('al-pickup-wh');
-    if (v('al-delivery-wh')) body.deliveryWarehouse = v('al-delivery-wh');
-    if (v('al-pickup-no')) body.pickupNumber = v('al-pickup-no');
-    if (v('al-delivery-no')) body.deliveryNumber = v('al-delivery-no');
-    if (v('al-notes')) body.notes = v('al-notes');
-    try { await api('/api/admin/loads', { method: 'POST', body: JSON.stringify(body) }); toast('Load assigned.', 'ok'); renderAdminView('loads'); }
-    catch (err) { showError(err); }
+    try {
+      if (state.editingLoadId) {
+        await api('/api/admin/loads/' + state.editingLoadId + '/edit', { method: 'POST', body });
+        toast('Load updated.', 'ok');
+      } else {
+        await api('/api/admin/loads', { method: 'POST', body });
+        toast('Load assigned.', 'ok');
+      }
+      state.editingLoadId = null;
+      renderAdminView('loads');
+    } catch (err) { showError(err); }
   });
-  main.querySelectorAll('[data-edit-load]').forEach(b => b.addEventListener('click', () => {
-    const l = list.find(x => String(x.id) === b.dataset.editLoad);
+
+  main.querySelectorAll('[data-edit-load]').forEach((b) => b.addEventListener('click', () => {
+    const l = list.find((x) => String(x.id) === b.dataset.editLoad);
     if (!l) return;
-    const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
-    set('al-driver', l.driverId);
-    set('al-ref', l.reference);
-    set('al-pickup', l.pickupLocation);
-    set('al-pickup-wh', l.pickupWarehouse);
-    set('al-pickup-at', toLocalInput(l.pickupAt));
-    set('al-pickup-no', l.pickupNumber);
-    set('al-delivery', l.deliveryLocation);
-    set('al-delivery-wh', l.deliveryWarehouse);
-    set('al-delivery-at', toLocalInput(l.deliveryAt));
-    set('al-delivery-no', l.deliveryNumber);
-    set('al-notes', l.notes);
     state.editingLoadId = l.id;
-    const h2 = main.querySelector('.card h2');
-    if (h2) h2.textContent = 'Edit load ' + l.reference;
-    const submitBtn = main.querySelector('#addLoadForm button[type="submit"]');
-    if (submitBtn) submitBtn.textContent = 'Save changes';
-    const actions = main.querySelector('#addLoadForm .form-actions');
-    if (actions && !document.getElementById('cancelEditBtn')) {
-      actions.insertAdjacentHTML('beforeend', ' <button class="btn btn-ghost" type="button" id="cancelEditBtn">Cancel</button>');
-      document.getElementById('cancelEditBtn').addEventListener('click', () => renderAdminView('loads'));
+    document.getElementById('al-driver').value = String(l.driverId);
+    document.getElementById('al-ref').value = l.reference || '';
+    document.getElementById('al-pickup').value = l.pickupLocation || '';
+    document.getElementById('al-pickup-wh').value = l.pickupWarehouse || '';
+    document.getElementById('al-pickup-at').value = toLocalInput(l.pickupAt);
+    document.getElementById('al-pickup-no').value = l.pickupNumber || '';
+    document.getElementById('al-delivery').value = l.deliveryLocation || '';
+    document.getElementById('al-delivery-wh').value = l.deliveryWarehouse || '';
+    document.getElementById('al-delivery-at').value = toLocalInput(l.deliveryAt);
+    document.getElementById('al-delivery-no').value = l.deliveryNumber || '';
+    document.getElementById('al-notes').value = l.notes || '';
+    form.closest('.card').querySelector('h2').textContent = 'Edit load ' + (l.reference || '');
+    form.querySelector('button[type="submit"]').textContent = 'Save changes';
+    let cancelBtn = document.getElementById('cancelEditBtn');
+    if (!cancelBtn) {
+      cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'btn btn-ghost';
+      cancelBtn.id = 'cancelEditBtn';
+      cancelBtn.textContent = 'Close';
+      cancelBtn.style.marginLeft = '8px';
+      form.querySelector('button[type="submit"]').after(cancelBtn);
+      cancelBtn.addEventListener('click', () => { state.editingLoadId = null; renderAdminView('loads'); });
     }
-    document.getElementById('addLoadForm').scrollIntoView({ behavior: 'smooth' });
-    toast('Editing ' + l.reference + ' — fix the addresses and save.', 'ok');
+    setAssignOpen(true);
+    assignCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }));
-  main.querySelectorAll('[data-cancel-load]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('Cancel this load?')) return;
-    try { await api('/api/admin/loads/' + b.dataset.cancelLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'cancelled' }) }); toast('Load cancelled.', 'ok'); renderAdminView('loads'); }
-    catch (err) { showError(err); }
+
+  main.querySelectorAll('[data-delete-load]').forEach((b) => b.addEventListener('click', async () => {
+    const l = list.find((x) => String(x.id) === b.dataset.deleteLoad);
+    if (!confirm('Delete load ' + (l ? l.reference : '') + '? This removes the load completely. This can\'t be undone.')) return;
+    try {
+      await api('/api/admin/loads/' + b.dataset.deleteLoad, { method: 'DELETE' });
+      toast('Load deleted.', 'ok');
+      renderAdminView('loads');
+    } catch (err) { showError(err); }
   }));
-  main.querySelectorAll('[data-reactivate-load]').forEach(b => b.addEventListener('click', async () => {
-    try { await api('/api/admin/loads/' + b.dataset.reactivateLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'active' }) }); toast('Load reactivated.', 'ok'); renderAdminView('loads'); }
-    catch (err) { showError(err); }
+
+  main.querySelectorAll('[data-reopen-load]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Reopen this load? It becomes active again for the driver.')) return;
+    try {
+      await api('/api/admin/loads/' + b.dataset.reopenLoad + '/status', { method: 'POST', body: { status: 'active' } });
+      toast('Load reopened.', 'ok');
+      renderAdminView('loads');
+    } catch (err) { showError(err); }
   }));
-  main.querySelectorAll('[data-reopen-load]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('Reopen this load? It goes back to active.')) return;
-    try { await api('/api/admin/loads/' + b.dataset.reopenLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'active' }) }); toast('Load reopened.', 'ok'); renderAdminView('loads'); }
-    catch (err) { showError(err); }
+  main.querySelectorAll('[data-reactivate-load]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/loads/' + b.dataset.reactivateLoad + '/status', { method: 'POST', body: { status: 'active' } });
+      toast('Load reactivated.', 'ok');
+      renderAdminView('loads');
+    } catch (err) { showError(err); }
   }));
 }
 
