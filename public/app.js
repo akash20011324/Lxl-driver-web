@@ -2147,7 +2147,23 @@ async function viewRateCons(main) {
   };
   const previewName = (l, ext) => l ? l.reference + '_' + stateOf(l.pickupLocation) + '-' + stateOf(l.deliveryLocation) + '_' + dateOf(l.pickupAt, l.pickupTimezone) + '_to_' + dateOf(l.deliveryAt, l.deliveryTimezone) + '.' + (ext || 'pdf') : '';
   const loadOptions = loadList.map(l => '<option value="' + l.id + '">' + esc(l.reference) + ' · ' + esc(shortPlace(l.pickupLocation)) + ' → ' + esc(shortPlace(l.deliveryLocation)) + '</option>').join('');
-  main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>Rate Confirmations</h1><button class="btn" id="rcAddBtn" aria-expanded="false">+ Add RC</button></div><div id="rcAddWrap" style="display:none">' +
+  // Option B + D stats (owner's pick 2026-11-15): totals over ALL rate
+  // cons — booked total, how many, and the average load.
+  const totalCents = list.reduce((s, r) => s + (Number(r.rateCents) || 0), 0);
+  const avgCents = list.length ? Math.round(totalCents / list.length) : 0;
+  const chipOf = (name) => {
+    const n = String(name || '').trim();
+    if (!n) return '—';
+    const m = n.match(/([A-Za-z])\s*&\s*([A-Za-z])/);
+    if (m) return (m[1] + '&' + m[2]).toUpperCase();
+    const words = n.replace(/[^A-Za-z ]/g, ' ').split(/\s+/).filter(Boolean);
+    return (((words[0] || '')[0] || '') + ((words[1] || '')[0] || '')).toUpperCase() || '—';
+  };
+  const rcStats = '<div class="rc-stats">' +
+    '<div class="rc-stat"><div class="num">' + fmtMoney(totalCents) + '</div><div class="lab">Booked total</div></div>' +
+    '<div class="rc-stat"><div class="num">' + list.length + '</div><div class="lab">Rate cons</div></div>' +
+    '<div class="rc-stat"><div class="num">' + fmtMoney(avgCents) + '</div><div class="lab">Average load</div></div></div>';
+  main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>Rate Confirmations</h1><button class="btn" id="rcAddBtn" aria-expanded="false">+ Add RC</button></div>' + rcStats + '<div id="rcAddWrap" style="display:none">' +
     '<div class="card"><h2>Upload rate confirmation</h2>' +
     (loadList.length ? '<form id="rcForm">' +
     '<div class="form-row">' +
@@ -2168,19 +2184,19 @@ async function viewRateCons(main) {
       : '<p class="small muted">Outlook email is not set up on the server yet.</p>') +
     '<div id="outlookPicker" style="display:none" class="mt"></div>' +
     '<p id="outlookChosen" class="small mt"></p></div></div>' +
-    '<div class="card"><div class="rc-search"><input id="rcSearch" type="search" placeholder="Search rate confirmations — reference, broker, route…"></div><div class="table-wrap"><table><thead><tr>' +
-    '<th>Reference</th><th>Broker</th><th>Route</th><th>Dates</th><th>Rate</th><th>File</th><th></th>' +
-    '</tr></thead><tbody>' +
-    list.map(r => '<tr><td><strong>' + esc(r.reference) + '</strong></td>' +
-      '<td>' + esc(r.broker || '—') + '</td>' +
-      '<td>' + esc(r.pickupState) + ' → ' + esc(r.deliveryState) + '</td>' +
-      '<td>' + fmtDateOnly(r.pickupDate) + ' → ' + fmtDateOnly(r.deliveryDate) + '</td>' +
-      '<td>' + fmtMoney(r.rateCents) + '</td>' +
-      '<td>' + esc(r.filename || '—') + '</td>' +
-      '<td><button class="btn btn-ghost btn-sm" data-rc-view="' + r.id + '">View</button> ' +
+    '<div class="card"><div class="rc-search"><input id="rcSearch" type="search" placeholder="Search rate confirmations — reference, broker, route…"></div><div class="rc-rows">' +
+    list.map(r => '<div class="rc-row" data-rc-row>' +
+      '<span class="rc-chip">' + esc(chipOf(r.broker)) + '</span>' +
+      '<span class="rc-ref">' + esc(r.reference) + '</span>' +
+      '<span class="rc-broker">' + esc(r.broker || '—') + '</span>' +
+      '<span class="rc-route">' + esc(r.pickupState) + ' → ' + esc(r.deliveryState) + '</span>' +
+      '<span class="rc-dates">' + fmtDateOnly(r.pickupDate) + ' → ' + fmtDateOnly(r.deliveryDate) + '</span>' +
+      '<span class="rc-file">' + esc(r.filename || '') + '</span>' +
+      '<span class="rc-rate">' + fmtMoney(r.rateCents) + '</span>' +
+      '<span class="rc-btns"><button class="btn btn-ghost btn-sm" data-rc-view="' + r.id + '">View</button> ' +
       '<button class="btn btn-ghost btn-sm" data-rc-dl="' + r.id + '">Download</button> ' +
-      '<button class="btn btn-danger btn-sm" data-rc-del="' + r.id + '">Delete</button></td></tr>').join('') +
-    '</tbody></table></div><p class="empty" id="rcNoMatch" style="display:none">No rate confirmations match your search.</p>' + (list.length ? '' : '<p class="empty">No rate confirmations yet.</p>') + '</div></div>';
+      '<button class="btn btn-danger btn-sm" data-rc-del="' + r.id + '">Delete</button></span></div>').join('') +
+    '</div><p class="empty" id="rcNoMatch" style="display:none">No rate confirmations match your search.</p>' + (list.length ? '' : '<p class="empty">No rate confirmations yet.</p>') + '</div></div>';
 
   const rcForm = document.getElementById('rcForm');
   if (rcForm) {
@@ -2308,16 +2324,16 @@ async function viewRateCons(main) {
     rcAddBtn.textContent = open ? '× Close' : '+ Add RC';
     rcAddBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
-  // Search the table: reference, broker, route, dates, rate, filename.
+  // Search the list: reference, broker, route, dates, rate, filename.
   // Normalizes both sides so "dandl" finds "D & L" (the & reads as "and").
   const norm = s => s.toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]/g, '');
   const rcSearch = document.getElementById('rcSearch');
   if (rcSearch) rcSearch.addEventListener('input', () => {
     const q = norm(rcSearch.value.trim());
     let visible = 0;
-    main.querySelectorAll('.rc-page tbody tr').forEach(tr => {
-      const hit = !q || norm(tr.textContent).includes(q);
-      tr.style.display = hit ? '' : 'none';
+    main.querySelectorAll('[data-rc-row]').forEach(row => {
+      const hit = !q || norm(row.textContent).includes(q);
+      row.style.display = hit ? '' : 'none';
       if (hit) visible++;
     });
     const nm = document.getElementById('rcNoMatch');
