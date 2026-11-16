@@ -1298,6 +1298,8 @@ async function viewLoads(main) {
   ensureLoadsBgLayer();
   const [loads, drivers] = await Promise.all([api('/api/admin/loads'), api('/api/admin/drivers')]);
   state.driversCache = Array.isArray(drivers) ? drivers : [];
+  const driverOptions = (sel) =>
+    state.driversCache.map((d) => '<option value="' + d.id + '"' + (String(d.id) === String(sel) ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('');
   const list = Array.isArray(loads) ? loads : [];
   main.innerHTML = '<div class="loads-page">' +
     '<div class="loads-head"><h1>Loads</h1><button class="btn" type="button" id="toggleAssignBtn">+ Add load</button></div>' +
