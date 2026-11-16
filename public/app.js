@@ -1121,6 +1121,20 @@ async function viewDashboard(main) {
       '<text x="70" y="84" text-anchor="middle" fill="#cbd5e1" font-size="10">profit</text></svg>' +
       '<div class="cf-donut-legend"><div class="small muted" style="margin-bottom:6px">Money out in ' + esc(mName) + ' — total ' + fmtMoney(cfMonth.outTotalCents) + ' · money in ' + fmtMoney(cfMonth.inTotalCents) + '</div>' + legend + '</div></div>';
   }
+  const bb = cfData && cfData.bankBalance;
+  let bankCircleHtml = '';
+  if (bb && Number.isFinite(bb.currentCents)) {
+    const upd = bb.at ? new Date(bb.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+    bankCircleHtml = '<div class="bank-circle">' +
+      '<svg width="140" height="140" viewBox="0 0 140 140">' +
+      '<circle cx="70" cy="70" r="54" fill="none" stroke="#F2B705" stroke-width="20"></circle>' +
+      '<text x="70" y="66" text-anchor="middle" fill="#ffffff" font-size="16" font-weight="700">' + fmtMoney(bb.currentCents) + '</text>' +
+      '<text x="70" y="84" text-anchor="middle" fill="#cbd5e1" font-size="10">bank balance</text></svg>' +
+      '<div class="small muted" style="text-align:center;margin-top:2px">' + esc(bb.name || 'Bank account') + (bb.mask ? ' ••' + esc(bb.mask) : '') + '</div>' +
+      (Number.isFinite(bb.availableCents) ? '<div class="small" style="text-align:center">Available ' + fmtMoney(bb.availableCents) + '</div>' : '') +
+      (upd ? '<div class="small muted" style="text-align:center">Updated ' + esc(upd) + '</div>' : '') +
+      '</div>';
+  }
   main.innerHTML = '<div class="dash-head"><h1 style="margin:0">Dashboard</h1><span class="status-pill live"><span class="dot"></span>Live</span></div>' +
     '<div class="dash-stats">' +
     '<div class="glass-panel dash-stat"><div class="stat-num">' + count('drivers', list.length) + '</div><div class="stat-label">Drivers</div></div>' +
@@ -1135,7 +1149,7 @@ async function viewDashboard(main) {
     '</div>' +
     '<div class="dash-track">' +
     '<div class="glass-panel"><h2 style="margin-top:0"><span class="live-dot off" id="dashLiveDot"></span>Live tracking</h2><div id="dashMap" class="dash-map"></div><p class="small muted" id="dashMapNote" style="display:none"></p></div>' +
-    '<div class="glass-panel mt"><h2 style="margin-top:0">Cash flow — this month</h2>' + (cfDonutHtml || '<p class="empty">No cash flow recorded yet this month.</p>') + '</div>' +
+    '<div class="glass-panel mt"><h2 style="margin-top:0">Cash flow — this month</h2><div class="cf-circles">' + (cfDonutHtml || '<p class="empty">No cash flow recorded yet this month.</p>') + bankCircleHtml + '</div></div>' +
     '<div class="glass-panel mt" id="dashFleet"></div>' +
     '</div></div>';
   renderAdminSidebar(pendingReq);

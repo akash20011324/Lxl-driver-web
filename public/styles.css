@@ -1404,6 +1404,9 @@ body.maintenance-bg .sidebar { background: rgba(5, 9, 18, 0.45); backdrop-filter
 
 /* Dashboard cash-flow donut */
 .cf-donut-wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.cf-circles{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start}
+.cf-circles .cf-donut-wrap{flex:1;min-width:280px}
+.bank-circle{flex:none;text-align:center}
 .cf-donut-legend{flex:1;min-width:180px}
 .cf-donut-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px}
 .cf-donut-row strong{margin-left:auto}

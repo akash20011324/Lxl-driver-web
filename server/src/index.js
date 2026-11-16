@@ -10,7 +10,7 @@ import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDb, now, withTransaction, getMeta, demoAvailable, deactivateDemo, normalizePhone } from './db.js';
+import { openDb, now, withTransaction, getMeta, setMeta, demoAvailable, deactivateDemo, normalizePhone } from './db.js';
 import { seedDemo } from './seed.js';
 import { seedRealFleet } from './seed-fleet.js';
 import { notifyDriver } from './push.js';
@@ -1787,8 +1787,10 @@ admin.get('/cashflow', (req, res) => {
     `SELECT l.id, l.reference, u.name AS driverName FROM loads l
      LEFT JOIN users u ON u.id = l.driverId ORDER BY l.id DESC LIMIT 50`,
   ).all().map((l) => ({ id: l.id, reference: l.reference, driverName: l.driverName ?? null }));
+  let bankBalance = null;
+  try { bankBalance = JSON.parse(getMeta(db, 'bank_balance') || 'null'); } catch { bankBalance = null; }
   res.json({
-    bookedCents: rcTotal, receivedCents, outCents, netCents: receivedCents - outCents, weekly,
+    bookedCents: rcTotal, receivedCents, outCents, netCents: receivedCents - outCents, weekly, bankBalance,
     entries: all.slice(0, 60), fixed,
     bankPending: db.prepare("SELECT * FROM bank_transactions WHERE status = 'pending' ORDER BY date DESC, id DESC LIMIT 40").all()
       .map((t) => ({ id: t.id, date: t.date, name: t.name, amountCents: t.amountCents, direction: t.direction })),
@@ -2004,6 +2006,16 @@ app.post('/api/sync/bank', (req, res) => {
     const r = ins.run(String(t.id), String(t.date).slice(0, 10), String(t.name || '').slice(0, 200),
       Math.round(Number(t.amountCents)), t.direction === 'in' ? 'in' : 'out', now());
     if (r.changes) added += 1;
+  }
+  const bal = req.body && req.body.balance;
+  if (bal && Number.isFinite(Number(bal.currentCents))) {
+    setMeta(db, 'bank_balance', JSON.stringify({
+      currentCents: Math.round(Number(bal.currentCents)),
+      availableCents: Number.isFinite(Number(bal.availableCents)) ? Math.round(Number(bal.availableCents)) : null,
+      name: String(bal.name || '').slice(0, 80),
+      mask: String(bal.mask || '').slice(0, 8),
+      at: Date.now(),
+    }));
   }
   const autoCategorized = sweepBankPending();
   const unknowns = db.prepare("SELECT id, name, date, amountCents, direction FROM bank_transactions WHERE status = 'pending' ORDER BY date DESC, id DESC LIMIT 25").all();
