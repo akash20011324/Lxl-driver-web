@@ -3391,19 +3391,28 @@ function amountToCents(s) {
   return Math.round(n * 100);
 }
 
+// An amount followed by a weight unit is a WEIGHT, not money — the
+// Armstrong PDFs print "41545.67L" for the load's pounds, and the
+// fallback reader took it for a $41,545.67 rate (2026-11-16).
+function isWeightAmount(text, idx, len) {
+  const tail = text.slice(idx + len, idx + len + 6);
+  return /^\s*(?:lbs?|kgs?|tons?)\b/i.test(tail) || /^L\b/.test(tail);
+}
+
 function detectRateCents(text) {
   // Keyword-anchored first: the total is what gets paid.
   const patterns = [
-    /TOTAL\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
-    /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
-    /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
-    /FLAT\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /FLAT\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
     if (m) {
       const c = amountToCents(m[1]);
-      if (c != null) return c;
+      if (c != null && !isWeightAmount(text, m.index, m[0].length)) return c;
     }
   }
   // Fallback: largest plausible dollar amount in the document (fees and
@@ -3411,7 +3420,7 @@ function detectRateCents(text) {
   let best = null;
   for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
     const c = amountToCents(m[1]);
-    if (c != null && (best == null || c > best)) best = c;
+    if (c != null && !isWeightAmount(text, m.index, m[0].length) && (best == null || c > best)) best = c;
   }
   return best;
 }
@@ -3422,16 +3431,17 @@ function detectRateCentsDetailed(text) {
   // came from a labeled rate field and the text around the match, so
   // the cleanup pass can tell a real rate from a stray big number.
   const patterns = [
-    /TOTAL\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
-    /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
-    /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
-    /FLAT\s+RATE\s*:?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /LINE\s+HAUL(?:\s+RATE)?\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s+(?:PAY|AMOUNT|CHARGES?|DUE)\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /FLAT\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    /TOTAL\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
   ];
   for (const re of patterns) {
     const m = re.exec(text);
     if (m) {
       const c = amountToCents(m[1]);
-      if (c != null) return { cents: c, labeled: true, context: text.slice(Math.max(0, m.index - 30), m.index + m[0].length + 30) };
+      if (c != null && !isWeightAmount(text, m.index, m[0].length)) return { cents: c, labeled: true, context: text.slice(Math.max(0, m.index - 30), m.index + m[0].length + 30) };
     }
   }
   let best = null;
@@ -3439,7 +3449,7 @@ function detectRateCentsDetailed(text) {
   let bestRaw = '';
   for (const m of text.matchAll(/\$?\s*([\d,]+\.\d{2})/g)) {
     const c = amountToCents(m[1]);
-    if (c != null && (best == null || c > best)) { best = c; bestIdx = m.index; bestRaw = m[0]; }
+    if (c != null && !isWeightAmount(text, m.index, m[0].length) && (best == null || c > best)) { best = c; bestIdx = m.index; bestRaw = m[0]; }
   }
   return { cents: best, labeled: false, context: bestIdx >= 0 ? text.slice(Math.max(0, bestIdx - 70), bestIdx + bestRaw.length + 30) : '' };
 }
@@ -3948,6 +3958,137 @@ async function removeCancelledScotlynnLoad() {
     if (rc) console.log('cleanup: an RC row for LXL-1580304 exists (id ' + rc.id + ') — left for manual review');
     db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
   } catch (e) { console.error('remove cancelled load failed:', e.message); }
+}
+
+// Adjudication (2026-11-16): corrections verified by READING the rate
+// confirmation documents themselves (the automatic reader had taken
+// load WEIGHTS — "41545.67L" — for rates on the Armstrong PDFs, and
+// four rows carried stray words as their reference). Every value here
+// is quoted from its document; the owner's word confirmed 4820080-1
+// (DE -> KY, $1,500) before the document was opened.
+async function adjudicateRateCons() {
+  try {
+    const marker = 'rc-adjudication-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication: ' + m);
+    const akash = db.prepare("SELECT id FROM users WHERE role = 'driver' AND name LIKE '%akash%' ORDER BY id LIMIT 1").get();
+    const akashId = akash ? akash.id : null;
+    // 1. Armstrong rates, read off the documents' RATE DETAILS lines.
+    const rateFix = [['LXL-4820080-1', 150000], ['LXL-4701372-1', 400000], ['LXL-4731383-1', 230000]];
+    for (const [ref, cents] of rateFix) {
+      const r = db.prepare('UPDATE rate_confirmations SET rateCents = ? WHERE reference = ?').run(cents, ref);
+      if (r.changes) log(ref + ' rate set to $' + (cents / 100).toFixed(2) + ' (was a weight)');
+    }
+    // 2. Routes read off the documents.
+    db.prepare("UPDATE rate_confirmations SET pickupState = 'DE', deliveryState = 'KY' WHERE reference = 'LXL-4820080-1'").run();
+    const fixLoadRoute = (ref, pu, dl) => {
+      const r = db.prepare('UPDATE loads SET pickupLocation = ?, deliveryLocation = ?, pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE reference = ?').run(pu, dl, ref);
+      if (r.changes) log(ref + ' load route set to ' + pu + ' -> ' + dl);
+    };
+    fixLoadRoute('LXL-4820080-1', 'Wilmington, DE 19801', 'Louisville, KY 40243');
+    fixLoadRoute('LXL-4701372-1', 'Louisville, KY 40214', 'Terrell, TX 75160');
+    // 3. ALBANY is C.H. Robinson's copy of load 569202874 — a duplicate
+    // of the row already filed under the real number. Delete it.
+    const deleteRcRow = (row, why) => {
+      db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(row.id);
+      if (row.fileId) {
+        const shared = db.prepare('SELECT COUNT(*) AS c FROM rate_confirmations WHERE fileId = ?').get(row.fileId).c;
+        if (!shared) {
+          const f = getFileRow(row.fileId);
+          db.prepare('DELETE FROM files WHERE id = ?').run(row.fileId);
+          if (f) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename)); } catch { /* already gone */ } }
+        }
+      }
+      log('deleted rate con ' + row.reference + ' — ' + why);
+    };
+    const albany = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'ALBANY'").get();
+    if (albany) deleteRcRow(albany, 'C.H. Robinson copy of load 569202874 (duplicate)');
+    // EXECUTIVE is not a rate confirmation at all: it is the TQL
+    // carrier-setup packet from 2026-05-05, read in full (8 pages —
+    // no load, no stops, no rate; the "$2,000" on the row came from
+    // the packet's fuel-advance policy text). Delete the row, and
+    // its load too when the load is a documentless import artifact.
+    const execRow = db.prepare("SELECT * FROM rate_confirmations WHERE reference = 'EXECUTIVE'").get();
+    if (execRow) deleteRcRow(execRow, 'a TQL carrier-setup packet from 2026-05-05, not a rate confirmation');
+    const execLoad = db.prepare("SELECT * FROM loads WHERE reference = 'EXECUTIVE'").get();
+    if (execLoad) {
+      const docs = db.prepare('SELECT COUNT(*) AS c FROM documents WHERE loadId = ?').get(execLoad.id).c;
+      if (!docs && execLoad.notes === 'Imported from a rate confirmation email') {
+        db.prepare('DELETE FROM loads WHERE id = ?').run(execLoad.id);
+        log('deleted the EXECUTIVE load artifact');
+      } else {
+        log('EXECUTIVE load kept — has documents or was not import-created');
+      }
+    }
+    // 4. Stray-word references renamed to the load numbers printed on
+    // their documents.
+    const renames = [
+      ['ATTN', 'LXL-356391', 'Unlimited Logistics'],
+      ['DATE', 'LXL-10425782', 'WJW Associates Ltd'],
+      ['BELOW', 'LXL-71142', null],
+      ['RATE', 'LXL-9751800', null],
+    ];
+    for (const [oldRef, newRef, broker] of renames) {
+      const rc = db.prepare('SELECT * FROM rate_confirmations WHERE reference = ?').get(oldRef);
+      if (!rc) { log('rename skipped — no row ' + oldRef); continue; }
+      if (db.prepare('SELECT id FROM rate_confirmations WHERE reference = ?').get(newRef)) { log('rename ' + oldRef + ' -> ' + newRef + ' skipped — target row exists'); continue; }
+      if (broker) db.prepare('UPDATE rate_confirmations SET reference = ?, broker = ? WHERE id = ?').run(newRef, broker, rc.id);
+      else db.prepare('UPDATE rate_confirmations SET reference = ? WHERE id = ?').run(newRef, rc.id);
+      const lr = db.prepare('UPDATE loads SET reference = ? WHERE reference = ?').run(newRef, oldRef);
+      log('renamed rate con ' + oldRef + ' -> ' + newRef + (lr.changes ? ' (and its load)' : ''));
+    }
+    // 5. Trinity 9751800: the document's pickup is Logansport, IN on
+    // 2026-07-27 (the row carried the document's own date and a
+    // Delaware letterhead state).
+    db.prepare("UPDATE rate_confirmations SET pickupState = 'IN', pickupDate = '2026-07-27', deliveryDate = '2026-07-30' WHERE reference = 'LXL-9751800'").run();
+    // 6. Loads for the renamed rows: fix or create from the documents,
+    // assigned to the driver the document names (Akashdeep, both).
+    const ensureLoad = (ref, pu, dl, puDate, dlDate) => {
+      let load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(ref);
+      if (!load) {
+        if (!akashId) { log(ref + ': no load and driver unresolved — left for manual assignment'); return null; }
+        const puAt = puDate + 'T09:00:00';
+        const dlAt = dlDate + 'T17:00:00';
+        const info = db.prepare("INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, 'America/Indiana/Indianapolis', ?, ?, 'America/Indiana/Indianapolis', 'Imported from a rate confirmation email', 'completed', ?, ?)").run(ref, akashId, pu, puAt, dl, dlAt, dlAt, new Date().toISOString());
+        load = db.prepare('SELECT * FROM loads WHERE id = ?').get(info.lastInsertRowid);
+        log(ref + ': created completed load (driver Akash)');
+      }
+      return load;
+    };
+    const settleLoad = (ref, pu, dl, puDate, dlDate) => {
+      const load = ensureLoad(ref, pu, dl, puDate, dlDate);
+      if (!load) return;
+      db.prepare('UPDATE loads SET pickupLocation = ?, deliveryLocation = ?, pickupAt = ?, deliveryAt = ?, completedAt = ?, driverId = COALESCE(?, driverId), pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE id = ?')
+        .run(pu, dl, puDate + 'T09:00:00', dlDate + 'T17:00:00', dlDate + 'T17:00:00', akashId, load.id);
+      db.prepare('UPDATE rate_confirmations SET loadId = ? WHERE reference = ?').run(load.id, ref);
+      log(ref + ': load settled to ' + pu + ' -> ' + dl + ', ' + puDate + ' -> ' + dlDate);
+    };
+    settleLoad('LXL-356391', 'Hatfield, PA 19440', 'Fort Lauderdale, FL 33316', '2026-09-23', '2026-09-25');
+    settleLoad('LXL-9751800', 'Logansport, IN 46947', 'Hidalgo, TX 78557', '2026-07-27', '2026-07-30');
+    // 7. Five more documents read in full in the manual pass.
+    // FreightSource 0105681: the row carried a letterhead route and
+    // no rate; the document is Eufaula AL -> Assonet MA at $3,400.
+    db.prepare("UPDATE rate_confirmations SET broker = 'FreightSource LLC', pickupState = 'AL', deliveryState = 'MA', pickupDate = '2026-10-30', deliveryDate = '2026-11-01', rateCents = 340000 WHERE reference = 'LXL-0105681'").run();
+    log('LXL-0105681 set to AL -> MA, $3,400.00 (FreightSource document)');
+    // The Tyson and Coca-Cola rows hold BOLs, not rate confirmations:
+    // fix routes/dates from the BOLs and build their loads — both
+    // BOLs show trailer 531, which is Akash's trailer.
+    db.prepare("UPDATE rate_confirmations SET pickupDate = '2026-10-08', deliveryDate = '2026-10-10' WHERE reference = 'LXL-5010292603'").run();
+    db.prepare("UPDATE rate_confirmations SET pickupState = 'FL', deliveryState = 'IL', pickupDate = '2026-09-26', deliveryDate = '2026-09-27' WHERE reference = 'LXL-0311311324'").run();
+    settleLoad('LXL-5010292603', 'Carthage, TX 75633', 'Abingdon, VA 24210', '2026-10-08', '2026-10-10');
+    settleLoad('LXL-0311311324', 'Polk City, FL 33668', 'Danville, IL 61834', '2026-09-26', '2026-09-27');
+    // Integrity Express dispatch sheets print no rate — the $100 on
+    // both rows is a GPS fine in the terms. Clear it to unknown, fix
+    // 3012815's broker (RLS is the consignee) and pickup state (CA),
+    // and set both loads' cities from the sheets.
+    db.prepare("UPDATE rate_confirmations SET rateCents = NULL WHERE reference IN ('LXL-3020150', 'LXL-3012815')").run();
+    log('LXL-3020150 / LXL-3012815 rate cleared — the $100 was a fine in the dispatch-sheet terms');
+    db.prepare("UPDATE rate_confirmations SET broker = 'Integrity Express Logistics', pickupState = 'CA' WHERE reference = 'LXL-3012815'").run();
+    fixLoadRoute('LXL-3020150', 'Newark, NJ 07114', 'Reynolds, IN 47980');
+    fixLoadRoute('LXL-3012815', 'Wilmington, CA 90744', 'Newfield, NJ 08344');
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication failed', e); }
 }
 
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
@@ -5532,7 +5673,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
