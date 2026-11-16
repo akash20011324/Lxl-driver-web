@@ -1044,3 +1044,34 @@ body.loads-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
   .lc-end, .lc-end-r { text-align: left; }
   .lc-trackwrap { width: 100%; }
 }
+
+/* Chat wallpaper editor */
+.wp-editor-overlay {
+  position: fixed; inset: 0; z-index: 120; background: rgba(2, 6, 14, 0.72);
+  backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.wp-editor {
+  width: min(94vw, 720px); max-height: 94vh; overflow: auto; border-radius: 18px; padding: 16px;
+  background: rgba(10, 16, 30, 0.92); border: 1px solid rgba(255, 255, 255, 0.14); color: #eef2f8;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+.wp-editor-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-size: 16px; }
+.wp-frame {
+  position: relative; height: min(56vh, 440px); border-radius: 14px; overflow: hidden;
+  background: #04070d; border: 1px solid rgba(255, 255, 255, 0.12); touch-action: none; cursor: grab;
+}
+.wp-frame:active { cursor: grabbing; }
+.wp-img { position: absolute; max-width: none; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.wp-dim { position: absolute; inset: 0; background: linear-gradient(rgba(4, 9, 18, 0.62), rgba(4, 9, 18, 0.62)); pointer-events: none; }
+.wp-sample { position: absolute; inset: 0; padding: 14px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; overflow: hidden; }
+.wp-sample .msg { max-width: 75%; }
+.wp-sender { font-size: 11px; font-weight: 700; color: var(--gold, #F2B705); margin-bottom: 2px; }
+.wp-hint { margin: 10px 2px 0; font-size: 12.5px; color: #b9c4d6; }
+.wp-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.wp-controls .chat-wp-btn { min-width: 38px; text-align: center; font-size: 15px; }
+.wp-controls .chat-wp-btn.on { background: var(--blue, #1E40AF); border-color: rgba(255, 255, 255, 0.35); color: #fff; }
+.wp-zoom { flex: 1; min-width: 110px; accent-color: var(--blue, #1E40AF); }
+.wp-mode { display: inline-flex; gap: 6px; }
+.wp-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.wp-set { background: var(--blue, #1E40AF); color: #fff; border: none; border-radius: 10px; padding: 9px 18px; font-weight: 700; cursor: pointer; }
+.wp-set:disabled { opacity: 0.55; cursor: default; }

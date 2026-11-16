@@ -94,6 +94,137 @@ async function api(path, opts) {
 }
 
 /* ---------- file downloads (Bearer token required — plain <a href> won't work) ---------- */
+/* ---------- Chat wallpaper editor ---------- */
+/* Pick a photo, preview it behind sample messages, zoom and drag to frame
+   it, Fill vs Full picture, then Set. The framing is baked into a compressed
+   JPEG, so the upload is small and the wallpaper shows up fast. If the photo
+   cannot be drawn to a canvas (e.g. an exotic format), the original file is
+   uploaded as before. onSet(blob) must return true on success. */
+function openWallpaperEditor(file, onSet) {
+  const objUrl = URL.createObjectURL(file);
+  const overlay = document.createElement('div');
+  overlay.className = 'wp-editor-overlay';
+  overlay.innerHTML =
+    '<div class="wp-editor">' +
+      '<div class="wp-editor-head"><strong>Chat wallpaper</strong>' +
+      '<button type="button" class="chat-wp-btn" data-wp="cancel">✕ Close</button></div>' +
+      '<div class="wp-frame">' +
+        '<img class="wp-img" alt="">' +
+        '<div class="wp-dim"></div>' +
+        '<div class="wp-sample">' +
+          '<div class="msg"><div class="wp-sender">Dispatch</div>On my way to the pickup 👍<div class="meta">Dispatch · 9:41 AM</div></div>' +
+          '<div class="msg mine">Copy that, rolling now<div class="meta">You · 9:42 AM · ✓✓ Seen</div></div>' +
+          '<div class="msg"><div class="wp-sender">Dispatch</div>Seal number when you are loaded<div class="meta">Dispatch · 9:43 AM</div></div>' +
+        '</div>' +
+      '</div>' +
+      '<p class="wp-hint">Drag the picture to move it. Use the slider to zoom.</p>' +
+      '<div class="wp-controls">' +
+        '<button type="button" class="chat-wp-btn" data-wp="zoomout" title="Zoom out">−</button>' +
+        '<input type="range" class="wp-zoom" min="1" max="3" step="0.01" value="1">' +
+        '<button type="button" class="chat-wp-btn" data-wp="zoomin" title="Zoom in">+</button>' +
+        '<span class="wp-mode"><button type="button" class="chat-wp-btn on" data-wp="fill">Fill screen</button>' +
+        '<button type="button" class="chat-wp-btn" data-wp="fit">Full picture</button></span>' +
+        '<button type="button" class="chat-wp-btn" data-wp="resetview">Reset view</button>' +
+      '</div>' +
+      '<div class="wp-actions">' +
+        '<button type="button" class="chat-wp-btn" data-wp="cancel">Cancel</button>' +
+        '<button type="button" class="btn wp-set" data-wp="set">Set wallpaper</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  const frame = overlay.querySelector('.wp-frame');
+  const img = overlay.querySelector('.wp-img');
+  const slider = overlay.querySelector('.wp-zoom');
+  let mode = 'fill';
+  let zoom = 1;
+  let cx = 0;
+  let cy = 0;
+  let iw = 0;
+  let ih = 0;
+  const close = () => { URL.revokeObjectURL(objUrl); overlay.remove(); };
+  const layout = () => {
+    if (!iw) return;
+    const fw = frame.clientWidth;
+    const fh = frame.clientHeight;
+    const base = mode === 'fill' ? Math.max(fw / iw, fh / ih) : Math.min(fw / iw, fh / ih);
+    const dw = iw * base * zoom;
+    const dh = ih * base * zoom;
+    if (mode === 'fill') {
+      cx = Math.max(-(dw - fw) / 2, Math.min((dw - fw) / 2, cx));
+      cy = Math.max(-(dh - fh) / 2, Math.min((dh - fh) / 2, cy));
+    } else {
+      cx = Math.max(-fw / 2, Math.min(fw / 2, cx));
+      cy = Math.max(-fh / 2, Math.min(fh / 2, cy));
+    }
+    img.style.width = dw + 'px';
+    img.style.height = dh + 'px';
+    img.style.left = ((fw - dw) / 2 + cx) + 'px';
+    img.style.top = ((fh - dh) / 2 + cy) + 'px';
+  };
+  img.addEventListener('load', () => { iw = img.naturalWidth; ih = img.naturalHeight; layout(); });
+  img.addEventListener('error', async () => {
+    /* The browser cannot draw this photo — fall back to uploading it as-is. */
+    const ok = await onSet(file);
+    close();
+    if (!ok) return;
+  });
+  img.src = objUrl;
+  let drag = null;
+  frame.addEventListener('pointerdown', (e) => {
+    drag = { x: e.clientX, y: e.clientY, cx, cy };
+    frame.setPointerCapture(e.pointerId);
+  });
+  frame.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    cx = drag.cx + (e.clientX - drag.x);
+    cy = drag.cy + (e.clientY - drag.y);
+    layout();
+  });
+  const endDrag = () => { drag = null; };
+  frame.addEventListener('pointerup', endDrag);
+  frame.addEventListener('pointercancel', endDrag);
+  slider.addEventListener('input', () => { zoom = parseFloat(slider.value); layout(); });
+  overlay.querySelectorAll('[data-wp]').forEach(btn => btn.addEventListener('click', async () => {
+    const act = btn.dataset.wp;
+    if (act === 'cancel') { close(); return; }
+    if (act === 'zoomin') { zoom = Math.min(3, zoom + 0.25); slider.value = zoom; layout(); return; }
+    if (act === 'zoomout') { zoom = Math.max(1, zoom - 0.25); slider.value = zoom; layout(); return; }
+    if (act === 'fill' || act === 'fit') {
+      mode = act;
+      zoom = 1; slider.value = 1; cx = 0; cy = 0;
+      overlay.querySelector('[data-wp="fill"]').classList.toggle('on', mode === 'fill');
+      overlay.querySelector('[data-wp="fit"]').classList.toggle('on', mode === 'fit');
+      layout();
+      return;
+    }
+    if (act === 'resetview') { zoom = 1; slider.value = 1; cx = 0; cy = 0; layout(); return; }
+    if (act === 'set') {
+      btn.disabled = true;
+      btn.textContent = 'Setting…';
+      try {
+        const fw = frame.clientWidth;
+        const fh = frame.clientHeight;
+        const k = Math.min(2, 1600 / fw);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(fw * k);
+        canvas.height = Math.round(fh * k);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#04070d';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const dw = parseFloat(img.style.width) * k;
+        const dh = parseFloat(img.style.height) * k;
+        ctx.drawImage(img, parseFloat(img.style.left) * k, parseFloat(img.style.top) * k, dw, dh);
+        const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.88));
+        const ok = blob ? await onSet(blob) : await onSet(file);
+        if (ok) close();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Set wallpaper';
+      }
+    }
+  }));
+}
+
 async function downloadFile(url, filename, view, mimeType) {
   try {
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
@@ -2119,19 +2250,26 @@ async function viewDispatch(main) {
     renderChip();
   });
   const wpInput = document.getElementById('chatWpFile');
-  wpInput.addEventListener('change', async () => {
+  wpInput.addEventListener('change', () => {
     const f = wpInput.files && wpInput.files[0];
-    if (!f) return;
-    try {
-      const fd = new FormData();
-      fd.append('file', f);
-      const out = await api('/api/admin/chat-wallpaper', { method: 'POST', body: fd });
-      state.chatWpServerUrl = out && out.url ? out.url : null;
-      await applyWallpaper();
-      renderHead();
-      toast('Chat wallpaper set.', 'ok');
-    } catch (err) { showError(err); }
     wpInput.value = '';
+    if (!f) return;
+    openWallpaperEditor(f, async (blob) => {
+      try {
+        const fd = new FormData();
+        fd.append('file', blob, 'chat-wallpaper.jpg');
+        const out = await api('/api/admin/chat-wallpaper', { method: 'POST', body: fd });
+        state.chatWpServerUrl = out && out.url ? out.url : null;
+        if (state.chatWpServerUrl) {
+          if (!state.attUrlCache) state.attUrlCache = new Map();
+          state.attUrlCache.set(state.chatWpServerUrl, URL.createObjectURL(blob));
+        }
+        await applyWallpaper();
+        renderHead();
+        toast('Chat wallpaper set.', 'ok');
+        return true;
+      } catch (err) { showError(err); return false; }
+    });
   });
 
   document.getElementById('chatForm').addEventListener('submit', async (e) => {
@@ -3017,7 +3155,7 @@ async function viewDriverDispatch(main) {
   main.innerHTML = '<h1>Chat</h1><div class="card">' +
     '<div class="flex-between"><span class="muted small">Your chat with dispatch</span>' +
     '<span><button class="chat-wp-btn" id="drvWpBtn" type="button">🖼 Wallpaper</button>' +
-    '<button class="chat-wp-btn" id="drvWpReset" type="button" hidden>✕ Remove</button></span></div>' +
+    '<button class="chat-wp-btn" id="drvWpReset" type="button" disabled>✕ Remove</button></span></div>' +
     '<input type="file" id="drvWpFile" accept="image/*" hidden>' +
     '<div class="msg-list" id="driverThread"><p class="muted">Loading…</p></div>' +
     '<div class="chat-attach-chip" id="drvAttachChip" hidden></div>' +
@@ -3137,24 +3275,31 @@ async function viewDriverDispatch(main) {
   });
 
   document.getElementById('drvWpBtn').addEventListener('click', () => document.getElementById('drvWpFile').click());
-  document.getElementById('drvWpFile').addEventListener('change', async (e) => {
+  document.getElementById('drvWpFile').addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    try {
-      const fd = new FormData();
-      fd.append('file', f);
-      const out = await api('/api/driver/chat-wallpaper', { method: 'POST', body: fd });
-      state.drvWpServerUrl = out && out.url ? out.url : null;
-      document.getElementById('drvWpReset').hidden = !state.drvWpServerUrl;
-      await applyWallpaper();
-      toast('Chat wallpaper set.', 'ok');
-    } catch (err) { showError(err); }
     e.target.value = '';
+    if (!f) return;
+    openWallpaperEditor(f, async (blob) => {
+      try {
+        const fd = new FormData();
+        fd.append('file', blob, 'chat-wallpaper.jpg');
+        const out = await api('/api/driver/chat-wallpaper', { method: 'POST', body: fd });
+        state.drvWpServerUrl = out && out.url ? out.url : null;
+        document.getElementById('drvWpReset').disabled = !state.drvWpServerUrl;
+        if (state.drvWpServerUrl) {
+          if (!state.attUrlCache) state.attUrlCache = new Map();
+          state.attUrlCache.set(state.drvWpServerUrl, URL.createObjectURL(blob));
+        }
+        await applyWallpaper();
+        toast('Chat wallpaper set.', 'ok');
+        return true;
+      } catch (err) { showError(err); return false; }
+    });
   });
   document.getElementById('drvWpReset').addEventListener('click', async () => {
     try { await api('/api/driver/chat-wallpaper', { method: 'DELETE' }); } catch { /* ignore */ }
     state.drvWpServerUrl = null;
-    document.getElementById('drvWpReset').hidden = true;
+    document.getElementById('drvWpReset').disabled = true;
     applyWallpaper();
   });
 
@@ -3163,7 +3308,7 @@ async function viewDriverDispatch(main) {
     state.drvWpServerUrl = wp && wp.url ? wp.url : null;
   } catch { state.drvWpServerUrl = null; }
   const resetBtn = document.getElementById('drvWpReset');
-  if (resetBtn) resetBtn.hidden = !state.drvWpServerUrl;
+  if (resetBtn) resetBtn.disabled = !state.drvWpServerUrl;
   await loadThread();
   applyWallpaper();
   addTimer(loadThread, 15000);
