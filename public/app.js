@@ -3,13 +3,47 @@
    Spec: ~/workspace/lxl-driver-native/API_CONTRACT.md */
 'use strict';
 
+// Refresh persistence (owner's ask, 2026-11-16): remember which section
+// the user was in, so refreshing the page lands back on that section
+// instead of the Dashboard. Kept per browser in localStorage.
+const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'admins', 'equipment', 'loads', 'documents', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons'];
+function savedAdminView() {
+  try {
+    const v = localStorage.getItem('lxl_admin_view');
+    if (v && ADMIN_VIEW_KEYS.includes(v)) return v;
+  } catch (e) {}
+  return 'dashboard';
+}
+function savedDriverView() {
+  try {
+    const v = localStorage.getItem('lxl_driver_view');
+    if (v && ['home', 'truck', 'trailer', 'loads', 'dispatch', 'settings'].includes(v)) return v;
+  } catch (e) {}
+  return 'home';
+}
+function savedUnitDocsTarget() {
+  try {
+    const t = JSON.parse(localStorage.getItem('lxl_unitdocs_target') || 'null');
+    if (t && (t.type === 'truck' || t.type === 'trailer') && Number.isFinite(t.id)) return t;
+  } catch (e) {}
+  return null;
+}
+function savedDispatchDriverId() {
+  try {
+    const n = parseInt(localStorage.getItem('lxl_dispatch_driver') || '', 10);
+    if (Number.isFinite(n)) return n;
+  } catch (e) {}
+  return null;
+}
+
 const state = {
   token: localStorage.getItem('lxl_token') || null,
   user: null,
-  adminView: 'dashboard',
-  driverView: 'home',
+  adminView: savedAdminView(),
+  driverView: savedDriverView(),
+  unitDocsTarget: savedUnitDocsTarget(),
   yardFilter: 'all', // all | yard | road
-  dispatchDriverId: null,
+  dispatchDriverId: savedDispatchDriverId(),
   driversCache: [],
   map: null,
   mapMarkers: [],
@@ -946,6 +980,14 @@ function renderAdminSidebar(pendingRequests) {
 }
 
 async function renderAdminView(view) {
+  state.adminView = view;
+  try {
+    localStorage.setItem('lxl_admin_view', view);
+    if (view === 'unitDocs' && state.unitDocsTarget)
+      localStorage.setItem('lxl_unitdocs_target', JSON.stringify(state.unitDocsTarget));
+    if (state.dispatchDriverId)
+      localStorage.setItem('lxl_dispatch_driver', String(state.dispatchDriverId));
+  } catch (e) {}
   clearTimers();
   document.body.classList.remove('rc-bg');
   removeRcBgLayer();
@@ -2315,6 +2357,7 @@ async function viewDispatch(main) {
       selectedMsgIds.clear();
       updateDelBar();
       state.dispatchDriverId = parseInt(b.dataset.convo, 10);
+      try { localStorage.setItem('lxl_dispatch_driver', String(state.dispatchDriverId)); } catch (e) {}
       renderConvos();
       renderHead();
       renderContext();
@@ -3177,6 +3220,8 @@ function goDriver(view) {
 window.goDriver = goDriver;
 
 async function renderDriverView(view) {
+  state.driverView = view;
+  try { localStorage.setItem('lxl_driver_view', view); } catch (e) {}
   clearTimers();
   const main = document.getElementById('driverMain');
   if (!main) return;
