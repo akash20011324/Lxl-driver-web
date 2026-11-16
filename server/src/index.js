@@ -4274,6 +4274,70 @@ async function adjudicateRateCons4() {
   } catch (e) { console.error('rc adjudication4 failed', e); }
 }
 
+// Adjudication round 5 (2026-11-16): two owner corrections plus a
+// rate hunt. LXL-2996825's broker is Integrity Express Logistics
+// (owner: "that's Integrity Express not worldwide logistics" — its
+// document is an IEL dispatch sheet; the detector had picked a
+// consignee-side name). LXL-0311311324's broker is Werner
+// Enterprises (its booking thread is with twilliams@werner.com,
+// Route #2004576602, Polk City FL -> Danville IL); its rate
+// confirmation lives behind the Werner Bridge login, so the rate
+// is hunted on the OTR factoring schedules, which list each paid
+// load's gross by the broker's load number.
+async function adjudicateRateCons5() {
+  try {
+    const marker = 'rc-adjudication5-2026-11-16';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication5: ' + m);
+    const u1 = db.prepare("UPDATE rate_confirmations SET broker = 'Integrity Express Logistics' WHERE reference = 'LXL-2996825'").run();
+    if (u1.changes) log('LXL-2996825: broker -> Integrity Express Logistics (owner correction)');
+    const u2 = db.prepare("UPDATE rate_confirmations SET broker = 'Werner Enterprises' WHERE reference = 'LXL-0311311324'").run();
+    if (u2.changes) log('LXL-0311311324: broker -> Werner Enterprises (Werner booking thread, Route #2004576602)');
+    // --- hunt the Werner rate on the OTR schedules ---
+    try {
+      const row = db.prepare("SELECT rateCents FROM rate_confirmations WHERE reference = 'LXL-0311311324'").get();
+      if (row && row.rateCents == null) {
+        const users = db.prepare('SELECT * FROM users WHERE outlookRefreshToken IS NOT NULL ORDER BY isMainAdmin DESC, id').all();
+        let found = false;
+        for (const u of users) {
+          if (found) break;
+          let accessToken;
+          try { accessToken = await outlookAccessToken(u); } catch { continue; }
+          const page = await outlookGraph(accessToken, '/me/messages?$search=%22schedule%20has%20posted%22&$top=50&$select=id,subject,receivedDateTime,hasAttachments').catch(() => null);
+          const msgs = ((page && page.value) || []).filter((m) => m.hasAttachments && /schedule/i.test(m.subject || '') && String(m.receivedDateTime || '') >= '2026-09-25' && String(m.receivedDateTime || '') <= '2026-10-25');
+          log('schedule hunt: ' + msgs.length + ' candidate schedule email(s) in ' + (u.outlookEmail || u.name));
+          let checked = 0;
+          for (const m of msgs) {
+            if (found || checked >= 12) break;
+            const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`).catch(() => null);
+            for (const a of ((atts && atts.value) || [])) {
+              if (!a.id || (a.size || 0) >= 12000000 || !((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || ''))) continue;
+              checked += 1;
+              const { fileBuffer } = await outlookAttachmentBuffer(u, m.id, a.id).catch(() => ({}));
+              if (!fileBuffer || !fileBuffer.length) continue;
+              const text = await extractFileText(fileBuffer).catch(() => '');
+              const idx = text.indexOf('2004576602');
+              if (idx < 0) continue;
+              const ctx = text.slice(Math.max(0, idx - 60), idx + 200);
+              log('schedule context for 2004576602: ' + ctx.replace(/\s+/g, ' ').slice(0, 240));
+              const amts = [...text.slice(idx, idx + 200).matchAll(/\$?\s*([\d,]+\.\d{2})/g)]
+                .map((x) => amountToCents(x[1])).filter((c) => c != null && c >= 20000 && c <= 5000000);
+              if (amts.length) {
+                db.prepare("UPDATE rate_confirmations SET rateCents = ? WHERE reference = 'LXL-0311311324'").run(amts[0]);
+                log('LXL-0311311324: rate set to ' + amts[0] + ' (OTR schedule gross for Route #2004576602)');
+                found = true;
+              }
+            }
+          }
+        }
+        if (!found) log('LXL-0311311324: Route #2004576602 not found on the Sep-Oct OTR schedules — rate left blank');
+      }
+    } catch (e) { console.error('rc adjudication5 schedule hunt failed', e); }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication5 failed', e); }
+}
+
 async function createRateCon({ loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType, subject }) {
   // No duplicates, ever: the same file (by sha256 fingerprint) is the
   // same rate confirmation, whichever mailbox or upload it came from.
@@ -5862,7 +5926,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
