@@ -432,6 +432,9 @@ app.get('/api/outlook/callback', async (req, res) => {
   const fail = (msg) =>
     res.status(400).send(`<h1>Outlook connection failed</h1><p>${safe(msg)}</p><p><a href="/">Back to LXL Driver</a></p>`);
   if (error) return fail(error_description || error);
+  if (req.query.admin_consent) {
+    return res.status(200).send('<h1>Admin consent granted</h1><p>Dispatchers can now connect their Outlook mailbox from the Rate Confirmations page in LXL Driver.</p><p><a href="/">Back to LXL Driver</a></p>');
+  }
   const pending = state ? db.prepare('SELECT userId, createdAt FROM outlook_states WHERE state = ?').get(state) : null;
   if (!pending || Date.now() - pending.createdAt > OUTLOOK_STATE_TTL_MS) {
     if (state) db.prepare('DELETE FROM outlook_states WHERE state = ?').run(state);
@@ -3610,12 +3613,18 @@ function rcNormDate(y, mo, d) {
   const p = (n) => String(n).padStart(2, '0');
   return `${yy}-${p(mm)}-${p(dd)}`;
 }
-const RC_STREET_SUFFIX = /\b(STREET|ST|AVENUE|AVE|BOULEVARD|BLVD|ROAD|RD|DRIVE|DR|LANE|LN|COURT|CT|HIGHWAY|HWY|PARKWAY|PKWY|CIRCLE|CIR|PLACE|PL|TRAIL|TRL|WAY)\b/g;
+const RC_STREET_SUFFIX = /\b(STREET|ST|AVENUE|AVE|BOULEVARD|BLVD|ROAD|RD|DRIVE|DR|LANE|LN|COURT|CT|HIGHWAY|HWY|PARKWAY|PKWY|CIRCLE|CIR|PLACE|PL|TRAIL|TRL|WAY)\b/gi;
 function cleanCityName(city) {
   // Flattened RC text glues the street line onto the city ("TH STREET RANCHO
   // CUCAMONGA, CA 91730"). Cut through the last street-suffix word so only the
   // real city remains. A suffix as the FIRST word is left alone ("ST. LOUIS").
-  const c = String(city || '').trim().replace(/\s+/g, ' ');
+  let c = String(city || '').trim().replace(/\s+/g, ' ');
+  // Drop lead-in label words the address regex can swallow ("Delivery
+  // Lansdale", "to Valdosta", "Pickup Chicago").
+  const leadWords = new Set(['PICKUP', 'DELIVERY', 'ORIGIN', 'DESTINATION', 'FROM', 'TO', 'AT', 'PU', 'DL', 'SHIP', 'SHIPPING', 'RECEIVING', 'CONSIGNEE', 'SHIPPER']);
+  const tokens = c.split(' ');
+  while (tokens.length > 1 && leadWords.has(tokens[0].toUpperCase().replace(/[^A-Z]/g, ''))) tokens.shift();
+  c = tokens.join(' ');
   const matches = [...c.matchAll(RC_STREET_SUFFIX)];
   for (let i = matches.length - 1; i >= 0; i--) {
     const m = matches[i];
@@ -3667,17 +3676,36 @@ function extractRcDates(text) {
   while ((m = re2.exec(text))) push(rcNormDate(m[3], months[m[1].slice(0, 3).toLowerCase()], m[2]));
   return out;
 }
-function extractRcPlaces(text) {
-  const out = [];
-  const re = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
-  let m;
-  while ((m = re.exec(text))) {
-    const city = cleanCityName(m[1]);
-    if (!city) continue;
-    const key = city + '|' + m[2];
-    if (!out.some((p) => p.city + '|' + p.state === key)) out.push({ city, state: m[2], zip: m[3] });
-  }
-  return out;
+const US_STATE_CODES = new Set(['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY']);
+const US_STATE_NAMES = { ALABAMA: 'AL', ALASKA: 'AK', ARIZONA: 'AZ', ARKANSAS: 'AR', CALIFORNIA: 'CA', COLORADO: 'CO', CONNECTICUT: 'CT', DELAWARE: 'DE', FLORIDA: 'FL', GEORGIA: 'GA', HAWAII: 'HI', IDAHO: 'ID', ILLINOIS: 'IL', INDIANA: 'IN', IOWA: 'IA', KANSAS: 'KS', KENTUCKY: 'KY', LOUISIANA: 'LA', MAINE: 'ME', MARYLAND: 'MD', MASSACHUSETTS: 'MA', MICHIGAN: 'MI', MINNESOTA: 'MN', MISSISSIPPI: 'MS', MISSOURI: 'MO', MONTANA: 'MT', NEBRASKA: 'NE', NEVADA: 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', OHIO: 'OH', OKLAHOMA: 'OK', OREGON: 'OR', PENNSYLVANIA: 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC', 'SOUTH DAKOTA': 'SD', TENNESSEE: 'TN', TEXAS: 'TX', UTAH: 'UT', VERMONT: 'VT', VIRGINIA: 'VA', WASHINGTON: 'WA', 'WEST VIRGINIA': 'WV', WISCONSIN: 'WI', WYOMING: 'WY', 'DISTRICT OF COLUMBIA': 'DC' };
+function extractRcPlaces(text, subject) {
+  // Brokers write addresses many ways: "City, ST 12345", "City, ST" with no
+  // ZIP, and "City, Full State (Name)". Collect every form, in document
+  // order; if the document itself yields fewer than 2 places, also scan the
+  // email subject (brokers often put the route there).
+  const found = [];
+  const add = (city, state, zip, idx) => {
+    const c = cleanCityName(city);
+    if (!c || !US_STATE_CODES.has(state)) return;
+    if (!found.some((p) => p.city === c && p.state === state)) found.push({ city: c, state, zip: zip || '', idx });
+  };
+  const nameAlt = Object.keys(US_STATE_NAMES).join('|');
+  const scan = (t, base) => {
+    if (!t) return;
+    let m;
+    const reZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
+    while ((m = reZip.exec(t))) add(m[1], m[2], m[3], base + m.index);
+    const reNameZip = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\s+(\\d{5})', 'gi');
+    while ((m = reNameZip.exec(t))) add(m[1], US_STATE_NAMES[m[2].toUpperCase()], m[3], base + m.index);
+    const reName = new RegExp('([A-Z][A-Za-z .\'-]{1,30}),\\s*(' + nameAlt + ')\\b', 'gi');
+    while ((m = reName.exec(t))) add(m[1], US_STATE_NAMES[m[2].toUpperCase()], '', base + m.index);
+    const reNoZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\b(?!\s*\d)/g;
+    while ((m = reNoZip.exec(t))) add(m[1], m[2], '', base + m.index);
+  };
+  scan(text || '', 0);
+  if (found.length < 2) scan(subject || '', 1000000000);
+  found.sort((a, b) => a.idx - b.idx);
+  return found.map(({ city, state, zip }) => ({ city, state, zip }));
 }
 function extractRcLoadFields(text, subject) {
   const all = `${subject || ''}\n${text || ''}`;
@@ -3698,7 +3726,7 @@ function extractRcLoadFields(text, subject) {
     truckNo: truck ? truck[1] : null,
     trailerNo: trailer ? trailer[1] : null,
     driverHint: /\bakash/i.test(all) ? 'akash' : /\barsh/i.test(all) ? 'arsh' : null,
-    places: extractRcPlaces(text || ''),
+    places: extractRcPlaces(text || '', subject || ''),
     dates: extractRcDates(text || ''),
   };
 }
@@ -3757,7 +3785,7 @@ function saveRcImportRun(run) {
   db.prepare('INSERT OR REPLACE INTO rc_import_runs (id, startedAt, paidRefs, scheduleHashes, examined, schedules, mailboxErrors, mailboxes, cursor, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null, run.epoch || RC_IMPORT_EPOCH);
 }
-const RC_IMPORT_EPOCH = 'fix3-2026-11-16';
+const RC_IMPORT_EPOCH = 'parse2-2026-11-16';
 function rcImportRun(runId) {
   if (!runId) {
     const latest = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
