@@ -720,10 +720,15 @@ function dashDriverCard(d, load, rcByLoad, loc, live) {
     '<p class="small muted dw-foot">Pending requests: <strong>' + (Number(d.pendingRequests) || 0) + '</strong> &middot; Unread messages: <strong>' + (Number(d.unreadMessages) || 0) + '</strong>' + speed + citySlot + '</p>' +
     '</div>';
 }
-/* Route progress from a load's pickup/delivery times: 0 before pickup,
-   1 after delivery, null when the times are missing or invalid. */
+/* Route progress for the dashboard bar, as a 0..1 fraction. Prefers the
+   server's GPS-based progress (the same % the Loads page shows:
+   distance travelled toward the delivery, 99 at the receiver, 100 when
+   completed); falls back to the pickup/delivery time estimate only
+   when the server has no GPS progress for the load yet. */
 function routeProgress(load) {
-  if (!load || !load.pickupAt || !load.deliveryAt) return null;
+  if (!load) return null;
+  if (typeof load.progress === 'number') return load.progress / 100;
+  if (!load.pickupAt || !load.deliveryAt) return null;
   const p = Date.parse(load.pickupAt), q = Date.parse(load.deliveryAt);
   if (isNaN(p) || isNaN(q) || q <= p) return null;
   return Math.max(0, Math.min(1, (Date.now() - p) / (q - p)));
