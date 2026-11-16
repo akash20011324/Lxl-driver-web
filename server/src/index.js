@@ -631,8 +631,18 @@ driver.post('/loads/:id/complete', async (req, res) => {
       if (hereAt && Date.now() - new Date(hereAt).getTime() > LOCATION_FRESH_MS)
         return err(res, 400, 'Your location is stale — open the app so it reports your position, then try again.');
       const d = distanceMeters(here.lat, here.lng, coords.lat, coords.lng);
-      if (d > DELIVERY_GEOFENCE_M)
-        return err(res, 400, `You're ${formatDistance(d)} from the delivery location — complete the load once you've arrived at ${load.deliveryLocation}.`);
+      if (d > DELIVERY_GEOFENCE_M && !(req.body && req.body.confirmFar)) {
+        // Distance is a WARNING, not a hard block (owner's call,
+        // 2026-11-16): a wrong map pin must never trap a driver who
+        // has actually delivered. The app turns this 409 into
+        // "You're X away — are you sure you want to complete the
+        // load?" and resends with confirmFar to finish.
+        return res.status(409).json({
+          error: `You're ${formatDistance(d)} from the delivery location — are you sure you want to complete the load?`,
+          code: 'FAR_FROM_DELIVERY',
+          distanceM: Math.round(d),
+        });
+      }
     }
     withTransaction(db, () => {
       db.prepare("UPDATE loads SET status = 'completed', completedAt = ? WHERE id = ?").run(now(), load.id);
