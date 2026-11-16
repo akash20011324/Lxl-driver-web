@@ -1772,6 +1772,55 @@ async function outlookAttachmentBuffer(user, messageId, attachmentId) {
 // count for NOTHING until an admin categorizes one — categorizing creates
 // the cash entry. Profit always comes from the categorized books, never
 // from raw bank totals (owner's rule, 2026-11-16).
+// Auto-categorization (owner's ask, 2026-11-16: "I cannot stay there and
+// click categorize categorize"). Confident built-in rules first, then rules
+// LEARNED from the owner's own manual picks (a learned rule wins — his call
+// beats the guess). Anything unsure stays 'pending' for a one-tap pick, and
+// that pick teaches the system the pattern for next time.
+const BANK_AGGREGATORS = new Set(['INTUIT', 'PAYPAL', 'VENMO', 'SQUARE', 'CASHAPP']);
+function bankKeys(name) {
+  const tokens = String(name || '').toUpperCase().replace(/[^A-Z ]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!tokens.length) return [];
+  const primary = tokens.slice(0, tokens[0] === 'ZELLE' ? 5 : 3).join(' ');
+  const keys = [primary];
+  if (BANK_AGGREGATORS.has(tokens[0]) && tokens.length > 2) keys.push(tokens.slice(0, 2).join(' '));
+  return keys;
+}
+function bankKey(name) { return bankKeys(name)[0] || ''; }
+function builtinBankCategory(name, direction, amountCents) {
+  const s = String(name || '').toUpperCase();
+  if (direction === 'in') {
+    if (s.includes('OTR') || s.includes('BOLT')) return 'Factoring payment';
+    return null;
+  }
+  if (s.includes('PILOT') && amountCents >= 50000) return 'Fuel (Pilot weekly)';
+  if (s.includes('PREPASS') || s.includes('EZPASS') || s.includes('E-ZPASS') || s.includes('TOLL')) return 'Tolls';
+  if (s.includes('ZELLE') && (s.includes('AKASHDEEP') || s.includes('ARSH'))) return 'Driver pay';
+  if (s.includes('WIRE TRANSFER FEE') || s.includes('SERVICE CHARGE') || s.includes('MONTHLY FEE') || s.includes('RINGCENTRAL')) return 'Office expenses';
+  return null;
+}
+function matchBankCategory(tx) {
+  for (const key of bankKeys(tx.name)) {
+    const learned = db.prepare('SELECT category FROM bank_rules WHERE pattern = ? AND direction = ?').get(key, tx.direction);
+    if (learned) return learned.category;
+  }
+  return builtinBankCategory(tx.name, tx.direction, tx.amountCents);
+}
+function autoCategorizeTx(tx) {
+  const category = matchBankCategory(tx);
+  if (!category) return false;
+  const r = db.prepare('INSERT INTO cash_entries (direction, date, category, amountCents, truckId, note, source, loadId, createdAt) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?)')
+    .run(tx.direction, tx.date, category, tx.amountCents, tx.name, 'bank', now());
+  db.prepare("UPDATE bank_transactions SET status = 'categorized', entryId = ? WHERE id = ?").run(r.lastInsertRowid, tx.id);
+  return true;
+}
+function sweepBankPending() {
+  const pending = db.prepare("SELECT * FROM bank_transactions WHERE status = 'pending'").all();
+  let n = 0;
+  for (const tx of pending) if (autoCategorizeTx(tx)) n += 1;
+  return n;
+}
+
 app.post('/api/sync/bank', (req, res) => {
   const key = process.env.BANK_SYNC_KEY;
   if (!key) return err(res, 503, 'Bank sync is not configured');
@@ -1788,7 +1837,8 @@ app.post('/api/sync/bank', (req, res) => {
       Math.round(Number(t.amountCents)), t.direction === 'in' ? 'in' : 'out', now());
     if (r.changes) added += 1;
   }
-  res.json({ ok: true, added });
+  const autoCategorized = sweepBankPending();
+  res.json({ ok: true, added, autoCategorized });
 });
 
 admin.post('/cashflow/bank/:id/categorize', (req, res) => {
@@ -1802,6 +1852,10 @@ admin.post('/cashflow/bank/:id/categorize', (req, res) => {
       truckId ? Number(truckId) : null, note ? String(note) : tx.name, 'bank',
       loadId ? Number(loadId) : null, now());
   db.prepare("UPDATE bank_transactions SET status = 'categorized', entryId = ? WHERE id = ?").run(r.lastInsertRowid, tx.id);
+  for (const key of bankKeys(tx.name))
+    db.prepare('INSERT OR REPLACE INTO bank_rules (pattern, direction, category, createdAt) VALUES (?, ?, ?, ?)')
+      .run(key, tx.direction, String(category).trim(), now());
+  sweepBankPending();
   res.json({ ok: true, entryId: r.lastInsertRowid });
 });
 
@@ -1811,6 +1865,9 @@ admin.post('/cashflow/bank/:id/ignore', (req, res) => {
   db.prepare("UPDATE bank_transactions SET status = 'ignored' WHERE id = ?").run(tx.id);
   res.json({ ok: true });
 });
+
+// Process any backlog once at boot (e.g. right after a deploy).
+try { sweepBankPending(); } catch { /* bank tables not ready yet */ }
 
 admin.post('/cashflow/outlook-preview', async (req, res) => {
   try {

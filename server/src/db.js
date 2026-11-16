@@ -294,6 +294,15 @@ CREATE TABLE IF NOT EXISTS bank_transactions (
   createdAt TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS bank_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pattern TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  category TEXT NOT NULL,
+  createdAt TEXT NOT NULL,
+  UNIQUE (pattern, direction)
+);
+
 CREATE TABLE IF NOT EXISTS fixed_payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   category TEXT NOT NULL,

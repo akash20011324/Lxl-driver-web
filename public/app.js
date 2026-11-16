@@ -2916,7 +2916,7 @@ async function viewCashflow(main) {
     '<input name="note" placeholder="Note — e.g. Truck 1301"> ' +
     '<button class="btn-ghost btn-sm" type="submit">+ Add fixed payment</button></form>' +
     '<h2 class="cf-h2">Bank transactions — categorize</h2>' +
-    '<p class="small muted">Straight from your bank account. Nothing here counts until you categorize it — your profit comes from the categorized books, never from the bank total. Personal stuff: just Ignore it.</p>' +
+    '<p class="small muted">Straight from your bank account — most of these categorize themselves (factoring money in, Pilot weekly to Fuel, tolls, driver Zelles to Driver pay). Only the ones the system cannot place wait here: categorize one once and it learns that pattern for next time. Your profit comes from the categorized books, never from the bank total.</p>' +
     (bankPending.length ? bankPending.map(bankRow).join('') : '<p class="empty">Nothing waiting — every bank transaction is handled.</p>') +
     '<h2 class="cf-h2">Per truck</h2>' + (truckPanels || '<p class="empty">No trucks yet.</p>') +
     '<h2 class="cf-h2">Entries</h2>' +
