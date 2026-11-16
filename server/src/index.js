@@ -2485,21 +2485,25 @@ admin.get('/outlook/messages', async (req, res) => {
     const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
     // NOTE: do NOT combine $filter with $orderby here — Exchange rejects
     // hasAttachments + orderby with "The restriction or sort order is too
-    // complex for this operation." Filter server-side, sort newest-first
-    // in code, then take the first 20.
+    // complex for this operation." And $filter alone returns the OLDEST
+    // matching messages first (the first $top in store order), which hid
+    // every recent email behind the mailbox's earliest ones. So: pull
+    // the newest 500 messages with $orderby only, keep the ones with
+    // attachments in code, newest first, take 20.
     const path = search
       ? `/me/messages?${q({ $search: `"${search}"`, $top: '20', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`
-      : `/me/messages?${q({ $filter: 'hasAttachments eq true', $top: '50', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`;
+      : `/me/messages?${q({ $orderby: 'receivedDateTime desc', $top: '500', $select: 'id,subject,from,receivedDateTime,hasAttachments' })}`;
     const data = await outlookGraph(accessToken, path);
-    const list = (data.value || []).map((m) => ({
+    let list = (data.value || []).map((m) => ({
       id: m.id,
       subject: m.subject ?? '(no subject)',
       from: (m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || '',
       receivedAt: m.receivedDateTime,
       hasAttachments: !!m.hasAttachments,
     }));
-    if (!search) list.sort((a, b) => new Date(b.receivedAt || 0) - new Date(a.receivedAt || 0));
-    res.json(search ? list : list.slice(0, 20));
+    list.sort((a, b) => new Date(b.receivedAt || 0) - new Date(a.receivedAt || 0));
+    if (!search) list = list.filter((m) => m.hasAttachments).slice(0, 20);
+    res.json(list);
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
     console.error('outlook messages failed', e);
