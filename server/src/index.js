@@ -1681,7 +1681,11 @@ function truckMonthlyFor(monthParam, entries, advanceRows) {
     const revenueCents = trips.reduce((s, x) => s + x.rateCents, 0);
     const unattachedFuelCents = t.driverId ? db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM documents WHERE kind = 'fuel_receipt' AND loadId IS NULL AND driverId = ? AND substr(createdAt, 1, 7) = ?").get(t.driverId, monthParam).s : 0;
     const fuelCents = trips.reduce((s, x) => s + x.fuelCents, 0) + unattachedFuelCents;
-    const driverPayCents = trips.reduce((s, x) => s + x.driverPayCents, 0);
+    // Driver pay is for ALL the loads the driver did this month
+    // (owner, 2026-11-17) — not only the ones with a rate con — so it
+    // is summed over every load on the loads table for the month.
+    const monthLoadMiles = t.driverId ? db.prepare("SELECT COALESCE(SUM(miles), 0) AS s FROM loads WHERE driverId = ? AND status != 'cancelled' AND miles > 0 AND substr(pickupAt, 1, 7) = ?").get(t.driverId, monthParam).s : 0;
+    const driverPayCents = Math.round(monthLoadMiles * DRIVER_PAY_PER_MILE_CENTS);
     const maintCents = sumCatM(['Maintenance', 'Repairs']);
     const knownM = new Set(['Driver pay', 'Maintenance', 'Repairs']);
     const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && inMonth(e) && !knownM.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
@@ -1771,7 +1775,10 @@ admin.get('/cashflow', async (req, res) => {
     // loads + any uploaded without a load); driver pay = miles x $0.65.
     const unattachedFuelCents = t.driverId ? db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM documents WHERE kind = 'fuel_receipt' AND loadId IS NULL AND driverId = ?").get(t.driverId).s : 0;
     const fuelCents = trips.reduce((s, x) => s + x.fuelCents, 0) + unattachedFuelCents;
-    const driverPayCents = trips.reduce((s, x) => s + x.driverPayCents, 0);
+    // All-time driver pay likewise covers every load the driver did,
+    // not only the rate-con trips listed above.
+    const allLoadMiles = t.driverId ? db.prepare("SELECT COALESCE(SUM(miles), 0) AS s FROM loads WHERE driverId = ? AND status != 'cancelled' AND miles > 0").get(t.driverId).s : 0;
+    const driverPayCents = Math.round(allLoadMiles * DRIVER_PAY_PER_MILE_CENTS);
     const maintCents = sumCat(['Maintenance', 'Repairs']);
     const known = new Set(['Driver pay', 'Maintenance', 'Repairs']);
     const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && !known.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
