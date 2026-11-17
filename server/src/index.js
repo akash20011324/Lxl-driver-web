@@ -5431,13 +5431,23 @@ async function addMissingUberLoads() {
         notes: 'Uber Freight UF-1428399333. POD processed by Uber 2026-10-16. On OTR schedule LXLD-40. Added 2026-11-17 from the missing-loads hunt (owner confirmed: Arsh load).' },
     ];
     for (const d of defs) {
-      if (db.prepare('SELECT id FROM loads WHERE reference = ?').get(d.ref)) { log(d.ref + ' already exists, skipped'); continue; }
-      const ins = db.prepare(`INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`)
-        .run(d.ref, arsh.id, d.pickupLocation, d.pickupWarehouse, d.pickupAt, d.pickupTimezone, d.deliveryLocation, d.deliveryAt, d.deliveryTimezone, d.notes, d.deliveryAt, new Date().toISOString());
-      db.prepare(`INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId)
-        VALUES (?, ?, 'Uber Freight', ?, ?, ?, ?, ?, NULL)`)
-        .run(d.rcRef, ins.lastInsertRowid, d.pState, d.dState, d.pDate, d.dDate, d.rateCents);
+      let loadId;
+      const existing = db.prepare('SELECT id FROM loads WHERE reference = ?').get(d.ref);
+      if (existing) {
+        loadId = existing.id;
+        log(d.ref + ' load already there, checking its rate con');
+      } else {
+        const ins = db.prepare(`INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`)
+          .run(d.ref, arsh.id, d.pickupLocation, d.pickupWarehouse, d.pickupAt, d.pickupTimezone, d.deliveryLocation, d.deliveryAt, d.deliveryTimezone, d.notes, d.deliveryAt, new Date().toISOString());
+        loadId = ins.lastInsertRowid;
+      }
+      const rc = db.prepare('SELECT id FROM rate_confirmations WHERE reference = ? OR loadId = ?').get(d.rcRef, loadId);
+      if (!rc) {
+        db.prepare(`INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId, createdAt)
+          VALUES (?, ?, 'Uber Freight', ?, ?, ?, ?, ?, NULL, ?)`)
+          .run(d.rcRef, loadId, d.pState, d.dState, d.pDate, d.dDate, d.rateCents, new Date().toISOString());
+      }
       log('added ' + d.ref + ' for ' + arsh.name + ' at $' + (d.rateCents / 100).toFixed(2));
     }
     const t = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get();
