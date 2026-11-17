@@ -36,6 +36,12 @@
   .panel{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:13px 15px;}
   .grid2{display:grid; grid-template-columns:1.2fr .8fr; gap:9px;}
   @media (max-width:900px){ .grid2{grid-template-columns:1fr;} }
+  .donutwrap{display:flex; gap:16px; align-items:center; flex-wrap:wrap;}
+  .legend{display:flex; flex-direction:column; gap:6px; font-size:13.5px; flex:1; min-width:190px;}
+  .lrow{display:flex; align-items:center; gap:8px;}
+  .dot{width:10px; height:10px; border-radius:3px; flex:none;}
+  .lrow .amt{margin-left:auto; font-weight:700;}
+  .lrow .pct{color:var(--dim); width:40px; text-align:right; font-size:12px;}
   .err{background:rgba(251,113,133,.12); border:1px solid rgba(251,113,133,.4); border-radius:8px; padding:13px; font-size:14px;}
   .spin{color:var(--dim); text-align:center; padding:30px 0;}
 </style>
@@ -64,6 +70,21 @@ function monthName(key) { const [y, m] = key.split('-').map(Number); return new 
 function shiftMonth(key, d) { const [y, m] = key.split('-').map(Number); return new Date(y, m - 1 + d, 1).toISOString().slice(0, 7); }
 $('#prevM').onclick = () => { curKey = shiftMonth(curKey, -1); load(); };
 $('#nextM').onclick = () => { curKey = shiftMonth(curKey, 1); load(); };
+const PALETTE = ['#F2B705', '#3B82F6', '#34d399', '#a78bfa', '#fb7185', '#22d3ee', '#f97316', '#94a3b8', '#e879f9', '#84cc16', '#facc15', '#38bdf8'];
+function donut(groups, total) {
+  const R = 62, C = 2 * Math.PI * R;
+  let off = 0, segs = '';
+  groups.forEach((g, i) => {
+    const frac = total > 0 ? g.amountCents / total : 0;
+    const len = Math.max(frac * C - 2, 0);
+    segs += `<circle cx="80" cy="80" r="${R}" fill="none" stroke="${PALETTE[i % PALETTE.length]}" stroke-width="21"
+      stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 80 80)"/>`;
+    off += frac * C;
+  });
+  return `<svg width="160" height="160" viewBox="0 0 160 160">${segs}
+    <text x="80" y="74" text-anchor="middle" fill="#8494ab" font-size="11" font-weight="700">MONEY OUT</text>
+    <text x="80" y="95" text-anchor="middle" fill="#fff" font-size="16" font-weight="900">${money(total)}</text></svg>`;
+}
 
 async function load() {
   $('#mLabel').textContent = monthName(curKey);
@@ -101,17 +122,22 @@ async function load() {
     <div class="tile gn"><div class="tlab">Received · since May 2026</div><div class="tval in">${money(d.receivedCents)}</div><div class="tsub">all time</div></div>
     <div class="tile rd"><div class="tlab">Paid out · since May 2026</div><div class="tval out">${money(d.outCents)}</div><div class="tsub">all time</div></div>
     <div class="tile ${d.netCents >= 0 ? 'gn' : 'rd'}"><div class="tlab">Net · since May 2026</div><div class="tval ${d.netCents >= 0 ? 'in' : 'out'}">${money(d.netCents)}</div><div class="tsub">all time</div></div>`;
+  const outSorted = [...m.outGroups].sort((a, b) => b.amountCents - a.amountCents);
+  const legend = outSorted.map((g, i) => `<div class="lrow"><span class="dot" style="background:${PALETTE[i % PALETTE.length]}"></span><span>${g.category}${g.fixed ? ' · fixed' : ''}</span><span class="amt">${money(g.amountCents)}</span><span class="pct">${m.outTotalCents ? Math.round(g.amountCents / m.outTotalCents * 100) + '%' : ''}</span></div>`).join('');
   $('#root').innerHTML = `
   <div class="wall">${topTiles}</div>
+  <div class="grid2" style="margin-top:9px">
+    <div class="panel"><div class="sect" style="margin-top:0">Where the money went — ${monthName(curKey)}</div><div class="donutwrap">${donut(outSorted, m.outTotalCents)}<div class="legend">${legend}</div></div></div>
+    <div class="panel"><div class="sect" style="margin-top:0">Weekly — last 8 weeks</div><table><tr><th>Week</th><th class="n">In</th><th class="n">Out</th><th class="n">Net</th></tr>${weekRows}</table></div>
+  </div>
   <div class="sect">Expenses by category — ${monthName(curKey)}</div>
   <div class="wall">${catTiles || '<div class="tile"><div class="tlab">No expenses</div></div>'}</div>
   <div class="sect">Income by category — ${monthName(curKey)}</div>
   <div class="wall">${inTiles || '<div class="tile"><div class="tlab">No income</div></div>'}</div>
   <div class="sect">Trucks — ${monthName(curKey)}</div>
   <div class="panel"><table><tr><th>Truck</th><th class="n">Loads</th><th class="n">Revenue</th><th class="n">Fuel</th><th class="n">Driver pay</th><th class="n">Maint.</th><th class="n">Other</th><th class="n">Profit</th><th class="n">Margin</th></tr>${truckRows}</table></div>
-  <div class="grid2" style="margin-top:9px">
-    <div class="panel"><div class="sect" style="margin-top:0">Weekly — last 8 weeks</div><table><tr><th>Week</th><th class="n">In</th><th class="n">Out</th><th class="n">Net</th></tr>${weekRows}</table></div>
-    <div><div class="sect" style="margin-top:0">All time</div><div class="wall" style="grid-template-columns:1fr 1fr">${allTiles}</div>
+  <div style="margin-top:9px">
+    <div><div class="sect" style="margin-top:0">All time</div><div class="wall" style="grid-template-columns:1fr 1fr">${allTiles}</div></div>
     <div class="panel" style="margin-top:9px"><div class="sect" style="margin-top:0">Fixed monthly payments</div>
     ${(d.fixed || []).map(f => `<div style="display:flex;justify-content:space-between;font-size:13.5px;padding:4px 0;border-bottom:1px solid #131c2b"><span>${f.category}</span><b>${money(f.amountCents)}/mo</b></div>`).join('') || '<div style="color:var(--dim)">None set</div>'}
     <div style="color:var(--dim);font-size:12px;margin-top:8px">Bank inbox waiting: <b style="color:var(--txt)">${(d.bankPending || []).length}</b></div></div></div>
