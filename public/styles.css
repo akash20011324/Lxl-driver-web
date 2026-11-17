@@ -1441,3 +1441,4 @@ body.maintenance-bg .sidebar { background: rgba(5, 9, 18, 0.45); backdrop-filter
 .cf6-table th{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:#8494ab;text-align:left;padding:5px 7px;border-bottom:1px solid #22314d}
 .cf6-table td{padding:6px 7px;border-bottom:1px solid rgba(34,49,77,.55)}
 .cf6-table .n{text-align:right;font-variant-numeric:tabular-nums}
+.doc-upload{margin-top:10px}

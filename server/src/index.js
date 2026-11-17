@@ -2229,6 +2229,40 @@ admin.get('/loads', (_req, res) => {
   res.json(rows.map(serializeLoad));
 });
 
+// Admin document upload (added 2026-11-17): dispatch files paperwork
+// for loads the drivers ran before the app or outside it — before this,
+// only drivers could upload, so historical PODs had nowhere to go. The
+// document is filed under the load's driver.
+admin.post('/documents', upload.single('file'), (req, res) => {
+  const { kind, loadId, category, label, amountCents } = req.body || {};
+  if (!req.file) return err(res, 400, 'file is required');
+  if (!DOC_KINDS.includes(kind)) return err(res, 400, 'Invalid document kind');
+  let load = null;
+  if (loadId) {
+    load = db.prepare('SELECT * FROM loads WHERE id = ?').get(loadId);
+    if (!load) return err(res, 404, 'Load not found');
+  }
+  const fileId = insertFileRow(req.file, 'document', null, req.user.id);
+  const id = db
+    .prepare(
+      'INSERT INTO documents (kind, loadId, category, label, amountCents, fileId, driverId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    )
+    .run(
+      kind,
+      load ? load.id : null,
+      category ?? null,
+      label ?? null,
+      amountCents != null && amountCents !== '' ? Number(amountCents) : null,
+      fileId,
+      load ? load.driverId : null,
+      now(),
+    ).lastInsertRowid;
+  const row = db
+    .prepare('SELECT d.*, f.originalFilename, f.mimeType FROM documents d JOIN files f ON f.id = d.fileId WHERE d.id = ?')
+    .get(id);
+  res.status(201).json(serializeDocument(row));
+});
+
 admin.post('/loads', (req, res) => {
   const {
     driverId,
@@ -2286,13 +2320,16 @@ admin.post('/loads', (req, res) => {
 
 admin.post('/loads/:id/status', (req, res) => {
   const { status } = req.body || {};
-  if (status !== 'cancelled' && status !== 'active') return err(res, 400, 'status must be "cancelled" or "active"');
+  if (status !== 'cancelled' && status !== 'active' && status !== 'completed') return err(res, 400, 'status must be "cancelled", "active" or "completed"');
   const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.id);
   if (!load) return err(res, 404, 'Load not found');
   withTransaction(db, () => {
-    // Reopening a load completed too early: clear the completion time
-    // and put the driver's units back on the road.
-    if (status === 'active' && load.status === 'completed') {
+    // Admin completion (added 2026-11-17): historical loads entered by
+    // dispatch have no driver-app completion, so admins can close them
+    // out. The completion time is the delivery time.
+    if (status === 'completed' && load.status !== 'completed') {
+      db.prepare("UPDATE loads SET status = 'completed', completedAt = COALESCE(completedAt, deliveryAt, ?) WHERE id = ?").run(now(), load.id);
+    } else if (status === 'active' && load.status === 'completed') {
       db.prepare("UPDATE loads SET status = 'active', completedAt = NULL WHERE id = ?").run(load.id);
       db.prepare("UPDATE trucks SET yardStatus = 'road' WHERE driverId = ?").run(load.driverId);
       db.prepare("UPDATE trailers SET yardStatus = 'road' WHERE driverId = ?").run(load.driverId);

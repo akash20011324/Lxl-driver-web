@@ -2234,6 +2234,7 @@ function loadCardHtml(l) {
     '<div class="lc-bottom"><span class="lc-driver">Driver: ' + esc(l.driverName || '—') +
       (l.truckUnit ? ' &middot; Truck ' + esc(l.truckUnit) : '') + (l.trailerUnit ? ' &middot; Trailer ' + esc(l.trailerUnit) : '') + '</span>' +
     '<span class="lc-actions"><button class="btn btn-ghost btn-sm" data-edit-load="' + l.id + '">Edit</button> ' +
+      (l.status === 'active' ? '<button class="btn btn-ghost btn-sm" data-complete-load="' + l.id + '">Complete</button> ' : '') +
       (l.status === 'completed' ? '<button class="btn btn-ghost btn-sm" data-reopen-load="' + l.id + '">Reopen</button> ' : '') +
       (l.status === 'cancelled' ? '<button class="btn btn-ghost btn-sm" data-reactivate-load="' + l.id + '">Reactivate</button> ' : '') +
       '<button class="btn btn-danger-o btn-sm" data-delete-load="' + l.id + '">Delete</button></span></div>' +
@@ -2352,6 +2353,14 @@ async function viewLoads(main) {
     } catch (err) { showError(err); }
   }));
 
+  main.querySelectorAll('[data-complete-load]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Mark this load completed? Use this for loads that were run outside the app.')) return;
+    try {
+      await api('/api/admin/loads/' + b.dataset.completeLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'completed' }) });
+      toast('Load marked completed.', 'ok');
+      renderAdminView('loads');
+    } catch (err) { showError(err); }
+  }));
   main.querySelectorAll('[data-reopen-load]').forEach((b) => b.addEventListener('click', async () => {
     if (!confirm('Reopen this load? It becomes active again for the driver.')) return;
     try {
@@ -2444,7 +2453,8 @@ async function viewDocuments(main) {
     return '<div class="doc-panel" data-doc-panel="' + key + '"' + (key === openKey ? '' : ' hidden') + '>' +
       (items.length
         ? '<label class="doc-selectall"><input type="checkbox" data-doc-all="' + key + '"> Select all</label>' + items.map(docRow).join('')
-        : '<p class="empty">' + KINDS[t].empty + '</p>') + '</div>';
+        : '<p class="empty">' + KINDS[t].empty + '</p>') +
+      '<div class="doc-upload"><label class="btn btn-ghost btn-sm">+ Upload file<input type="file" hidden data-doc-upload="' + load.id + ':' + KINDS[t].kinds[0] + '"></label></div></div>';
   };
   const sectionHtml = (load) => {
     const badge = load.bolStatus
@@ -2509,6 +2519,20 @@ async function viewDocuments(main) {
     main.querySelectorAll('[data-doc-panel]').forEach(p => { if (p.dataset.docPanel.split(':')[0] === loadId) p.hidden = true; });
     main.querySelectorAll('[data-doc-btn]').forEach(x => { if (x.dataset.docBtn.split(':')[0] === loadId) x.classList.remove('active'); });
     if (willOpen) { panel.hidden = false; b.classList.add('active'); }
+  }));
+  main.querySelectorAll('[data-doc-upload]').forEach(inp => inp.addEventListener('change', async () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    const parts = String(inp.dataset.docUpload).split(':');
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('kind', parts[1]);
+    fd.append('loadId', parts[0]);
+    try {
+      await api('/api/admin/documents', { method: 'POST', body: fd });
+      toast('File uploaded.', 'ok');
+      renderAdminView('documents');
+    } catch (err) { showError(err); }
   }));
   main.querySelectorAll('[data-doc-check]').forEach(c => c.addEventListener('change', () => {
     const id = Number(c.dataset.docCheck);
