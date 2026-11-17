@@ -1125,13 +1125,17 @@ async function viewDashboard(main) {
   let bankCircleHtml = '';
   if (bb && Number.isFinite(bb.currentCents)) {
     const upd = bb.at ? new Date(bb.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+    // The headline is the AVAILABLE balance — the number BofA itself
+    // headlines in its app (owner, 2026-11-17); the posted (ledger)
+    // balance rides underneath.
+    const headline = Number.isFinite(bb.availableCents) ? bb.availableCents : bb.currentCents;
     bankCircleHtml = '<div class="bank-circle">' +
       '<svg width="140" height="140" viewBox="0 0 140 140">' +
       '<circle cx="70" cy="70" r="54" fill="none" stroke="#F2B705" stroke-width="20"></circle>' +
-      '<text x="70" y="66" text-anchor="middle" fill="#ffffff" font-size="16" font-weight="700">' + fmtMoney(bb.currentCents) + '</text>' +
+      '<text x="70" y="66" text-anchor="middle" fill="#ffffff" font-size="16" font-weight="700">' + fmtMoney(headline) + '</text>' +
       '<text x="70" y="84" text-anchor="middle" fill="#cbd5e1" font-size="10">bank balance</text></svg>' +
       '<div class="small muted" style="text-align:center;margin-top:2px">' + esc(bb.name || 'Bank account') + (bb.mask ? ' ••' + esc(bb.mask) : '') + '</div>' +
-      (Number.isFinite(bb.availableCents) ? '<div class="small" style="text-align:center">Available ' + fmtMoney(bb.availableCents) + '</div>' : '') +
+      '<div class="small" style="text-align:center">Posted ' + fmtMoney(bb.currentCents) + '</div>' +
       (upd ? '<div class="small muted" style="text-align:center">Updated ' + esc(upd) + '</div>' : '') +
       '</div>';
   }
@@ -2964,7 +2968,7 @@ async function viewCashflow(main) {
   const kpiWall = cf6Tile('Money in — ' + monthName, mo.inTotalCents, 'pos') +
     cf6Tile('Money out — ' + monthName, mo.outTotalCents, 'neg') +
     cf6Tile('Profit — ' + monthName, mo.profitCents, mo.profitCents >= 0 ? 'pos' : 'neg', mo.inTotalCents ? Math.round((mo.profitCents / mo.inTotalCents) * 100) + '% of money in' : '') +
-    (bb ? '<div class="cf6-tile gold"><div class="cf6-lab">Bank — ' + esc(bb.name || 'Bank') + ' ••' + esc(bb.mask || '') + '</div><div class="cf6-val">' + fmtMoney(bb.currentCents) + '</div><div class="cf6-sub">Available ' + fmtMoney(bb.availableCents || 0) + (bbWhen ? ' · ' + esc(bbWhen) : '') + '</div></div>' : cf6Tile('Bank', 0, 'gold', 'Not connected'));
+    (bb ? '<div class="cf6-tile gold"><div class="cf6-lab">Bank — ' + esc(bb.name || 'Bank') + ' ••' + esc(bb.mask || '') + '</div><div class="cf6-val">' + fmtMoney(Number.isFinite(bb.availableCents) ? bb.availableCents : bb.currentCents) + '</div><div class="cf6-sub">Posted ' + fmtMoney(bb.currentCents) + (bbWhen ? ' · ' + esc(bbWhen) : '') + '</div></div>' : cf6Tile('Bank', 0, 'gold', 'Not connected'));
   const outSorted = [...(mo.outGroups || [])].sort((a, b) => b.amountCents - a.amountCents);
   const cf6Donut = (() => {
     const total = mo.outTotalCents || 0;
