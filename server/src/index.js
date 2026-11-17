@@ -1675,7 +1675,7 @@ function truckMonthlyFor(monthParam, entries, advanceRows) {
        WHERE l.driverId = ? AND rc.rateCents IS NOT NULL AND substr(rc.pickupDate, 1, 7) = ? ORDER BY l.id DESC`,
     ).all(t.driverId, monthParam).map((trip) => {
       const parts = tripProfitParts(trip);
-      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, miles: trip.miles ?? null, fuelCents: parts.fuelCents, driverPayCents: parts.driverPayCents, otherCents: parts.otherCents, expensesCents: parts.expensesCents, profitCents: trip.rateCents - parts.expensesCents };
+      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, miles: trip.miles > 0 ? trip.miles : null, fuelCents: parts.fuelCents, driverPayCents: parts.driverPayCents, otherCents: parts.otherCents, expensesCents: parts.expensesCents, profitCents: trip.rateCents - parts.expensesCents };
     }) : [];
     const sumCatM = (cats) => entries.filter((e) => e.direction === 'out' && e.truckId === t.id && inMonth(e) && cats.includes(e.category)).reduce((s, e) => s + e.amountCents, 0);
     const revenueCents = trips.reduce((s, x) => s + x.rateCents, 0);
@@ -1763,7 +1763,7 @@ admin.get('/cashflow', async (req, res) => {
        WHERE l.driverId = ? AND rc.rateCents IS NOT NULL ORDER BY l.id DESC`,
     ).all(t.driverId).map((trip) => {
       const parts = tripProfitParts(trip);
-      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, miles: trip.miles ?? null, fuelCents: parts.fuelCents, driverPayCents: parts.driverPayCents, otherCents: parts.otherCents, expensesCents: parts.expensesCents, profitCents: trip.rateCents - parts.expensesCents };
+      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, miles: trip.miles > 0 ? trip.miles : null, fuelCents: parts.fuelCents, driverPayCents: parts.driverPayCents, otherCents: parts.otherCents, expensesCents: parts.expensesCents, profitCents: trip.rateCents - parts.expensesCents };
     }) : [];
     const sumCat = (cats) => entries.filter((e) => e.direction === 'out' && e.truckId === t.id && cats.includes(e.category)).reduce((s, e) => s + e.amountCents, 0);
     const revenueCents = trips.reduce((s, x) => s + x.rateCents, 0);
@@ -3107,29 +3107,37 @@ function cityStateOf(location) {
     const m = parts[i].match(/^([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/i);
     if (m && i > 0) return parts[i - 1] + ', ' + m[1].toUpperCase();
   }
+  // No comma before the state: "... Kent OH 44240" as one segment.
+  const whole = String(location || '').match(/([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$/);
+  if (whole) return whole[1].trim() + ', ' + whole[2].toUpperCase();
+  return null;
+}
+
+async function nominatimSearch(q) {
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(q), { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' }, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return null;
+    const rows = await r.json();
+    if (rows && rows[0]) {
+      const la = Number(rows[0].lat), lo = Number(rows[0].lon);
+      if (Number.isFinite(la) && Number.isFinite(lo)) return { lat: la, lng: lo };
+    }
+  } catch { /* caller falls through */ }
   return null;
 }
 
 // Fast coordinates for the miles calculation: the stored/gate pin when
 // there is one, otherwise a city-level Nominatim lookup (plenty
-// accurate for road miles, and far faster than the full address chain).
+// accurate for road miles, and far faster than the full address chain),
+// then the raw address text, then the full geocode chain.
 async function milesCoords(load, kind) {
   const lat = kind === 'pickup' ? load.pickupLat : load.deliveryLat;
   const lng = kind === 'pickup' ? load.pickupLng : load.deliveryLng;
   if (typeof lat === 'number' && typeof lng === 'number') return { lat, lng };
-  const cs = cityStateOf(kind === 'pickup' ? load.pickupLocation : load.deliveryLocation);
-  if (cs) {
-    try {
-      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(cs), { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' }, signal: AbortSignal.timeout(6000) });
-      if (r.ok) {
-        const rows = await r.json();
-        if (rows && rows[0]) {
-          const la = Number(rows[0].lat), lo = Number(rows[0].lon);
-          if (Number.isFinite(la) && Number.isFinite(lo)) return { lat: la, lng: lo };
-        }
-      }
-    } catch { /* fall through to the full geocode chain */ }
-  }
+  const text = kind === 'pickup' ? load.pickupLocation : load.deliveryLocation;
+  const cs = cityStateOf(text);
+  if (cs) { const hit = await nominatimSearch(cs); if (hit) return hit; }
+  if (text && String(text).trim().length > 3) { const hit = await nominatimSearch(String(text).trim()); if (hit) return hit; }
   return kind === 'pickup' ? ensurePickupCoords(load) : ensureDeliveryCoords(load);
 }
 
@@ -6616,7 +6624,7 @@ app.listen(PORT, () => {
         // One retry per boot for loads whose route failed last time.
         try { db.prepare("UPDATE loads SET miles = NULL WHERE miles = -1").run(); } catch { /* ignore */ }
         const rows = db.prepare("SELECT * FROM loads WHERE miles IS NULL AND status != 'cancelled'").all();
-        for (const l of rows) { try { await ensureLoadMiles(l); } catch { /* best effort */ } }
+        for (const l of rows) { try { await ensureLoadMiles(l); } catch { /* best effort */ } await new Promise((r) => setTimeout(r, 350)); }
       } catch { /* miles column may not exist yet */ }
     })();
   }, 20000);
