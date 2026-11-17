@@ -2955,27 +2955,53 @@ async function viewCashflow(main) {
     '<span class="cf-amt ' + (e.direction === 'in' ? 'in' : 'out') + '">' + (e.direction === 'in' ? '+' : '−') + fmtMoney(e.amountCents) + '</span>' +
     (e.url ? '<a class="btn-ghost btn-sm" href="' + e.url + '" target="_blank" rel="noopener">File</a>' : '') +
     (e.virtual ? '' : '<button class="btn-ghost btn-sm" data-delentry="' + e.id + '">Delete</button>') + '</div>';
+  // ---- Design 6 (KPI Wall + donut) display blocks, chosen 2026-11-17 ----
+  const CF6_PALETTE = ['#F2B705', '#3B82F6', '#34d399', '#a78bfa', '#fb7185', '#22d3ee', '#f97316', '#94a3b8', '#e879f9', '#84cc16', '#facc15', '#38bdf8'];
+  const cf6Tile = (label, cents, cls, sub) => '<div class="cf6-tile ' + (cls || '') + '"><div class="cf6-lab">' + label + '</div><div class="cf6-val">' + fmtMoney(cents) + '</div>' + (sub ? '<div class="cf6-sub">' + sub + '</div>' : '') + '</div>';
+  const cf6Share = (part, total) => total > 0 ? Math.round((part / total) * 100) + '% of money out' : '';
+  const bb = d.bankBalance || null;
+  const bbWhen = bb && bb.at ? new Date(bb.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  const kpiWall = cf6Tile('Money in — ' + monthName, mo.inTotalCents, 'pos') +
+    cf6Tile('Money out — ' + monthName, mo.outTotalCents, 'neg') +
+    cf6Tile('Profit — ' + monthName, mo.profitCents, mo.profitCents >= 0 ? 'pos' : 'neg', mo.inTotalCents ? Math.round((mo.profitCents / mo.inTotalCents) * 100) + '% of money in' : '') +
+    (bb ? '<div class="cf6-tile gold"><div class="cf6-lab">Bank — ' + esc(bb.name || 'Bank') + ' ••' + esc(bb.mask || '') + '</div><div class="cf6-val">' + fmtMoney(bb.currentCents) + '</div><div class="cf6-sub">Available ' + fmtMoney(bb.availableCents || 0) + (bbWhen ? ' · ' + esc(bbWhen) : '') + '</div></div>' : cf6Tile('Bank', 0, 'gold', 'Not connected'));
+  const outSorted = [...(mo.outGroups || [])].sort((a, b) => b.amountCents - a.amountCents);
+  const cf6Donut = (() => {
+    const total = mo.outTotalCents || 0;
+    const R = 62, C = 2 * Math.PI * R;
+    let off = 0, segs = '';
+    outSorted.forEach((g, i) => {
+      const frac = total > 0 ? g.amountCents / total : 0;
+      const len = Math.max(frac * C - 2, 0);
+      segs += '<circle cx="80" cy="80" r="' + R + '" fill="none" stroke="' + CF6_PALETTE[i % CF6_PALETTE.length] + '" stroke-width="21" stroke-dasharray="' + len + ' ' + (C - len) + '" stroke-dashoffset="' + (-off) + '" transform="rotate(-90 80 80)"/>';
+      off += frac * C;
+    });
+    return '<svg width="160" height="160" viewBox="0 0 160 160">' + segs +
+      '<text x="80" y="74" text-anchor="middle" fill="#8494ab" font-size="11" font-weight="700">MONEY OUT</text>' +
+      '<text x="80" y="95" text-anchor="middle" fill="#fff" font-size="15" font-weight="900">' + fmtMoney(total) + '</text></svg>';
+  })();
+  const cf6Legend = outSorted.map((g, i) => '<div class="cf6-lrow"><span class="cf6-dot" style="background:' + CF6_PALETTE[i % CF6_PALETTE.length] + '"></span><span>' + esc(g.category) + (g.fixed ? ' · fixed' : '') + '</span><span class="cf6-amt">' + fmtMoney(g.amountCents) + '</span><span class="cf6-pct">' + (mo.outTotalCents ? Math.round((g.amountCents / mo.outTotalCents) * 100) + '%' : '') + '</span></div>').join('');
+  const cf6WeekRows = weekly.map((w) => '<tr><td>' + esc(String(w.weekStart).slice(5)) + '</td><td class="n" style="color:#4ade80">' + fmtMoney(w.inCents) + '</td><td class="n" style="color:#f87171">' + fmtMoney(w.outCents) + '</td><td class="n" style="color:' + (w.inCents - w.outCents >= 0 ? '#4ade80' : '#f87171') + '">' + fmtMoney(w.inCents - w.outCents) + '</td></tr>').join('');
+  const cf6ExpTiles = outSorted.map((g) => cf6Tile(g.category + (g.fixed ? ' · fixed' : ''), g.amountCents, 'neg', cf6Share(g.amountCents, mo.outTotalCents))).join('');
+  const cf6IncTiles = [...(mo.inGroups || [])].sort((a, b) => b.amountCents - a.amountCents).map((g) => cf6Tile(g.category, g.amountCents, 'pos')).join('');
+  const cf6TruckRows = truckMonthStats.map((t) => '<tr><td><strong>' + esc(t.unitNumber) + '</strong></td><td class="n">' + (t.loadsInMonth != null ? t.loadsInMonth : (t.trips ? t.trips.length : 0)) + '</td><td class="n">' + fmtMoney(t.revenueCents) + '</td><td class="n">' + fmtMoney(t.fuelCents) + '</td><td class="n">' + fmtMoney(t.driverPayCents) + '</td><td class="n">' + fmtMoney(t.maintCents) + '</td><td class="n">' + fmtMoney(t.otherCents) + '</td><td class="n" style="color:' + (t.profitCents >= 0 ? '#4ade80' : '#f87171') + ';font-weight:800">' + fmtMoney(t.profitCents) + '</td><td class="n">' + (t.revenueCents ? Math.round((t.profitCents / t.revenueCents) * 100) + '%' : '—') + '</td></tr>').join('');
+  const allTimeWall = cf6Tile('Booked (rate cons)', d.bookedCents || 0, '') +
+    cf6Tile('Received', d.receivedCents || 0, 'pos') +
+    cf6Tile('Paid out', d.outCents || 0, 'neg') +
+    cf6Tile('Net', d.netCents || 0, (d.netCents || 0) >= 0 ? 'pos' : 'neg');
   main.innerHTML = '<div class="rc-head"><h1>Cash Flow</h1><span>' +
     '<button class="btn-blue btn" id="cfOutlookBtn">Import from Outlook</button> ' +
     '<button class="btn-ghost btn" id="cfAddToggle">+ Add entry</button></span></div>' +
-    '<h2 class="cf-h2">1 · Company total — since May 2026</h2>' +
-    '<div class="rc-stats">' +
-    '<div class="rc-stat"><div class="num">' + fmtMoney(d.bookedCents || 0) + '</div><div class="lab">Booked (rate cons)</div></div>' +
-    '<div class="rc-stat"><div class="num" style="color:#4ade80">' + fmtMoney(d.receivedCents || 0) + '</div><div class="lab">Received</div></div>' +
-    '<div class="rc-stat"><div class="num" style="color:#f87171">' + fmtMoney(d.outCents || 0) + '</div><div class="lab">Money out</div></div>' +
-    '<div class="rc-stat"><div class="num" style="color:#F2B705">' + fmtMoney(d.netCents || 0) + '</div><div class="lab">Net (received − out)</div></div></div>' +
-    '<section class="cf-panel"><div class="cf-cols"><div><h4>Money in — by category</h4>' + groupRows(totals.inGroups, '+') + '</div>' +
-    '<div><h4>Money out — by category</h4>' + groupRows(totals.outGroups, '−') + '</div></div>' +
-    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTotal">⬇ Download total report (CSV)</button></div></section>' +
-    '<section class="cf-panel"><div class="cf-panel-head"><h3>2 · Monthly — ' + esc(monthName) + ' profit</h3>' +
-    '<span><button class="btn-ghost btn-sm" id="cfMonthPrev">‹ Prev</button> <input type="month" id="cfMonthInput" value="' + esc(mo.key || '') + '"> <button class="btn-ghost btn-sm" id="cfMonthGo">Show month</button> <button class="btn-ghost btn-sm" id="cfMonthNext">Next ›</button></span></div>' +
-    '<div class="cf-cols"><div><h4>Money in</h4>' + groupRows(mo.inGroups, '+') +
-    '<div class="cf-group total"><span>Total in</span><strong>+' + fmtMoney(mo.inTotalCents) + '</strong></div></div>' +
-    '<div><h4>Money out</h4>' + groupRows(mo.outGroups, '−') +
-    '<div class="cf-group total"><span>Total out</span><strong>−' + fmtMoney(mo.outTotalCents) + '</strong></div></div></div>' +
-    '<div class="cf-profit">Profit for ' + esc(monthName) + ': <strong style="color:' + (mo.profitCents >= 0 ? '#4ade80' : '#f87171') + '">' + fmtMoney(mo.profitCents) + '</strong></div>' +
+    '<div class="cf6-monthbar"><button class="btn-ghost btn-sm" id="cfMonthPrev">‹ Prev</button><strong>' + esc(monthName) + '</strong><span><input type="month" id="cfMonthInput" value="' + esc(mo.key || '') + '"> <button class="btn-ghost btn-sm" id="cfMonthGo">Show month</button></span><button class="btn-ghost btn-sm" id="cfMonthNext">Next ›</button></div>' +
+    '<div class="cf6-wall">' + kpiWall + '</div>' +
+    '<div class="cf6-grid2">' +
+    '<section class="cf6-panel"><div class="cf6-sect">Where the money went — ' + esc(monthName) + '</div><div class="cf6-donutwrap">' + cf6Donut + '<div class="cf6-legend">' + cf6Legend + '</div></div></section>' +
+    '<section class="cf6-panel"><div class="cf6-sect">Weekly — last 8 weeks</div><table class="cf6-table"><tr><th>Week</th><th class="n">In</th><th class="n">Out</th><th class="n">Net</th></tr>' + cf6WeekRows + '</table></section></div>' +
+    '<div class="cf6-sect">Expenses by category — ' + esc(monthName) + '</div><div class="cf6-wall">' + cf6ExpTiles + '</div>' +
+    '<div class="cf6-sect">Income by category — ' + esc(monthName) + '</div><div class="cf6-wall">' + cf6IncTiles + '</div>' +
+    '<div class="cf6-sect">Trucks — ' + esc(monthName) + '</div>' +
+    '<section class="cf6-panel"><table class="cf6-table"><tr><th>Truck</th><th class="n">Loads</th><th class="n">Revenue</th><th class="n">Fuel (receipts)</th><th class="n">Pay (mi × $0.65)</th><th class="n">Maint.</th><th class="n">Other</th><th class="n">Profit</th><th class="n">Margin</th></tr>' + cf6TruckRows + '</table>' +
     '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlMonthly">⬇ Download ' + esc(monthName) + ' report (CSV)</button></div></section>' +
-    '<div class="cf-chart"><div class="cf-chart-title">Last 8 weeks — <span style="color:#4ade80">money in</span> vs <span style="color:#f87171">money out</span></div><div class="cf-weeks">' + weekCols + '</div></div>' +
     '<section class="card hidden" id="cfOutlookCard"><h3>Import from Outlook</h3>' +
     (outlook.connected
       ? '<p class="small muted">Connected: ' + esc(outlook.email || '') + ' — pick the factoring payment, toll bill or Pilot weekly email; the amount is read from its attachment and you confirm it before saving.</p>' +
@@ -2998,6 +3024,10 @@ async function viewCashflow(main) {
     '<label id="cfFileLabel">Receipt <input name="file" type="file" accept="image/*,.pdf"></label>' +
     '</div><div class="form-actions"><button class="btn" type="submit">Save entry</button> ' +
     '<button class="btn-ghost" type="button" id="cfAddCancel">Cancel</button></div></form></section>' +
+    '<div class="cf6-sect">All time — since May 2026</div><div class="cf6-wall">' + allTimeWall + '</div>' +
+    '<section class="cf-panel"><div class="cf-cols"><div><h4>Money in — by category (all time)</h4>' + groupRows(totals.inGroups, '+') + '</div>' +
+    '<div><h4>Money out — by category (all time)</h4>' + groupRows(totals.outGroups, '−') + '</div></div>' +
+    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTotal">⬇ Download total report (CSV)</button></div></section>' +
     '<h2 class="cf-h2">Fixed monthly payments</h2>' +
     '<p class="small muted">Set once — they count automatically in every month\'s profit above. Don\'t add these by hand as entries too.</p>' +
     (fixedRows || '<p class="empty">No fixed payments yet.</p>') +
@@ -3009,7 +3039,7 @@ async function viewCashflow(main) {
     '<h2 class="cf-h2">Bank transactions — categorize</h2>' +
     '<p class="small muted">Straight from your bank account — most of these categorize themselves (factoring money in, Pilot weekly to Fuel, tolls, driver Zelles to Driver pay). Only the ones the system cannot place wait here: categorize one once and it learns that pattern for next time. Your profit comes from the categorized books, never from the bank total.</p>' +
     (bankPending.length ? bankPending.map(bankRow).join('') : '<p class="empty">Nothing waiting — every bank transaction is handled.</p>') +
-    '<h2 class="cf-h2">3 · Per truck — ' + esc(monthName) + '</h2>' +
+    '<h2 class="cf-h2">Per truck — trip detail — ' + esc(monthName) + '</h2>' +
     '<p class="small muted">What each truck made this month: rate-con revenue minus fuel (the receipts the driver uploaded on each load), driver pay (each load\'s miles × $0.65), maintenance and other tagged costs. Use the month switcher in section 2 to change the month.</p>' +
     (truckMonthPanels || '<p class="empty">No trucks yet.</p>') +
     '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTrucks">⬇ Download per-truck ' + esc(monthName) + ' report (CSV)</button></div>' +

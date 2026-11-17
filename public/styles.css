@@ -1411,3 +1411,33 @@ body.maintenance-bg .sidebar { background: rgba(5, 9, 18, 0.45); backdrop-filter
 .cf-donut-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px}
 .cf-donut-row strong{margin-left:auto}
 .cf-donut-dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
+
+/* Cash Flow Design 6 — KPI Wall + donut (chosen by the owner 2026-11-17) */
+.cf6-monthbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 14px}
+.cf6-monthbar strong{font-size:19px}
+.cf6-monthbar input[type="month"]{background:rgba(10,18,32,.85);color:#e8eef7;border:1px solid #263650;border-radius:7px;padding:5px 8px;font:inherit;font-size:13px}
+.cf6-wall{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+@media(max-width:900px){.cf6-wall{grid-template-columns:repeat(2,1fr)}}
+.cf6-tile{background:rgba(10,18,32,.88);border:1px solid #22314d;border-radius:11px;padding:12px 13px;min-height:78px}
+.cf6-tile .cf6-lab{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:#8494ab;font-weight:800}
+.cf6-tile .cf6-val{font-size:23px;font-weight:900;margin-top:3px;color:#fff}
+.cf6-tile .cf6-sub{font-size:11.5px;color:#8494ab;margin-top:2px}
+.cf6-tile.pos .cf6-val{color:#4ade80}
+.cf6-tile.neg .cf6-val{color:#f87171}
+.cf6-tile.gold{border-color:rgba(242,183,5,.55)}
+.cf6-tile.gold .cf6-val{color:#F2B705}
+.cf6-sect{font-size:12.5px;letter-spacing:.11em;text-transform:uppercase;color:#aebdd2;font-weight:900;margin:20px 0 9px}
+.cf6-grid2{display:grid;grid-template-columns:1.15fr .85fr;gap:9px;margin-top:9px}
+@media(max-width:900px){.cf6-grid2{grid-template-columns:1fr}}
+.cf6-panel{background:rgba(10,18,32,.88);border:1px solid #22314d;border-radius:11px;padding:13px 15px}
+.cf6-panel .cf6-sect{margin-top:0}
+.cf6-donutwrap{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.cf6-legend{display:flex;flex-direction:column;gap:6px;font-size:13.5px;flex:1;min-width:190px}
+.cf6-lrow{display:flex;align-items:center;gap:8px}
+.cf6-dot{width:10px;height:10px;border-radius:3px;flex:none}
+.cf6-lrow .cf6-amt{margin-left:auto;font-weight:700}
+.cf6-lrow .cf6-pct{color:#8494ab;width:40px;text-align:right;font-size:12px}
+.cf6-table{width:100%;border-collapse:collapse;font-size:13.5px}
+.cf6-table th{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:#8494ab;text-align:left;padding:5px 7px;border-bottom:1px solid #22314d}
+.cf6-table td{padding:6px 7px;border-bottom:1px solid rgba(34,49,77,.55)}
+.cf6-table .n{text-align:right;font-variant-numeric:tabular-nums}
