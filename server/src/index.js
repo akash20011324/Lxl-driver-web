@@ -5457,6 +5457,53 @@ async function addMissingUberLoads() {
   } catch (e) { console.error('missing uber loads failed', e); }
 }
 
+// Find the rate cons for Akash's 3 missing loads ON THE PORTAL
+// (owner, 2026-11-17: "Check the rc on the portal"). The mailbox
+// import read some of these attachments server-side (the Pro #26257
+// email yielded text) — if it saved the files, their text can be
+// read here exactly like the Circle RC was. Read-only diagnostic:
+// log every matching rate con row, file and document, and run the
+// RC readers over any stored file found.
+async function findMissingRcFiles() {
+  try {
+    const marker = 'find-missing-rc-files-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('missing rc files: ' + m);
+    const targets = ['4700709', '26257', '409386'];
+    for (const t of targets) {
+      const rcs = db.prepare('SELECT id, reference, broker, rateCents, fileId, loadId FROM rate_confirmations WHERE reference LIKE ?').all('%' + t + '%');
+      for (const r of rcs) log(t + ': rc row ' + r.id + ' ref=' + r.reference + ' broker=' + (r.broker || '') + ' rateCents=' + r.rateCents + ' fileId=' + r.fileId + ' loadId=' + r.loadId);
+      if (!rcs.length) log(t + ': no rate con row');
+      const files = db.prepare('SELECT id, storedFilename, originalFilename FROM files WHERE originalFilename LIKE ? OR storedFilename LIKE ?').all('%' + t + '%', '%' + t + '%');
+      for (const f of files) log(t + ': file ' + f.id + ' original=' + f.originalFilename + ' stored=' + f.storedFilename);
+      if (!files.length) log(t + ': no file by name');
+      const docs = db.prepare('SELECT id, kind, label, fileId, loadId FROM documents WHERE label LIKE ?').all('%' + t + '%');
+      for (const d of docs) log(t + ': document ' + d.id + ' kind=' + d.kind + ' label=' + d.label + ' fileId=' + d.fileId + ' loadId=' + d.loadId);
+      const fileIds = new Set();
+      for (const r of rcs) if (r.fileId) fileIds.add(r.fileId);
+      for (const f of files) fileIds.add(f.id);
+      for (const d of docs) if (d.fileId) fileIds.add(d.fileId);
+      for (const fid of fileIds) {
+        const f = getFileRow(fid);
+        if (!f || !f.storedFilename) { log(t + ': fileId ' + fid + ' has no stored file'); continue; }
+        try {
+          const buf = fs.readFileSync(path.join(UPLOADS_DIR, f.storedFilename));
+          const text = String(await extractFileText(buf) || '').replace(/\s+/g, ' ');
+          log(t + ': file ' + fid + ' text chars=' + text.length);
+          const places = scanRcPlaces(text, 0);
+          log(t + ': places: ' + places.map((p) => p.city + ', ' + p.state + (p.zip ? ' ' + p.zip : '')).join(' | '));
+          const det = extractRateConDetails(text);
+          log(t + ': rate read: ' + JSON.stringify(det));
+          const fields = extractRcLoadFields(text);
+          log(t + ': fields: ' + JSON.stringify(fields));
+        } catch (e) { log(t + ': could not read file ' + fid + ': ' + e.message); }
+      }
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('missing rc files failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7375,7 +7422,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
