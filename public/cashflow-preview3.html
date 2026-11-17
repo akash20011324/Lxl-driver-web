@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LXL Cash Flow — Design 3 · Fleet Board</title>
+<style>
+  :root{ --blue:#1E40AF; --blue2:#3B82F6; --gold:#F2B705; --bg:#07090f; --panel:#0e1420; --line:#22304a;
+    --txt:#eef2f7; --dim:#8fa1bb; --in:#34d399; --out:#fb7185; }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--txt); font-family:"Arial Narrow", -apple-system, "Segoe UI", Roboto, sans-serif; padding:16px 14px 40px;}
+  .wrap{max-width:1200px; margin:0 auto;}
+  .boardhead{display:flex; align-items:center; gap:14px; flex-wrap:wrap; background:linear-gradient(90deg, #0b1220, #101d3d);
+    border:1px solid var(--line); border-bottom:4px solid var(--gold); border-radius:10px; padding:13px 18px;}
+  .logo{font-weight:900; font-size:27px; letter-spacing:1px;} .logo span{color:var(--gold);}
+  .boardhead h1{font-size:19px; letter-spacing:2.5px; text-transform:uppercase;}
+  .back{margin-left:auto; color:var(--gold); text-decoration:none; font-size:13.5px; border:1px solid rgba(242,183,5,.45); padding:6px 11px; border-radius:6px;}
+  .notice{background:rgba(242,183,5,.09); border:1px dashed rgba(242,183,5,.5); color:#ffe9a8; border-radius:8px; padding:8px 12px; font-size:13px; margin:12px 0;}
+  .strip{display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:12px;}
+  @media (max-width:860px){ .strip{grid-template-columns:1fr 1fr;} .fleet{grid-template-columns:1fr !important;} }
+  .cell{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:11px 14px;}
+  .clab{font-size:11px; letter-spacing:1.6px; color:var(--dim); text-transform:uppercase; font-weight:700;}
+  .cval{font-size:27px; font-weight:900; margin-top:3px;}
+  .in{color:var(--in);} .out{color:var(--out);} .gold{color:var(--gold);}
+  .monthbar{display:flex; align-items:center; gap:11px; margin:2px 0 12px;}
+  .mbtn{width:36px; height:36px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:#fff; font-size:18px; cursor:pointer;}
+  .mlabel{font-size:18px; font-weight:800; letter-spacing:1px; min-width:165px; text-align:center; text-transform:uppercase;}
+  .fleet{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .truck{background:var(--panel); border:1px solid var(--line); border-top:5px solid var(--blue2); border-radius:10px; padding:15px 17px;}
+  .truck.gold{border-top-color:var(--gold);}
+  .thead{display:flex; align-items:baseline; gap:10px;}
+  .tunit{font-size:25px; font-weight:900; letter-spacing:.5px;}
+  .tmeta{color:var(--dim); font-size:13px;}
+  .tprofit{margin-left:auto; text-align:right;}
+  .tprofit .v{font-size:25px; font-weight:900;}
+  .gauge{height:9px; background:#1a2438; border-radius:99px; overflow:hidden; margin:11px 0 4px;}
+  .gauge i{display:block; height:100%; background:linear-gradient(90deg, var(--blue2), var(--gold));}
+  .glabel{display:flex; justify-content:space-between; font-size:11.5px; color:var(--dim); letter-spacing:.6px; text-transform:uppercase;}
+  .costs{display:grid; grid-template-columns:1fr 1fr; gap:4px 16px; margin-top:11px; font-size:14.5px;}
+  .costs div{display:flex; justify-content:space-between; border-bottom:1px dashed #1d2a44; padding:4px 0;}
+  .trips{margin-top:12px;}
+  .trips h3{font-size:12px; letter-spacing:1.6px; color:var(--dim); text-transform:uppercase; margin-bottom:6px;}
+  .trip{display:flex; gap:8px; font-size:13.5px; padding:5px 0; border-bottom:1px solid #16203a; align-items:baseline;}
+  .trip .ref{font-weight:800; color:#cfe0ff;}
+  .trip .p{margin-left:auto; font-weight:800; white-space:nowrap;}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:15px 17px; margin-top:12px;}
+  .panel h2{font-size:14px; letter-spacing:2px; text-transform:uppercase; margin-bottom:11px;}
+  .wrow{display:grid; grid-template-columns:86px 1fr 118px; gap:10px; align-items:center; font-size:13px; padding:4px 0;}
+  .wtrack{height:12px; background:#16203a; border-radius:4px; position:relative; overflow:hidden;}
+  .wfill{position:absolute; top:0; bottom:0; left:0;}
+  .cats{display:grid; grid-template-columns:1fr 1fr; gap:4px 26px; font-size:14.5px;}
+  @media (max-width:700px){ .cats{grid-template-columns:1fr;} .costs{grid-template-columns:1fr;} }
+  .cats div{display:flex; justify-content:space-between; border-bottom:1px dashed #1d2a44; padding:4.5px 0;}
+  .tag{font-size:10px; background:rgba(59,130,246,.18); color:#bcd6ff; border:1px solid rgba(59,130,246,.4); padding:0 5px; border-radius:4px; margin-left:5px;}
+  .err{background:rgba(251,113,133,.12); border:1px solid rgba(251,113,133,.4); border-radius:10px; padding:14px; font-size:14.5px;}
+  .spin{color:var(--dim); text-align:center; padding:34px 0; font-size:15px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="boardhead">
+    <div class="logo">LXL<span>➤</span></div>
+    <h1>Fleet Cash Board</h1>
+    <a class="back" href="/">← Portal</a>
+  </div>
+  <div class="notice">⭐ <b>Design 3 · Fleet Board preview</b> — real, live books. Your current Cash Flow page is untouched.</div>
+  <div class="monthbar">
+    <button class="mbtn" id="prevM">‹</button>
+    <div class="mlabel" id="mLabel">…</div>
+    <button class="mbtn" id="nextM">›</button>
+  </div>
+  <div id="root"><div class="spin">Loading the board…</div></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const money = (c, dec) => (c == null ? '—' : (c < 0 ? '-$' : '$') + Math.abs(c / 100).toLocaleString('en-US', { minimumFractionDigits: dec ? 2 : 0, maximumFractionDigits: dec ? 2 : 0 }));
+let curKey = new Date().toISOString().slice(0, 7);
+function monthName(key) { const [y, m] = key.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }); }
+function shiftMonth(key, d) { const [y, m] = key.split('-').map(Number); return new Date(y, m - 1 + d, 1).toISOString().slice(0, 7); }
+$('#prevM').onclick = () => { curKey = shiftMonth(curKey, -1); load(); };
+$('#nextM').onclick = () => { curKey = shiftMonth(curKey, 1); load(); };
+
+async function load() {
+  $('#mLabel').textContent = monthName(curKey);
+  const token = localStorage.getItem('lxl_token') || '';
+  if (!token) { $('#root').innerHTML = '<div class="err">You are not signed in on this browser. Open the portal, sign in, then reload this page.</div>'; return; }
+  let d;
+  try {
+    const r = await fetch('/api/admin/cashflow?month=' + curKey, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+  } catch (e) { $('#root').innerHTML = '<div class="err">Could not load the books (' + e.message + '). Reload to try again.</div>'; return; }
+  const m = d.month, bb = d.bankBalance;
+  const tripsByTruck = {};
+  (d.trucks || []).forEach(t => { tripsByTruck[t.truckId] = t.trips || []; });
+  const truckPanels = (d.truckMonthly || []).map((t, i) => {
+    const margin = t.revenueCents > 0 ? Math.max(0, Math.round(t.profitCents / t.revenueCents * 100)) : 0;
+    const trips = (tripsByTruck[t.truckId] || []).slice(0, 5).map(tr => `<div class="trip"><span class="ref">${tr.reference}</span>
+      <span style="color:var(--dim)">rate ${money(tr.rateCents)} · costs ${money(tr.expensesCents)}</span>
+      <span class="p ${tr.profitCents >= 0 ? 'in' : 'out'}">${money(tr.profitCents)}</span></div>`).join('') || '<div class="trip">No loads on the books yet</div>';
+    return `<div class="truck ${i === 0 ? 'gold' : ''}">
+      <div class="thead"><div><div class="tunit">TRUCK ${t.unitNumber}</div><div class="tmeta">${t.loadsInMonth} loads · ${monthName(curKey)}</div></div>
+      <div class="tprofit"><div class="clab">Profit</div><div class="v ${t.profitCents >= 0 ? 'in' : 'out'}">${money(t.profitCents)}</div></div></div>
+      <div class="gauge"><i style="width:${margin}%"></i></div>
+      <div class="glabel"><span>Profit margin</span><span>${t.revenueCents > 0 ? Math.round(t.profitCents / t.revenueCents * 100) : 0}% of ${money(t.revenueCents)} revenue</span></div>
+      <div class="costs">
+        <div><span>Fuel (Pilot)</span><b>${money(t.fuelCents)}</b></div>
+        <div><span>Driver pay</span><b>${money(t.driverPayCents)}</b></div>
+        <div><span>Maintenance &amp; repairs</span><b>${money(t.maintCents)}</b></div>
+        <div><span>Other costs</span><b>${money(t.otherCents)}</b></div>
+      </div>
+      <div class="trips"><h3>Latest loads · rate → profit (all time)</h3>${trips}</div>
+    </div>`;
+  }).join('');
+  const maxW = Math.max(1, ...d.weekly.map(w => w.inCents + w.outCents));
+  const weeks = d.weekly.map(w => {
+    const tot = w.inCents + w.outCents, ip = tot > 0 ? w.inCents / tot * 100 : 0;
+    const lab = new Date(w.weekStart + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const net = w.inCents - w.outCents;
+    return `<div class="wrow"><span style="color:var(--dim)">Wk of ${lab}</span>
+      <span class="wtrack"><span class="wfill" style="width:${Math.round(tot / maxW * 100)}%;background:linear-gradient(90deg, var(--in) ${ip}%, var(--out) ${ip}%)"></span></span>
+      <span style="text-align:right">net <b class="${net >= 0 ? 'in' : 'out'}">${money(net)}</b></span></div>`;
+  }).join('');
+  const outCats = [...m.outGroups].sort((a, b) => b.amountCents - a.amountCents).map(g => `<div><span>${g.category}${g.fixed ? '<span class="tag">fixed</span>' : ''}</span><b class="out">${money(g.amountCents)}</b></div>`).join('');
+  const inCats = m.inGroups.map(g => `<div><span>${g.category}</span><b class="in">${money(g.amountCents)}</b></div>`).join('');
+  const bankUpd = bb && bb.at ? new Date(bb.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+
+  $('#root').innerHTML = `
+  <div class="strip">
+    <div class="cell"><div class="clab">Booked · all loads</div><div class="cval gold">${money(d.bookedCents)}</div></div>
+    <div class="cell"><div class="clab">In · ${monthName(curKey)}</div><div class="cval in">${money(m.inTotalCents)}</div></div>
+    <div class="cell"><div class="clab">Out · ${monthName(curKey)}</div><div class="cval out">${money(m.outTotalCents)}</div></div>
+    <div class="cell"><div class="clab">Bank · BofA ••${bb ? (bb.mask || '1214') : '1214'}</div><div class="cval gold">${bb ? money(bb.currentCents) : '—'}</div><div style="color:var(--dim);font-size:12px">Avail ${bb ? money(bb.availableCents) : '—'} · ${bankUpd}</div></div>
+  </div>
+  <div class="fleet">${truckPanels}</div>
+  <div class="panel"><h2>Weekly cash — last 8 weeks</h2>${weeks}
+    <div style="color:var(--dim);font-size:12.5px;margin-top:7px">Company since May 2026: received <b class="in">${money(d.receivedCents)}</b> · paid out <b class="out">${money(d.outCents)}</b> · net <b class="${d.netCents >= 0 ? 'in' : 'out'}">${money(d.netCents)}</b> · this month's profit <b class="${m.profitCents >= 0 ? 'in' : 'out'}">${money(m.profitCents)}</b></div></div>
+  <div class="panel"><h2>${monthName(curKey)} — money in</h2><div class="cats">${inCats || '<div>No income this month</div>'}</div></div>
+  <div class="panel"><h2>${monthName(curKey)} — money out</h2><div class="cats">${outCats || '<div>No expenses this month</div>'}</div></div>`;
+}
+load();
+</script>
+</body>
+</html>

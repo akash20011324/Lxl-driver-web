@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LXL Cash Flow — Design 2 · Ledger</title>
+<style>
+  :root{ --blue:#1E40AF; --gold:#C9A227; --ink:#1c2430; --paper:#f7f4ec; --line:#ddd5c2; --dim:#6b7280; --in:#157347; --out:#b02a37; }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:#20242c; color:var(--ink); font-family:Georgia, "Times New Roman", serif; padding:20px 14px 44px;}
+  .wrap{max-width:880px; margin:0 auto;}
+  .sheet{background:var(--paper); border-radius:6px; padding:30px 34px 26px; box-shadow:0 14px 44px rgba(0,0,0,.5);}
+  .top{display:flex; align-items:baseline; gap:12px; border-bottom:3px double var(--ink); padding-bottom:12px; flex-wrap:wrap;}
+  .firm{font-size:25px; font-weight:700; letter-spacing:.4px;}
+  .firm span{color:var(--gold);}
+  .doc{margin-left:auto; text-align:right; font-size:13px; color:var(--dim); font-family:-apple-system, "Segoe UI", sans-serif;}
+  .doc b{color:var(--ink); font-size:15px;}
+  .notice{font-family:-apple-system, "Segoe UI", sans-serif; background:#fdf3d7; border:1px solid #e5cf8a; border-radius:8px;
+    padding:9px 12px; font-size:13px; margin:14px 0 4px; color:#6b5510;}
+  .notice a{color:var(--blue); font-weight:700;}
+  .monthbar{display:flex; align-items:center; gap:10px; margin:14px 0 4px; font-family:-apple-system, "Segoe UI", sans-serif;}
+  .mbtn{width:34px; height:34px; border-radius:50%; border:1px solid #c9c2ae; background:#fff; font-size:17px; cursor:pointer;}
+  .mlabel{font-size:17px; font-weight:700; min-width:160px; text-align:center;}
+  h2{font-size:15px; letter-spacing:1.6px; text-transform:uppercase; margin:22px 0 6px; color:#3d4654;
+    border-bottom:1px solid var(--line); padding-bottom:5px;}
+  table{width:100%; border-collapse:collapse; font-size:15.5px;}
+  td{padding:5.5px 4px;}
+  td.n{text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap;}
+  tr.tot td{border-top:1.5px solid var(--ink); font-weight:700; padding-top:8px;}
+  tr.grand td{border-top:3px double var(--ink); font-size:17.5px; font-weight:700; padding-top:9px;}
+  .in{color:var(--in);} .out{color:var(--out);}
+  .tag{font-family:-apple-system, "Segoe UI", sans-serif; font-size:10px; background:#e8ecf5; color:var(--blue);
+    border:1px solid #b9c6e8; padding:1px 6px; border-radius:999px; margin-left:6px;}
+  .small{font-size:13px; color:var(--dim);}
+  .bankline{display:flex; gap:8px; flex-wrap:wrap; align-items:baseline; background:#fff; border:1px solid var(--line);
+    border-radius:8px; padding:11px 14px; margin-top:16px; font-size:15px;}
+  .bankline b{font-size:19px; color:#8a6d14;}
+  .foot{margin-top:24px; border-top:1px solid var(--line); padding-top:10px; font-size:12.5px; color:var(--dim);
+    font-family:-apple-system, "Segoe UI", sans-serif; display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;}
+  .err{background:#fbe9ea; border:1px solid #e5a3ab; border-radius:8px; padding:13px; font-size:14.5px; font-family:-apple-system, sans-serif;}
+  .spin{color:#e8e4da; text-align:center; padding:36px 0; font-family:-apple-system, sans-serif;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="sheet">
+    <div class="top">
+      <div class="firm">LUBANA XPRESS <span>LLC</span></div>
+      <div class="doc"><b>Statement of Cash Flow</b><br>Design 2 · Ledger preview</div>
+    </div>
+    <div class="notice">⭐ <b>Design preview</b> — real, live books. Your current Cash Flow page is untouched. <a href="/">Back to portal</a></div>
+    <div class="monthbar">
+      <button class="mbtn" id="prevM">‹</button>
+      <div class="mlabel" id="mLabel">…</div>
+      <button class="mbtn" id="nextM">›</button>
+      <span class="small" style="margin-left:auto">All figures from the categorized books</span>
+    </div>
+    <div id="root"><div class="spin" style="color:#6b7280">Loading your books…</div></div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const money = (c, dec) => (c == null ? '—' : (c < 0 ? '−$' : '$') + Math.abs(c / 100).toLocaleString('en-US', { minimumFractionDigits: dec ? 2 : 0, maximumFractionDigits: dec ? 2 : 0 }));
+let curKey = new Date().toISOString().slice(0, 7);
+function monthName(key) { const [y, m] = key.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }); }
+function shiftMonth(key, d) { const [y, m] = key.split('-').map(Number); return new Date(y, m - 1 + d, 1).toISOString().slice(0, 7); }
+$('#prevM').onclick = () => { curKey = shiftMonth(curKey, -1); load(); };
+$('#nextM').onclick = () => { curKey = shiftMonth(curKey, 1); load(); };
+
+async function load() {
+  $('#mLabel').textContent = monthName(curKey);
+  const token = localStorage.getItem('lxl_token') || '';
+  if (!token) { $('#root').innerHTML = '<div class="err">You are not signed in on this browser. Open the portal, sign in, then reload this page.</div>'; return; }
+  let d;
+  try {
+    const r = await fetch('/api/admin/cashflow?month=' + curKey, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+  } catch (e) { $('#root').innerHTML = '<div class="err">Could not load the books (' + e.message + '). Reload to try again.</div>'; return; }
+  const m = d.month, bb = d.bankBalance;
+  const inLines = m.inGroups.map(g => `<tr><td>${g.category}</td><td class="n">${money(g.amountCents, 1)}</td></tr>`).join('') || '<tr><td class="small">No income recorded</td><td></td></tr>';
+  const outLines = [...m.outGroups].sort((a, b) => b.amountCents - a.amountCents).map(g => `<tr><td>${g.category}${g.fixed ? '<span class="tag">fixed monthly</span>' : ''}</td><td class="n">${money(g.amountCents, 1)}</td></tr>`).join('') || '<tr><td class="small">No expenses recorded</td><td></td></tr>';
+  const truckStmts = (d.truckMonthly || []).map(t => `
+    <h2>Truck ${t.unitNumber} — ${monthName(curKey)} · ${t.loadsInMonth} loads</h2>
+    <table>
+      <tr><td>Revenue (loads)</td><td class="n in">${money(t.revenueCents, 1)}</td></tr>
+      <tr><td>Fuel (Pilot)</td><td class="n">${money(t.fuelCents, 1)}</td></tr>
+      <tr><td>Driver pay</td><td class="n">${money(t.driverPayCents, 1)}</td></tr>
+      <tr><td>Maintenance &amp; repairs</td><td class="n">${money(t.maintCents, 1)}</td></tr>
+      <tr><td>Other costs</td><td class="n">${money(t.otherCents, 1)}</td></tr>
+      <tr class="tot"><td>Truck profit</td><td class="n ${t.profitCents >= 0 ? 'in' : 'out'}">${money(t.profitCents, 1)}</td></tr>
+    </table>`).join('');
+  const ledger = (d.entries || []).slice(0, 25).map(e => `<tr>
+      <td class="small" style="white-space:nowrap">${e.date || ''}</td>
+      <td>${e.category}${e.note ? ' <span class="small">— ' + String(e.note).slice(0, 55) + '</span>' : ''}${e.truckUnit ? ' <span class="small">· Trk ' + e.truckUnit + '</span>' : ''}</td>
+      <td class="n in">${e.direction === 'in' ? money(e.amountCents, 1) : ''}</td>
+      <td class="n out">${e.direction === 'out' ? money(e.amountCents, 1) : ''}</td></tr>`).join('');
+  const allIn = (d.totals.inGroups || []).map(g => `<tr><td>${g.category}</td><td class="n">${money(g.amountCents, 1)}</td></tr>`).join('');
+  const allOut = (d.totals.outGroups || []).map(g => `<tr><td>${g.category}</td><td class="n">${money(g.amountCents, 1)}</td></tr>`).join('');
+  const bankUpd = bb && bb.at ? new Date(bb.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+
+  $('#root').innerHTML = `
+    <h2>Income — ${monthName(curKey)}</h2>
+    <table>${inLines}<tr class="tot"><td>Total money in</td><td class="n in">${money(m.inTotalCents, 1)}</td></tr></table>
+    <h2>Expenses — ${monthName(curKey)}</h2>
+    <table>${outLines}<tr class="tot"><td>Total money out</td><td class="n out">${money(m.outTotalCents, 1)}</td></tr></table>
+    <table><tr class="grand"><td>Net profit — ${monthName(curKey)}</td><td class="n ${m.profitCents >= 0 ? 'in' : 'out'}">${money(m.profitCents, 1)}</td></tr></table>
+    <div class="bankline"><span>🏦 Bank of America ••${bb ? (bb.mask || '1214') : '1214'}</span><b>${bb ? money(bb.currentCents) : '—'}</b>
+      <span class="small">Available ${bb ? money(bb.availableCents) : '—'} · Updated ${bankUpd}</span>
+      <span style="margin-left:auto" class="small">Booked on rate cons (all time): <b style="color:#8a6d14">${money(d.bookedCents)}</b></span></div>
+    ${truckStmts}
+    <h2>Ledger — latest entries</h2>
+    <table><tr><td class="small">Date</td><td class="small">Description</td><td class="small" style="text-align:right">In</td><td class="small" style="text-align:right">Out</td></tr>${ledger}</table>
+    <h2>Company — since May 2026</h2>
+    <table>
+      <tr><td colspan="2" class="small" style="padding-top:8px">MONEY IN BY CATEGORY</td></tr>${allIn}
+      <tr><td colspan="2" class="small" style="padding-top:10px">MONEY OUT BY CATEGORY</td></tr>${allOut}
+      <tr class="tot"><td>Total received</td><td class="n in">${money(d.receivedCents, 1)}</td></tr>
+      <tr class="tot"><td>Total paid out</td><td class="n out">${money(d.outCents, 1)}</td></tr>
+      <tr class="grand"><td>Net — since May 2026</td><td class="n ${d.netCents >= 0 ? 'in' : 'out'}">${money(d.netCents, 1)}</td></tr>
+    </table>
+    <div class="foot"><span>Lubana Xpress LLC · Reefer carrier · Indianapolis, IN</span><span>Generated from the live portal books</span></div>`;
+}
+load();
+</script>
+</body>
+</html>
