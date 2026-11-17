@@ -2080,7 +2080,7 @@ function autoCategorizeTx(tx) {
   // counted as fixed payments, so their bank debits must never also
   // become cash entries — mark them ignored instead.
   const nm = String(tx.name || '').toUpperCase();
-  if (tx.direction === 'out' && (nm.includes('TRANSPORT FUNDING') || nm.includes('METEORE') || nm.includes('GARRETT'))) {
+  if (tx.direction === 'out' && (nm.includes('TRANSPORT FUNDIN') || nm.includes('METEORE') || nm.includes('GARRETT'))) {
     db.prepare("UPDATE bank_transactions SET status = 'ignored', entryId = NULL WHERE id = ?").run(tx.id);
     return true;
   }
@@ -5058,7 +5058,7 @@ async function setupFixedTruckPayments() {
     }
     // Remove the bank entries for these three payees (all months) and
     // mark their bank transactions ignored so they never come back.
-    const txs = db.prepare("SELECT * FROM bank_transactions WHERE direction = 'out' AND (UPPER(name) LIKE '%TRANSPORT FUNDING%' OR UPPER(name) LIKE '%METEORE%' OR UPPER(name) LIKE '%GARRETT%')").all();
+    const txs = db.prepare("SELECT * FROM bank_transactions WHERE direction = 'out' AND (UPPER(name) LIKE '%TRANSPORT FUNDIN%' OR UPPER(name) LIKE '%METEORE%' OR UPPER(name) LIKE '%GARRETT%')").all();
     const keys = new Set();
     for (const tx of txs) {
       // Clear the reference first — cash_entries is FK-referenced by
@@ -5076,6 +5076,33 @@ async function setupFixedTruckPayments() {
     db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
     log('done (' + txs.length + ' bank tx ignored)');
   } catch (e) { console.error('fixed truck payments failed', e); }
+}
+
+// Follow-up to the fixed-payments setup: the bank truncates the
+// Transport Funding debit name to "TRANSPORT FUNDIN" (no final G),
+// so the first pass matched none of those transactions and their
+// entries survived — double-counting next to the new fixed payment.
+// This pass uses the truncated prefix and removes them.
+async function fixTransportFundingFixed() {
+  try {
+    const marker = 'fixed-truck-payments-tf-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('fixed truck payments TF: ' + m);
+    const txs = db.prepare("SELECT * FROM bank_transactions WHERE direction = 'out' AND UPPER(name) LIKE '%TRANSPORT FUNDIN%'").all();
+    const keys = new Set();
+    for (const tx of txs) {
+      const entryId = tx.entryId;
+      db.prepare("UPDATE bank_transactions SET status = 'ignored', entryId = NULL WHERE id = ?").run(tx.id);
+      if (entryId) {
+        db.prepare('DELETE FROM cash_entries WHERE id = ?').run(entryId);
+        log('removed bank entry for tx ' + tx.id + ' (' + tx.date + ', $' + (tx.amountCents / 100).toFixed(2) + ')');
+      }
+      for (const k of bankKeys(tx.name)) keys.add(k);
+    }
+    for (const k of keys) db.prepare('DELETE FROM bank_rules WHERE pattern = ?').run(k);
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done (' + txs.length + ' bank tx ignored)');
+  } catch (e) { console.error('fixed truck payments TF failed', e); }
 }
 
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
@@ -6957,7 +6984,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
