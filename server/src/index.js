@@ -1971,7 +1971,11 @@ function builtinBankCategory(name, direction, amountCents) {
   if (s.includes('PILOT') && amountCents >= 50000) return 'Fuel (Pilot weekly)';
   if (s.includes('PREPASS') || s.includes('EZPASS') || s.includes('E-ZPASS') || s.includes('TOLL')) return 'Tolls';
   if (s.includes('PARK')) return 'Parking';
-  if (s.includes('GARRETT')) return 'Trailer rental';
+  // Truck + trailer payments (owner, 2026-11-17): Transport Funding
+  // (1301) and Meteore (1302) are the two truck payments, and Garrett
+  // Freight Solutions is the trailer rent — all three count as Truck
+  // payment. (Garrett used to be its own 'Trailer rental' category.)
+  if (s.includes('GARRETT') || s.includes('METEORE') || s.includes('TRANSPORT FUNDING')) return 'Truck payment';
   if (s.includes('USPREMIUMFINANCE') || s.includes('PREMIUM FINANCE')) return 'Insurance';
   if (s.includes('ZELLE') && (s.includes('AKASHDEEP') || s.includes('ARSH'))) return 'Driver pay';
   if (s.includes('WIRE TRANSFER FEE') || s.includes('SERVICE CHARGE') || s.includes('MONTHLY FEE') || s.includes('RINGCENTRAL')) return 'Office expenses';
@@ -4880,6 +4884,33 @@ async function removeDispatchSheetLoads() {
   } catch (e) { console.error('rc adjudication9 failed', e); }
 }
 
+// One-time fix (2026-11-17): truck/trailer payment categories. The
+// owner has TWO truck payments — Transport Funding $1,783.97 (1301,
+// already correct) and a Meteore debit (1302; the 2026-11-02 $1,749.44
+// debit sat in a generic category, so Cash Flow showed only one truck
+// payment) — and the Garrett Freight Solutions Zelle payments are the
+// TRAILER rent, which he wants counted with the truck payments too.
+// Re-categorize every Meteore and Garrett bank entry as Truck payment
+// and teach the bank rules (keys derived per transaction) so future
+// debits land there automatically.
+async function fixTruckPaymentCategories() {
+  try {
+    const marker = 'fix-truck-payment-categories-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('truck payment categories fix: ' + m);
+    const txs = db.prepare("SELECT * FROM bank_transactions WHERE direction = 'out' AND entryId IS NOT NULL AND (name LIKE 'Meteore%' OR name LIKE '%GARRETT%')").all();
+    for (const tx of txs) {
+      const u = db.prepare("UPDATE cash_entries SET category = 'Truck payment' WHERE id = ? AND category != 'Truck payment'").run(tx.entryId);
+      if (u.changes) log('bank tx ' + tx.id + ' (' + tx.date + ', $' + (tx.amountCents / 100).toFixed(2) + ') -> Truck payment');
+      for (const k of bankKeys(tx.name))
+        db.prepare("INSERT OR REPLACE INTO bank_rules (pattern, direction, category, createdAt) VALUES (?, 'out', 'Truck payment', ?)").run(k, now());
+    }
+    log('bank rules for Meteore/Garrett -> Truck payment saved');
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('truck payment categories fix failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -6759,7 +6790,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
