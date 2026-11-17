@@ -5682,13 +5682,18 @@ async function fetchMissingRcFromMailboxes3() {
 // - Joy Ride Pro #26257: the signed RC reads Stop 0 Punta Gorda, FL
 //   appt 10/24/26 -> Stop 1 WALMART, 1729 State Rd 8, Auburn, IN
 //   46706, appt 10/26/26 04:00. Melons, reefer 55F. Truck 1301.
-//   No labelled rate survived the RC's scan, so no rate row yet.
+//   Rate found on the RC itself: TOTAL RATE 2200.00.
+// - New City 409386: the broker confirmation + worksheet read
+//   Origin Saddle Brook, NJ -> Destination Indianapolis, IN,
+//   Total Payable $1500.00 flat. Beer, delivered Sep 9 11 AM appt.
 async function addMissingAkashLoads() {
   try {
     const marker = 'add-missing-akash-loads-2026-11-17';
     if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
     const log = (m) => console.log('missing akash loads: ' + m);
-    const akash = db.prepare("SELECT id, name FROM users WHERE role = 'driver' AND name LIKE 'Akashdeep%'").get();
+    const truck1301 = db.prepare("SELECT driverId FROM trucks WHERE unitNumber = '1301'").get();
+    const akash = (truck1301 && truck1301.driverId && db.prepare('SELECT id, name FROM users WHERE id = ?').get(truck1301.driverId))
+      || db.prepare("SELECT id, name FROM users WHERE LOWER(name) LIKE '%akash%'").get();
     if (!akash) { log('SKIPPED — Akash driver row not found'); return; }
     const defs = [
       {
@@ -5699,10 +5704,18 @@ async function addMissingAkashLoads() {
         notes: 'Broker: Armstrong Transport Group (Neil Johnson). Route and $1,100 amount read from the OTR invoice screenshot in the rate con email thread (Ship From Holland, OH 43528 / Ship To Phoneton, OH 45371). Paperwork dispute Oct 5 — clean BOL sent.',
       },
       {
-        ref: 'LXL-26257', rcRef: null, broker: 'Joy Ride Express',
-        pickupLocation: 'Punta Gorda, FL', pickupWarehouse: null, pickupAt: '2026-10-24T09:00:00', pickupTimezone: 'America/New_York',
+        ref: 'LXL-26257', rcRef: '26257', broker: 'Joy Ride Express',
+        pickupLocation: 'Punta Gorda, FL', pickupWarehouse: 'JDI Shed, 1300 SR 31', pickupAt: '2026-10-24T09:00:00', pickupTimezone: 'America/New_York',
         deliveryLocation: 'Auburn, IN 46706', deliveryWarehouse: 'Walmart, 1729 State Rd 8', deliveryAt: '2026-10-26T04:00:00', deliveryTimezone: 'America/New_York',
-        notes: 'Broker: Joy Ride Express (Stephen Nickels). Melons — reefer set at 55F. Route and appointments read from the signed rate confirmation in the mailbox (Punta Gorda, FL appt 10/24/26 -> Walmart Auburn, IN appt 10/26/26 04:00).',
+        pState: 'FL', dState: 'IN', pDate: '2026-10-24', dDate: '2026-10-26', rateCents: 220000,
+        notes: 'Broker: Joy Ride Express (Stephen Nickels). Melons, 42,000 lbs — reefer set at 55F. Route, appointments and the $2,200 total rate read from the signed rate confirmation in the mailbox (LINE HAUL RATE 2200.00 / TOTAL RATE 2200.00; JDI Shed Punta Gorda appt 10/24/26 -> Walmart Auburn, IN appt 10/26/26 04:00).',
+      },
+      {
+        ref: 'LXL-409386', rcRef: '409386', broker: 'New City Logistics',
+        pickupLocation: 'Saddle Brook, NJ', pickupWarehouse: null, pickupAt: '2026-09-08T09:00:00', pickupTimezone: 'America/New_York',
+        deliveryLocation: 'Indianapolis, IN', deliveryWarehouse: null, deliveryAt: '2026-09-09T11:00:00', deliveryTimezone: 'America/New_York',
+        pState: 'NJ', dState: 'IN', pDate: '2026-09-08', dDate: '2026-09-09', rateCents: 150000,
+        notes: 'Broker: New City Logistics (Alessandra Milazzo). BEER, 18 pallets, 42,500 lbs. Container MSMU8861260, PO # IWEI062226di, Release # WHS26309. Route and the $1,500 flat line haul read from the broker confirmation + worksheet in the mailbox (Bill of Lading Origin Saddle Brook, NJ / Destination Indianapolis, IN; Total Payable to Carrier $1500.00). Delivery appt Sep 9, 11:00 AM.',
       },
     ];
     for (const d of defs) {
