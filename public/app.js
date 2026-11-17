@@ -2354,7 +2354,14 @@ async function viewLoads(main) {
   }));
 
   main.querySelectorAll('[data-complete-load]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('Mark this load completed? Use this for loads that were run outside the app.')) return;
+    // Two-step in-page confirm (native window.confirm is auto-dismissed
+    // by some browsers, which silently cancelled the action).
+    if (b.dataset.armed !== '1') {
+      b.dataset.armed = '1';
+      b.textContent = 'Confirm complete?';
+      setTimeout(() => { if (b.isConnected) { b.dataset.armed = ''; b.textContent = 'Complete'; } }, 5000);
+      return;
+    }
     try {
       await api('/api/admin/loads/' + b.dataset.completeLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'completed' }) });
       toast('Load marked completed.', 'ok');
