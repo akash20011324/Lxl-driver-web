@@ -134,7 +134,7 @@ async function load() {
   }
   let d;
   try {
-    const r = await fetch('/api/cashflow?month=' + curKey, { headers: { Authorization: 'Bearer ' + token } });
+    const r = await fetch('/api/admin/cashflow?month=' + curKey, { headers: { Authorization: 'Bearer ' + token } });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     d = await r.json();
   } catch (e) {
