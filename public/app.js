@@ -2526,11 +2526,12 @@ async function viewDocuments(main) {
   ]);
   const KINDS = {
     pickup: { kinds: ['pickup_bol'], label: 'Pickup BOLs', empty: 'No pickup BOLs yet' },
-    unitseal: { kinds: ['unit_picture', 'seal_picture'], label: 'Unit & Seal Pictures', empty: 'No unit or seal pictures yet' },
+    unit: { kinds: ['unit_picture'], label: 'Unit Pictures', empty: 'No unit pictures yet' },
+    seal: { kinds: ['seal_picture'], label: 'Seal Pictures', empty: 'No seal pictures yet' },
     fuel: { kinds: ['fuel_receipt', 'receipt'], label: 'Fuel Receipts', empty: 'No fuel receipts yet' },
     delivery: { kinds: ['delivery_bol'], label: 'Delivery BOL', empty: 'No delivery BOL yet' },
   };
-  const TYPE_ORDER = ['pickup', 'unitseal', 'fuel', 'delivery'];
+  const TYPE_ORDER = ['pickup', 'unit', 'seal', 'fuel', 'delivery'];
   const docList = (Array.isArray(docs) ? docs : []).filter(d => d.loadId != null && TYPE_ORDER.some(t => KINDS[t].kinds.includes(d.kind)));
   const loadList = (Array.isArray(loads) ? loads : []).filter(l => l && l.reference);
   const byLoad = new Map();
@@ -2538,11 +2539,18 @@ async function viewDocuments(main) {
     if (!byLoad.has(d.loadId)) byLoad.set(d.loadId, []);
     byLoad.get(d.loadId).push(d);
   }
-  // Every load that has papers, plus active loads (their section is
-  // ready before the first upload). Newest pickup first.
-  const shown = loadList
-    .filter(l => byLoad.has(l.id) || l.status === 'active')
-    .sort((a, b) => new Date(b.pickupAt || 0) - new Date(a.pickupAt || 0));
+  // EVERY load gets a document section here — active and completed,
+  // with or without papers yet (owner, 2026-11-17: "every load we
+  // have, mine and Arsh's, all of them"). Ordered latest trip first:
+  // newest pickup on top, oldest at the bottom.
+  const tripTime = (l) => {
+    for (const v of [l.pickupAt, l.deliveryAt, l.createdAt]) {
+      const t = Date.parse(v || '');
+      if (!Number.isNaN(t)) return t;
+    }
+    return 0;
+  };
+  const shown = loadList.slice().sort((a, b) => tripTime(b) - tripTime(a));
   const docById = new Map(docList.map(d => [d.id, d]));
   const selected = new Set();
   const shortPlace = (a) => (a || '').split(',').pop().replace(/\s*\d{5}(-\d{4})?\s*$/, '').trim();
