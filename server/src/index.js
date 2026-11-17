@@ -1695,6 +1695,18 @@ function truckMonthlyFor(monthParam, entries, advanceRows) {
   return { trucks, monthFuelTotalCents: trucks.reduce((s, t) => s + t.fuelCents, 0), totalLoadsMonth };
 }
 
+// How many monthly occurrences of a fixed payment fall in
+// [its start month .. throughMonth]. A fixed payment's start month is
+// the month of its createdAt (the setup backdated the truck/trailer
+// payments to the month each obligation actually began).
+function fixedMonthsThrough(f, throughMonth) {
+  const start = String(f.createdAt || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(start) || start > throughMonth) return 0;
+  const sy = Number(start.slice(0, 4)); const sm = Number(start.slice(5, 7));
+  const ty = Number(throughMonth.slice(0, 4)); const tm = Number(throughMonth.slice(5, 7));
+  return (ty - sy) * 12 + (tm - sm) + 1;
+}
+
 admin.get('/cashflow', async (req, res) => {
   // Trucks profit pays drivers by the mile: fill in road miles for any
   // load still missing them (cached on the load afterwards).
@@ -1744,7 +1756,7 @@ admin.get('/cashflow', async (req, res) => {
   // Fixed monthly payments (owner's fixed costs) — counted in the monthly
   // profit automatically, never entered by hand.
   const fixed = db.prepare('SELECT * FROM fixed_payments WHERE active = 1 ORDER BY category').all()
-    .map((f) => ({ id: f.id, category: f.category, amountCents: f.amountCents, note: f.note ?? null }));
+    .map((f) => ({ id: f.id, category: f.category, amountCents: f.amountCents, note: f.note ?? null, createdAt: f.createdAt }));
   // Monthly P&L: factoring money in, every expense group out, then profit.
   const inMonth = (e) => (e.date || '').startsWith(monthParam);
   const groupBy = (list) => {
@@ -1754,7 +1766,7 @@ admin.get('/cashflow', async (req, res) => {
   };
   const monthIn = groupBy(agg.all.filter((e) => e.direction === 'in' && inMonth(e)));
   const monthOut = groupBy(agg.all.filter((e) => e.direction === 'out' && inMonth(e)));
-  for (const f of fixed) monthOut.push({ category: f.category, amountCents: f.amountCents, fixed: true });
+  for (const f of fixed) if (fixedMonthsThrough(f, monthParam) > 0) monthOut.push({ category: f.category, amountCents: f.amountCents, fixed: true });
   const monthInTotal = monthIn.reduce((s, x) => s + x.amountCents, 0);
   const monthOutTotal = monthOut.reduce((s, x) => s + x.amountCents, 0);
   // Per-truck: trip revenue from rate cons (via the load's driver), costs
@@ -1790,6 +1802,23 @@ admin.get('/cashflow', async (req, res) => {
     };
   });
   const totals = { inGroups: groupBy(agg.all.filter((e) => e.direction === 'in')), outGroups: groupBy(agg.all.filter((e) => e.direction === 'out')) };
+  // All-time totals also count fixed payments — one occurrence per
+  // month from each payment's start month through the current month —
+  // so the since-May figures keep the truck/trailer payments even
+  // though their bank debits no longer create entries.
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  let fixedAllTimeCents = 0;
+  {
+    const m = new Map(totals.outGroups.map((g) => [g.category, g.amountCents]));
+    for (const f of fixed) {
+      const months = fixedMonthsThrough(f, currentMonth);
+      if (!months) continue;
+      fixedAllTimeCents += f.amountCents * months;
+      m.set(f.category, (m.get(f.category) || 0) + f.amountCents * months);
+    }
+    totals.outGroups = [...m.entries()].map(([category, amountCents]) => ({ category, amountCents })).sort((a, b) => b.amountCents - a.amountCents);
+  }
+  const outCentsTotal = outCents + fixedAllTimeCents;
   const tm = truckMonthlyFor(monthParam, agg.entries, advanceRows);
   const loads = db.prepare(
     `SELECT l.id, l.reference, u.name AS driverName FROM loads l
@@ -1798,7 +1827,7 @@ admin.get('/cashflow', async (req, res) => {
   let bankBalance = null;
   try { bankBalance = JSON.parse(getMeta(db, 'bank_balance') || 'null'); } catch { bankBalance = null; }
   res.json({
-    bookedCents: rcTotal, receivedCents, outCents, netCents: receivedCents - outCents, weekly, bankBalance,
+    bookedCents: rcTotal, receivedCents, outCents: outCentsTotal, netCents: receivedCents - outCentsTotal, weekly, bankBalance,
     entries: all.slice(0, 60), fixed,
     bankPending: db.prepare("SELECT * FROM bank_transactions WHERE status = 'pending' ORDER BY date DESC, id DESC LIMIT 40").all()
       .map((t) => ({ id: t.id, date: t.date, name: t.name, amountCents: t.amountCents, direction: t.direction })),
@@ -1817,12 +1846,23 @@ admin.get('/cashflow/report.csv', (req, res) => {
   if (section === 'total') {
     const rcTotal = db.prepare('SELECT COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get().s;
     const inT = all.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amountCents, 0);
-    const outT = all.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amountCents, 0);
+    let outT = all.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amountCents, 0);
     L.push(q('LXL Cash Flow — Company total (since May 2026)'));
     L.push(['Category', 'Money in', 'Money out'].map(q).join(','));
     const cats = new Map();
     for (const g of cashGroupBy(all.filter((e) => e.direction === 'in'))) cats.set(g.category, { i: g.amountCents, o: 0 });
     for (const g of cashGroupBy(all.filter((e) => e.direction === 'out'))) { const c = cats.get(g.category) || { i: 0, o: 0 }; c.o = g.amountCents; cats.set(g.category, c); }
+    // Fixed payments count toward the all-time total too (one per
+    // month from each payment's start month through the current one).
+    {
+      const curMonth = new Date().toISOString().slice(0, 7);
+      for (const f of fixed) {
+        const months = fixedMonthsThrough(f, curMonth);
+        if (!months) continue;
+        const c = cats.get(f.category) || { i: 0, o: 0 }; c.o += f.amountCents * months; cats.set(f.category, c);
+        outT += f.amountCents * months;
+      }
+    }
     for (const [cat, v] of cats) L.push([cat, money(v.i), money(v.o)].map(q).join(','));
     L.push(['TOTAL', money(inT), money(outT)].map(q).join(','));
     L.push([q('Booked (rate cons)'), q(money(rcTotal))].join(','));
@@ -1831,7 +1871,7 @@ admin.get('/cashflow/report.csv', (req, res) => {
     const inMonth = (e) => (e.date || '').startsWith(monthParam);
     const mIn = cashGroupBy(all.filter((e) => e.direction === 'in' && inMonth(e)));
     const mOut = cashGroupBy(all.filter((e) => e.direction === 'out' && inMonth(e)));
-    for (const f of fixed) mOut.push({ category: f.category + ' (fixed)', amountCents: f.amountCents });
+    for (const f of fixed) if (fixedMonthsThrough(f, monthParam) > 0) mOut.push({ category: f.category + ' (fixed)', amountCents: f.amountCents });
     const inT = mIn.reduce((s, x) => s + x.amountCents, 0);
     const outT = mOut.reduce((s, x) => s + x.amountCents, 0);
     L.push(q('LXL Cash Flow — Monthly profit and loss — ' + monthParam));
@@ -1971,11 +2011,9 @@ function builtinBankCategory(name, direction, amountCents) {
   if (s.includes('PILOT') && amountCents >= 50000) return 'Fuel (Pilot weekly)';
   if (s.includes('PREPASS') || s.includes('EZPASS') || s.includes('E-ZPASS') || s.includes('TOLL')) return 'Tolls';
   if (s.includes('PARK')) return 'Parking';
-  // Truck + trailer payments (owner, 2026-11-17): Transport Funding
-  // (1301) and Meteore (1302) are the two truck payments, and Garrett
-  // Freight Solutions is the trailer rent — all three count as Truck
-  // payment. (Garrett used to be its own 'Trailer rental' category.)
-  if (s.includes('GARRETT') || s.includes('METEORE') || s.includes('TRANSPORT FUNDING')) return 'Truck payment';
+  // Transport Funding / Meteore / Garrett return null here on purpose:
+  // they are fixed monthly payments (see autoCategorizeTx, which marks
+  // their bank debits ignored so they never double-count).
   if (s.includes('USPREMIUMFINANCE') || s.includes('PREMIUM FINANCE')) return 'Insurance';
   if (s.includes('ZELLE') && (s.includes('AKASHDEEP') || s.includes('ARSH'))) return 'Driver pay';
   if (s.includes('WIRE TRANSFER FEE') || s.includes('SERVICE CHARGE') || s.includes('MONTHLY FEE') || s.includes('RINGCENTRAL')) return 'Office expenses';
@@ -1989,6 +2027,16 @@ function matchBankCategory(tx) {
   return builtinBankCategory(tx.name, tx.direction, tx.amountCents);
 }
 function autoCategorizeTx(tx) {
+  // Covered by fixed monthly payments (owner, 2026-11-17): the two
+  // Transport Funding truck payments (the 1302 one posts under the
+  // name Meteore) and the Garrett Freight Solutions trailer rent are
+  // counted as fixed payments, so their bank debits must never also
+  // become cash entries — mark them ignored instead.
+  const nm = String(tx.name || '').toUpperCase();
+  if (tx.direction === 'out' && (nm.includes('TRANSPORT FUNDING') || nm.includes('METEORE') || nm.includes('GARRETT'))) {
+    db.prepare("UPDATE bank_transactions SET status = 'ignored', entryId = NULL WHERE id = ?").run(tx.id);
+    return true;
+  }
   const category = matchBankCategory(tx);
   if (!category) return false;
   const r = db.prepare('INSERT INTO cash_entries (direction, date, category, amountCents, truckId, note, source, loadId, createdAt) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?)')
@@ -4911,6 +4959,53 @@ async function fixTruckPaymentCategories() {
   } catch (e) { console.error('truck payment categories fix failed', e); }
 }
 
+// Fixed truck/trailer payments (owner approved 2026-11-17): the two
+// truck payments and the Garrett trailer rent move OUT of bank entries
+// and INTO fixed monthly payments, so each is counted exactly once —
+// as a fixed payment. Both truck loans are with Transport Funding;
+// the 1302 payment posts to the bank under the name Meteore. The
+// fixed rows are backdated to the month each obligation began
+// (Transport Funding Jun 2026, Garrett Aug 2026, Meteore Nov 2026)
+// so past months and the all-time totals count them correctly.
+async function setupFixedTruckPayments() {
+  try {
+    const marker = 'fixed-truck-payments-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('fixed truck payments: ' + m);
+    const wanted = [
+      { amountCents: 178397, note: 'Transport Funding — Truck 1301', createdAt: '2026-06-01T00:00:00.000Z' },
+      { amountCents: 174944, note: 'Transport Funding — Truck 1302 (posts as Meteore)', createdAt: '2026-11-01T00:00:00.000Z' },
+      { amountCents: 245804, note: 'Garrett Freight Solutions — trailer rent', createdAt: '2026-08-01T00:00:00.000Z' },
+    ];
+    for (const w of wanted) {
+      const exists = db.prepare("SELECT id FROM fixed_payments WHERE category = 'Truck payment' AND amountCents = ? AND active = 1").get(w.amountCents);
+      if (!exists) {
+        db.prepare('INSERT INTO fixed_payments (category, amountCents, note, createdAt) VALUES (?, ?, ?, ?)').run('Truck payment', w.amountCents, w.note, w.createdAt);
+        log('added fixed ' + w.note + ' $' + (w.amountCents / 100).toFixed(2) + ' from ' + w.createdAt.slice(0, 7));
+      }
+    }
+    // Remove the bank entries for these three payees (all months) and
+    // mark their bank transactions ignored so they never come back.
+    const txs = db.prepare("SELECT * FROM bank_transactions WHERE direction = 'out' AND (UPPER(name) LIKE '%TRANSPORT FUNDING%' OR UPPER(name) LIKE '%METEORE%' OR UPPER(name) LIKE '%GARRETT%')").all();
+    const keys = new Set();
+    for (const tx of txs) {
+      // Clear the reference first — cash_entries is FK-referenced by
+      // bank_transactions.entryId, so the entry can only be deleted
+      // after the transaction lets go of it.
+      const entryId = tx.entryId;
+      db.prepare("UPDATE bank_transactions SET status = 'ignored', entryId = NULL WHERE id = ?").run(tx.id);
+      if (entryId) {
+        db.prepare('DELETE FROM cash_entries WHERE id = ?').run(entryId);
+        log('removed bank entry for tx ' + tx.id + ' (' + tx.date + ', $' + (tx.amountCents / 100).toFixed(2) + ')');
+      }
+      for (const k of bankKeys(tx.name)) keys.add(k);
+    }
+    for (const k of keys) db.prepare('DELETE FROM bank_rules WHERE pattern = ?').run(k);
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done (' + txs.length + ' bank tx ignored)');
+  } catch (e) { console.error('fixed truck payments failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -6790,7 +6885,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
