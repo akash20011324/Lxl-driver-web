@@ -5394,8 +5394,8 @@ async function fixLoad1197586Driver() {
     sql += ' WHERE id = ?'; args.push(load.id);
     db.prepare(sql).run(...args);
     const docs = db.prepare('UPDATE documents SET driverId = ? WHERE loadId = ?').run(arsh.id, load.id);
-    const after = db.prepare('SELECT driverId, truckId, trailerId FROM loads WHERE id = ?').get(load.id);
-    log('after driverId=' + after.driverId + ' truckId=' + (after.truckId ?? null) + ' trailerId=' + (after.trailerId ?? null) + '; documents moved: ' + docs.changes);
+    const after = db.prepare('SELECT driverId FROM loads WHERE id = ?').get(load.id);
+    log('after driverId=' + after.driverId + '; documents moved: ' + docs.changes);
     db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
     log('done');
   } catch (e) { console.error('load 1197586 driver fix failed', e); }
