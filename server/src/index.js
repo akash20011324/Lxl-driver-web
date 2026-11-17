@@ -5563,6 +5563,57 @@ async function fetchMissingRcFromMailboxes() {
   } catch (e) { console.error('missing rc mail failed', e); }
 }
 
+// Fetch v2 — precision pass (the v1 $search matched quoted threads
+// across the mailboxes and the 12-download cap filled with other
+// loads' BOLs). This pass keeps only messages whose SUBJECT names
+// the load, prefers attachments whose NAME names it, verifies the
+// target number inside the document text, and logs the anchored
+// pickup/delivery fields instead of every place in the document.
+async function fetchMissingRcFromMailboxes2() {
+  try {
+    const marker = 'fetch-missing-rc-mail2-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('missing rc mail2: ' + m);
+    const targets = ['4700709', '26257', '409386'];
+    const users = db.prepare('SELECT * FROM users WHERE outlookRefreshToken IS NOT NULL ORDER BY isMainAdmin DESC, id').all();
+    for (const t of targets) {
+      let downloaded = 0;
+      for (const u of users) {
+        if (downloaded >= 8) break;
+        let accessToken;
+        try { accessToken = await outlookAccessToken(u); } catch { continue; }
+        const page = await outlookGraph(accessToken, '/me/messages?$search=' + encodeURIComponent('"' + t + '"') + '&$top=50&$select=id,subject,receivedDateTime,hasAttachments').catch(() => null);
+        const msgs = ((page && page.value) || []).filter((m) => String(m.subject || '').includes(t));
+        log(t + ': subject-matched messages in ' + (u.outlookEmail || u.name) + ': ' + msgs.length + (msgs.length ? ' — ' + msgs.map((m) => m.subject).join(' || ') : ''));
+        for (const m of msgs) {
+          if (downloaded >= 8) break;
+          if (!m.hasAttachments) continue;
+          const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`).catch(() => null);
+          const list = ((atts && atts.value) || []).filter((a) => a.id && (a.size || 0) < 12000000 && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || /image\//.test(a.contentType || '') || /\.(png|jpe?g)$/i.test(a.name || '')));
+          list.sort((a, b) => (String(b.name || '').includes(t) ? 1 : 0) - (String(a.name || '').includes(t) ? 1 : 0));
+          for (const a of list) {
+            if (downloaded >= 8) break;
+            const got = await outlookAttachmentBuffer(u, m.id, a.id).catch(() => ({}));
+            if (!got.fileBuffer || !got.fileBuffer.length) continue;
+            downloaded += 1;
+            const text = String(await extractFileText(got.fileBuffer).catch(() => '') || '').replace(/\s+/g, ' ');
+            const has = text.includes(t);
+            log(t + ': [' + (u.outlookEmail || u.name) + '] "' + (a.name || '') + '" on [' + (m.subject || '') + '] chars=' + text.length + ' containsNumber=' + has);
+            if (!text.length) continue;
+            log(t + ': fields: ' + JSON.stringify(extractRcLoadFields(text)));
+            log(t + ': rate read: ' + JSON.stringify(extractRateConDetails(text)));
+            const places = scanRcPlaces(text, 0);
+            log(t + ': places: ' + (places.slice(0, 6).map((p) => p.city + ', ' + p.state + (p.zip ? ' ' + p.zip : '')).join(' | ') || 'none'));
+          }
+        }
+      }
+      log(t + ': attachments downloaded: ' + downloaded);
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('missing rc mail2 failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7481,7 +7532,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
