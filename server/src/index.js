@@ -5176,6 +5176,126 @@ async function addRtc528772Load() {
   } catch (e) { console.error('rtc 528772 add failed', e); }
 }
 
+// Merge (owner, 2026-11-17): the same RTC job also got created as
+// LXL-001528772 (the "001" series prefix glued to the load number,
+// full street addresses as the locations) when the rate con was
+// uploaded from the laptop. One job = one load: fold the duplicate
+// into LXL-528772, keeping whichever rate con row carries the
+// uploaded PDF file, and move its documents over.
+async function mergeRtc528772Loads() {
+  try {
+    const marker = 'rtc-528772-merge-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rtc 528772 merge: ' + m);
+    const good = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-528772'").get();
+    const dup = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-001528772'").get();
+    if (!dup) {
+      log('no LXL-001528772 duplicate load — nothing to merge');
+    } else if (!good) {
+      db.prepare("UPDATE loads SET reference = 'LXL-528772', pickupLocation = 'Keasbey, NJ 08832', deliveryLocation = 'Opp, AL 36467' WHERE id = ?").run(dup.id);
+      db.prepare("UPDATE rate_confirmations SET reference = 'LXL-528772' WHERE loadId = ?").run(dup.id);
+      log('renamed LXL-001528772 to LXL-528772 and cleaned its route');
+    } else {
+      const docs = db.prepare('UPDATE documents SET loadId = ? WHERE loadId = ?').run(good.id, dup.id);
+      const goodRcs = db.prepare('SELECT * FROM rate_confirmations WHERE loadId = ?').all(good.id);
+      const dupRcs = db.prepare('SELECT * FROM rate_confirmations WHERE loadId = ?').all(dup.id);
+      for (const r of dupRcs) {
+        const clash = goodRcs.find((g) => g.rateCents === r.rateCents && g.pickupDate === r.pickupDate && g.deliveryDate === r.deliveryDate);
+        if (clash) {
+          if (r.fileId && !clash.fileId) {
+            db.prepare('UPDATE rate_confirmations SET fileId = ?, fileHash = ? WHERE id = ?').run(r.fileId, r.fileHash, clash.id);
+            log('moved the RC file onto row ' + clash.id);
+          }
+          db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(r.id);
+          log('deleted duplicate RC row ' + r.id);
+        } else {
+          db.prepare("UPDATE rate_confirmations SET loadId = ?, reference = 'LXL-528772' WHERE id = ?").run(good.id, r.id);
+          log('moved RC row ' + r.id + ' onto LXL-528772');
+        }
+      }
+      db.prepare("UPDATE rate_confirmations SET reference = 'LXL-528772' WHERE reference = 'LXL-001528772'").run();
+      db.prepare('DELETE FROM loads WHERE id = ?').run(dup.id);
+      log('merged LXL-001528772 into LXL-528772 (documents moved: ' + docs.changes + ')');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rtc 528772 merge failed', e); }
+}
+
+// Circle Logistics 2661800 fix (owner, 2026-11-17): the portal read
+// the route as DE -> DE, but the job is TWO pickups in Delaware and
+// a delivery in Georgia, and it belongs to Arsh (truck 1302). From
+// Circle's dispatch email: pickup Milford, DE 11/17/2026, delivery
+// Rincon, GA 11/19/2026; the second DE pickup is only in the RC PDF,
+// so read the stops out of the stored rate con file itself.
+async function fixCircle2661800() {
+  try {
+    const marker = 'circle-2661800-fix-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('circle 2661800 fix: ' + m);
+    const arsh = db.prepare("SELECT id FROM users WHERE role = 'driver' AND active = 1 AND LOWER(name) LIKE '%arsh%'").get();
+    if (!arsh) { log('SKIPPED — Arsh driver row not found'); return; }
+    const rc = db.prepare("SELECT r.*, f.storedFilename, f.originalFilename FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId WHERE r.reference LIKE '%2661800%'").get();
+    // Read every address out of the stored RC document, in order.
+    let places = [];
+    if (rc && rc.storedFilename) {
+      try {
+        const buf = fs.readFileSync(path.join(UPLOADS_DIR, rc.storedFilename));
+        const text = await extractFileText(buf);
+        places = scanRcPlaces(String(text || '').replace(/\s+/g, ' '), 0);
+        log('places in RC: ' + places.map((p) => p.city + ', ' + p.state + (p.zip ? ' ' + p.zip : '')).join(' | '));
+      } catch (e) { log('could not read stored RC file: ' + e.message); }
+    } else {
+      log('no RC row/file found for 2661800 — using the dispatch email route only');
+    }
+    const ga = places.find((p) => p.state === 'GA');
+    const gaIdx = ga ? ga.idx : Number.MAX_SAFE_INTEGER;
+    const deCities = [];
+    for (const p of places) {
+      if (p.state !== 'DE' || p.idx > gaIdx) continue;
+      if (!deCities.some((x) => x.city === p.city)) deCities.push(p);
+    }
+    const fmt = (p) => p.city + ', ' + p.state + (p.zip ? ' ' + p.zip : '');
+    const pickup1 = deCities[0] ? fmt(deCities[0]) : 'Milford, DE';
+    const delivery = ga ? fmt(ga) : 'Rincon, GA';
+    let stops = null;
+    if (deCities.length >= 2) {
+      stops = {
+        pickups: deCities.slice(0, 4).map((p) => ({ location: fmt(p), warehouse: null, at: '2026-11-17T09:00:00', number: null })),
+        deliveries: [{ location: delivery, warehouse: null, at: '2026-11-19T17:00:00', number: null }],
+      };
+      log('two-plus DE pickups found: ' + deCities.map((p) => p.city).join(', '));
+    } else {
+      log('WARNING: only ' + deCities.length + ' DE pickup(s) read from the RC — stops not set');
+    }
+    let load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-2661800'").get();
+    const notesBase = 'Broker: Circle Logistics, Inc. Dispatcher Zeke O\u2019Dell 260-208-4500 x2034. MacroPoint tracking required.';
+    if (!load) {
+      const id = db.prepare(
+        'INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, stops, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'active\', ?)',
+      ).run('LXL-2661800', arsh.id, pickup1, '2026-11-17T09:00:00', 'America/New_York', delivery, '2026-11-19T17:00:00', 'America/New_York',
+        stops ? JSON.stringify(stops) : null, notesWithStops(notesBase, stops), now()).lastInsertRowid;
+      load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
+      log('created load LXL-2661800 for Arsh: ' + pickup1 + ' -> ' + delivery);
+    } else {
+      db.prepare('UPDATE loads SET driverId = ?, pickupLocation = ?, deliveryLocation = ?, stops = ?, notes = ? WHERE id = ?')
+        .run(arsh.id, pickup1, delivery, stops ? JSON.stringify(stops) : load.stops, notesWithStops(load.notes || notesBase, stops || (load.stops ? JSON.parse(load.stops) : null)), load.id);
+      log('fixed load LXL-2661800: driver Arsh (1302), ' + pickup1 + ' -> ' + delivery);
+    }
+    if (rc) {
+      db.prepare("UPDATE rate_confirmations SET loadId = ?, pickupState = 'DE', deliveryState = 'GA', pickupDate = '2026-11-17', deliveryDate = '2026-11-19' WHERE id = ?")
+        .run(load.id, rc.id);
+      if (rc.originalFilename && rc.originalFilename.includes('DE-DE')) {
+        db.prepare('UPDATE files SET originalFilename = ? WHERE id = ?')
+          .run(rc.originalFilename.replace('DE-DE', 'DE-GA'), rc.fileId);
+      }
+      log('rate con row ' + rc.id + ' corrected to DE -> GA and linked to the load');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('circle 2661800 fix failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7083,7 +7203,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }

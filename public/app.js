@@ -1361,6 +1361,8 @@ function shortPlace(addr) {
     const words = m2[1].trim().split(/\s+/);
     return titleCase(words[words.length - 1] || '') + ', ' + m2[2];
   }
+  const cs = cityStateOf(addr);
+  if (cs) return cs.city + ', ' + cs.state;
   return s;
 }
 function fmtShortTime(iso, tz) {
@@ -2198,9 +2200,29 @@ function toLocalInput(iso) {
 function cityStateOf(location) {
   if (!location) return null;
   const parts = String(location).split(',').map((s) => s.trim()).filter(Boolean);
-  const last = parts[parts.length - 1] || '';
-  const m = last.match(/^(.+?)\s+([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/);
-  if (m) return { city: m[1], state: m[2] };
+  if (parts.length > 1) {
+    const last = parts[parts.length - 1] || '';
+    const m = last.match(/^(.+?)\s+([A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/);
+    if (m) return { city: m[1], state: m[2].toUpperCase() };
+  }
+  // No usable comma form — addresses typed or read off a rate con
+  // with no commas and mixed case ("1 arizona way keasbey Nj 08832",
+  // "601 highway 52 e opp al") used to fall back to showing the full
+  // street address as the card headline (owner, 2026-11-17: show
+  // only the city and state like the other loads). The state code is
+  // the final word (ZIP optional); the city is what follows the
+  // street part of the address.
+  const s = String(location).replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  const m2 = s.match(/^(.*?)\s+([A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$/);
+  if (m2) {
+    const suffixes = new Set(['STREET', 'ST', 'AVENUE', 'AVE', 'ROAD', 'RD', 'BOULEVARD', 'BLVD', 'DRIVE', 'DR', 'LANE', 'LN', 'HIGHWAY', 'HWY', 'COURT', 'CT', 'PARKWAY', 'PKWY', 'CIRCLE', 'CIR', 'TRAIL', 'TRL', 'PLACE', 'PL', 'WAY']);
+    const words = m2[1].split(/\s+/).filter(Boolean);
+    let cut = -1;
+    words.forEach((w, i) => { if (suffixes.has(w.toUpperCase().replace(/\.$/, ''))) cut = i; });
+    const rest = cut >= 0 ? words.slice(cut + 1) : words;
+    const cityWords = rest.filter((w) => /^[A-Za-z][A-Za-z.'-]*$/.test(w) && w.length > 1);
+    if (cityWords.length) return { city: cityWords.slice(-3).map(titleCase).join(' '), state: m2[2].toUpperCase() };
+  }
   return null;
 }
 
