@@ -5296,6 +5296,54 @@ async function fixCircle2661800() {
   } catch (e) { console.error('circle 2661800 fix failed', e); }
 }
 
+// RTC 528772 rate link (owner, 2026-11-17): the dashboard rate chip
+// needs a rate con that is both LINKED to the load and RATED. The
+// surviving load's row (from the laptop upload) has no rate — the
+// reader will not take RTC's unlabeled Amount column as a rate —
+// and the $2,950 row from the first add is orphaned on the deleted
+// duplicate. Keep exactly one row on the load (the one carrying the
+// uploaded PDF), rate it $2,950.00 from the document, delete the
+// rest, and log the resulting rate con count and booked total.
+async function fixRtc528772Rate() {
+  try {
+    const marker = 'rtc-528772-rate-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rtc 528772 rate: ' + m);
+    const load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-528772'").get();
+    if (!load) { log('SKIPPED — load LXL-528772 not found'); }
+    else {
+      const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference LIKE '%528772%'").all();
+      for (const r of rows) log('row ' + r.id + ' loadId=' + r.loadId + ' rateCents=' + r.rateCents + ' fileId=' + r.fileId);
+      let keep = rows.find((r) => r.fileId) || rows.find((r) => r.loadId === load.id) || rows[0] || null;
+      if (!keep) {
+        const r = db.prepare('INSERT INTO rate_confirmations (reference, loadId, broker, rateCents, pickupState, deliveryState, pickupDate, deliveryDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run('LXL-528772', load.id, 'RTC Transportation', 295000, 'NJ', 'AL', '2026-11-17', '2026-11-19', now());
+        keep = db.prepare('SELECT * FROM rate_confirmations WHERE id = ?').get(r.lastInsertRowid);
+        log('created row ' + keep.id + ' at $2,950.00');
+      } else {
+        if (keep.loadId !== load.id || keep.reference !== 'LXL-528772') {
+          db.prepare("UPDATE rate_confirmations SET loadId = ?, reference = 'LXL-528772' WHERE id = ?").run(load.id, keep.id);
+          log('linked row ' + keep.id + ' to LXL-528772');
+        }
+        if (keep.rateCents !== 295000) {
+          db.prepare('UPDATE rate_confirmations SET rateCents = 295000 WHERE id = ?').run(keep.id);
+          log('set rate $2,950.00 on row ' + keep.id);
+        }
+      }
+      for (const r of rows) {
+        if (r.id !== keep.id) {
+          db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(r.id);
+          log('deleted duplicate row ' + r.id);
+        }
+      }
+      const total = db.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get();
+      log('rate cons now: ' + total.c + ' rows, booked $' + (total.s / 100).toFixed(2));
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rtc 528772 rate failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7203,7 +7251,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
