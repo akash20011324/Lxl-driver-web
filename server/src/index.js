@@ -7226,11 +7226,22 @@ app.get('/files/:id', auth, (req, res) => {
 // API 404s still return JSON. Resolved relative to this file, not cwd.
 // ---------------------------------------------------------------------------
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'public');
+// The portal page and its script/style must never be served from a
+// device cache: a dispatch tablet that kept an old app.js showed
+// pre-fix load cards for hours while the data was already correct
+// (owner, 2026-11-17). no-store makes every fresh page load pick up
+// the latest deploy.
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path === '/index.html' || req.path === '/app.js' || req.path === '/styles.css') {
+    res.set('Cache-Control', 'no-store');
+  }
+  next();
+});
 app.use(express.static(PUBLIC_DIR));
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/files/')) return err(res, 404, 'Not found');
   const indexPath = path.join(PUBLIC_DIR, 'index.html');
-  if (fs.existsSync(indexPath)) return res.sendFile(indexPath);
+  if (fs.existsSync(indexPath)) { res.set('Cache-Control', 'no-store'); return res.sendFile(indexPath); }
   return err(res, 404, 'Not found');
 });
 
