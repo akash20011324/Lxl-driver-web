@@ -1310,7 +1310,7 @@ function dashDriverCard(d, load, rcByLoad, loc, live) {
   if (load) {
     const prog = routeProgress(load);
     route = '<div class="dw-route">' +
-      '<div class="dw-route-places">' + esc(shortPlace(load.pickupLocation)) + ' &rarr; ' + esc(shortPlace(load.deliveryLocation)) + '</div>' +
+      '<div class="dw-route-places">' + routeChain(load).map(esc).join(' &rarr; ') + '</div>' +
       (prog == null ? '' :
         '<div class="dw-route-bar"><div class="dw-route-fill" style="width:' + Math.round(prog * 100) + '%"></div></div>' +
         '<div class="dw-route-meta small muted">' + Math.round(prog * 100) + '% &middot; Pickup ' + esc(fmtShortTime(load.pickupAt, load.pickupTimezone)) + ' &rarr; Delivery ' + esc(fmtShortTime(load.deliveryAt, load.deliveryTimezone)) + '</div>') +
@@ -2226,15 +2226,23 @@ function cityStateOf(location) {
   return null;
 }
 
+/* The full route chain for a load as short "City, ST" places: every
+   pickup in order, then every delivery (owner, 2026-11-17: show
+   both pickups, then the delivery). Loads without extra stops give
+   the plain pickup -> delivery pair. */
+function routeChain(l) {
+  const s = l && l.stops;
+  if (s && Array.isArray(s.pickups) && Array.isArray(s.deliveries) && (s.pickups.length > 1 || s.deliveries.length > 1)) {
+    return s.pickups.concat(s.deliveries).map((x) => shortPlace(x.location));
+  }
+  return [shortPlace(l.pickupLocation), shortPlace(l.deliveryLocation)];
+}
+
 /* One load as a route card: big city-pair headline, bold blue reference,
    the route line as a live progress bar (server-computed %), Edit /
    Reopen / Reactivate / Delete along the bottom. */
 function loadCardHtml(l) {
-  const p = cityStateOf(l.pickupLocation);
-  const d = cityStateOf(l.deliveryLocation);
-  const headline = p && d
-    ? esc(p.city) + ', ' + p.state + ' <span class="lc-arrow">&rarr;</span> ' + esc(d.city) + ', ' + d.state
-    : esc(l.pickupLocation) + ' &rarr; ' + esc(l.deliveryLocation);
+  const headline = routeChain(l).map(esc).join(' <span class="lc-arrow">&rarr;</span> ');
   const pct = typeof l.progress === 'number' ? l.progress : null;
   const pillCls = l.status === 'active' ? 'blue' : l.status === 'completed' ? 'green' : 'red';
   return '<div class="load-card">' +
