@@ -5504,6 +5504,65 @@ async function findMissingRcFiles() {
   } catch (e) { console.error('missing rc files failed', e); }
 }
 
+// Fetch the 3 missing RCs from the connected mailboxes themselves
+// (owner, 2026-11-17: "look rc in my email"). The portal's Graph
+// connection can download attachments even though they were never
+// saved as portal files. Read-only: for each target load number,
+// search every connected mailbox, download the PDF attachments on
+// matching messages, and log the places + rate the RC readers find.
+async function fetchMissingRcFromMailboxes() {
+  try {
+    const marker = 'fetch-missing-rc-mail-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('missing rc mail: ' + m);
+    const targets = ['4700709', '26257', '409386'];
+    const users = db.prepare('SELECT * FROM users WHERE outlookRefreshToken IS NOT NULL ORDER BY isMainAdmin DESC, id').all();
+    log('mailboxes connected: ' + users.map((u) => u.outlookEmail || u.name).join(', '));
+    for (const t of targets) {
+      let downloaded = 0;
+      for (const u of users) {
+        if (downloaded >= 12) break;
+        let accessToken;
+        try { accessToken = await outlookAccessToken(u); } catch { log(t + ': no token for ' + (u.outlookEmail || u.name)); continue; }
+        const page = await outlookGraph(accessToken, '/me/messages?$search=' + encodeURIComponent('"' + t + '"') + '&$top=25&$select=id,subject,receivedDateTime,hasAttachments,bodyPreview').catch(() => null);
+        const msgs = ((page && page.value) || []);
+        log(t + ': ' + msgs.length + ' message(s) in ' + (u.outlookEmail || u.name) + (msgs.length ? ' — ' + msgs.map((m) => m.subject || '(no subject)').join(' || ') : ''));
+        for (const m of msgs) {
+          if (downloaded >= 12) break;
+          if (!m.hasAttachments) {
+            const bp = String(m.bodyPreview || '').replace(/\s+/g, ' ').trim();
+            if (bp) log(t + ': no-attachment body preview [' + (m.subject || '') + ']: ' + bp.slice(0, 220));
+            continue;
+          }
+          const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`).catch(() => null);
+          for (const a of ((atts && atts.value) || [])) {
+            if (downloaded >= 12) break;
+            if (!a.id || (a.size || 0) >= 12000000) continue;
+            const isPdf = (a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '');
+            const isImg = /image\//.test(a.contentType || '') || /\.(png|jpe?g)$/i.test(a.name || '');
+            if (!isPdf && !isImg) continue;
+            const got = await outlookAttachmentBuffer(u, m.id, a.id).catch(() => ({}));
+            if (!got.fileBuffer || !got.fileBuffer.length) { log(t + ': attachment "' + (a.name || '') + '" could not be downloaded'); continue; }
+            downloaded += 1;
+            const text = String(await extractFileText(got.fileBuffer).catch(() => '') || '').replace(/\s+/g, ' ');
+            log(t + ': attachment "' + (a.name || '') + '" from [' + (m.subject || '') + '] text chars=' + text.length);
+            if (!text.length) continue;
+            const places = scanRcPlaces(text, 0);
+            log(t + ': places: ' + (places.map((p) => p.city + ', ' + p.state + (p.zip ? ' ' + p.zip : '')).join(' | ') || 'none'));
+            log(t + ': rate read: ' + JSON.stringify(extractRateConDetails(text)));
+            log(t + ': fields: ' + JSON.stringify(extractRcLoadFields(text)));
+            const idx = text.indexOf(t);
+            if (idx >= 0) log(t + ': context: ' + text.slice(Math.max(0, idx - 80), idx + 220));
+          }
+        }
+      }
+      log(t + ': attachments downloaded: ' + downloaded);
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('missing rc mail failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7422,7 +7481,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
