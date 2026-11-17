@@ -5363,6 +5363,36 @@ async function fixRtc528772DeliveryTime() {
   } catch (e) { console.error('rtc 528772 delivery time failed', e); }
 }
 
+// LXL-1197586 driver fix (owner, 2026-11-17): the GA -> MA load was
+// sitting under Akash / truck 1301, but it is Arshdeep's load —
+// truck 1302. Reassign the load (and its filed documents) to
+// Arshdeep with truck 1302 / trailer 5302.
+async function fixLoad1197586Driver() {
+  try {
+    const marker = 'fix-load-1197586-driver-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('load 1197586 driver: ' + m);
+    const arsh = db.prepare("SELECT id FROM users WHERE name LIKE 'Arshdeep%' ORDER BY id LIMIT 1").get();
+    const load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-1197586'").get();
+    if (!arsh || !load) { log('skipped arsh=' + (arsh ? arsh.id : 'none') + ' load=' + (load ? load.id : 'none')); return; }
+    const truck = db.prepare("SELECT id FROM trucks WHERE unitNumber = '1302'").get();
+    const trailer = db.prepare("SELECT id FROM trailers WHERE unitNumber = '5302'").get();
+    log('before driverId=' + load.driverId + ' truckId=' + (load.truckId ?? null) + ' trailerId=' + (load.trailerId ?? null));
+    const cols = db.prepare('PRAGMA table_info(loads)').all().map((c) => c.name);
+    let sql = 'UPDATE loads SET driverId = ?';
+    const args = [arsh.id];
+    if (cols.includes('truckId') && truck) { sql += ', truckId = ?'; args.push(truck.id); }
+    if (cols.includes('trailerId') && trailer) { sql += ', trailerId = ?'; args.push(trailer.id); }
+    sql += ' WHERE id = ?'; args.push(load.id);
+    db.prepare(sql).run(...args);
+    const docs = db.prepare('UPDATE documents SET driverId = ? WHERE loadId = ?').run(arsh.id, load.id);
+    const after = db.prepare('SELECT driverId, truckId, trailerId FROM loads WHERE id = ?').get(load.id);
+    log('after driverId=' + after.driverId + ' truckId=' + (after.truckId ?? null) + ' trailerId=' + (after.trailerId ?? null) + '; documents moved: ' + docs.changes);
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('load 1197586 driver fix failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7281,7 +7311,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
