@@ -3133,6 +3133,25 @@ async function nominatimSearch(q) {
   return null;
 }
 
+// Photon (Komoot) place search — a separate host from Nominatim, used
+// first for city lookups because Nominatim rate-limits the server's
+// datacenter IP during backfill bursts (three loads stayed mile-less
+// through several retries on 2026-11-17 while their addresses were
+// perfectly ordinary).
+async function photonSearch(q) {
+  try {
+    const r = await fetch('https://photon.komoot.io/api/?limit=1&q=' + encodeURIComponent(q), { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' }, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const f = j && j.features && j.features[0];
+    if (!f || !f.geometry || !Array.isArray(f.geometry.coordinates)) return null;
+    const lng = Number(f.geometry.coordinates[0]), lat = Number(f.geometry.coordinates[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  } catch { /* caller falls through */ }
+  return null;
+}
+
 // Fast coordinates for the miles calculation: the stored/gate pin when
 // there is one, otherwise a city-level Nominatim lookup (plenty
 // accurate for road miles, and far faster than the full address chain),
@@ -3143,7 +3162,9 @@ async function milesCoords(load, kind) {
   if (typeof lat === 'number' && typeof lng === 'number') return { lat, lng };
   const text = kind === 'pickup' ? load.pickupLocation : load.deliveryLocation;
   const cs = cityStateOf(text);
+  if (cs) { const hit = await photonSearch(cs); if (hit) return hit; }
   if (cs) { const hit = await nominatimSearch(cs); if (hit) return hit; }
+  if (text && String(text).trim().length > 3) { const hit = await photonSearch(String(text).trim()); if (hit) return hit; }
   if (text && String(text).trim().length > 3) { const hit = await nominatimSearch(String(text).trim()); if (hit) return hit; }
   return kind === 'pickup' ? ensurePickupCoords(load) : ensureDeliveryCoords(load);
 }
