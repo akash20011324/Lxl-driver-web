@@ -5673,6 +5673,116 @@ async function fetchMissingRcFromMailboxes3() {
   } catch (e) { console.error('missing rc mail3 failed', e); }
 }
 
+// Add Akash's Armstrong + Joy Ride loads — routes READ from the
+// documents in his own mailbox (fetch v3, 2026-11-17):
+// - Armstrong 4700709-1: the OTR invoice screenshot in the thread
+//   reads "Ship From Holland, OH 43528 / Ship To Phoneton, OH 45371",
+//   Amount $1100.00, broker Armstrong Transport Group. Pickup Oct 2,
+//   delivered Oct 3 (paperwork dispute Oct 5, clean BOL sent).
+// - Joy Ride Pro #26257: the signed RC reads Stop 0 Punta Gorda, FL
+//   appt 10/24/26 -> Stop 1 WALMART, 1729 State Rd 8, Auburn, IN
+//   46706, appt 10/26/26 04:00. Melons, reefer 55F. Truck 1301.
+//   No labelled rate survived the RC's scan, so no rate row yet.
+async function addMissingAkashLoads() {
+  try {
+    const marker = 'add-missing-akash-loads-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('missing akash loads: ' + m);
+    const akash = db.prepare("SELECT id, name FROM users WHERE role = 'driver' AND name LIKE 'Akashdeep%'").get();
+    if (!akash) { log('SKIPPED — Akash driver row not found'); return; }
+    const defs = [
+      {
+        ref: 'LXL-4700709-1', rcRef: '4700709-1', broker: 'Armstrong Transport Group',
+        pickupLocation: 'Holland, OH 43528', pickupWarehouse: null, pickupAt: '2026-10-02T09:00:00', pickupTimezone: 'America/New_York',
+        deliveryLocation: 'Phoneton, OH 45371', deliveryAt: '2026-10-03T17:00:00', deliveryTimezone: 'America/New_York',
+        pState: 'OH', dState: 'OH', pDate: '2026-10-02', dDate: '2026-10-03', rateCents: 110000,
+        notes: 'Broker: Armstrong Transport Group (Neil Johnson). Route and $1,100 amount read from the OTR invoice screenshot in the rate con email thread (Ship From Holland, OH 43528 / Ship To Phoneton, OH 45371). Paperwork dispute Oct 5 — clean BOL sent.',
+      },
+      {
+        ref: 'LXL-26257', rcRef: null, broker: 'Joy Ride Express',
+        pickupLocation: 'Punta Gorda, FL', pickupWarehouse: null, pickupAt: '2026-10-24T09:00:00', pickupTimezone: 'America/New_York',
+        deliveryLocation: 'Auburn, IN 46706', deliveryWarehouse: 'Walmart, 1729 State Rd 8', deliveryAt: '2026-10-26T04:00:00', deliveryTimezone: 'America/New_York',
+        notes: 'Broker: Joy Ride Express (Stephen Nickels). Melons — reefer set at 55F. Route and appointments read from the signed rate confirmation in the mailbox (Punta Gorda, FL appt 10/24/26 -> Walmart Auburn, IN appt 10/26/26 04:00).',
+      },
+    ];
+    for (const d of defs) {
+      let loadId;
+      const existing = db.prepare('SELECT id FROM loads WHERE reference = ?').get(d.ref);
+      if (existing) { loadId = existing.id; log(d.ref + ' load already there, checking its rate con'); }
+      else {
+        const ins = db.prepare(`INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`)
+          .run(d.ref, akash.id, d.pickupLocation, d.pickupWarehouse || null, d.pickupAt, d.pickupTimezone, d.deliveryLocation, d.deliveryWarehouse || null, d.deliveryAt, d.deliveryTimezone, d.notes, d.deliveryAt, new Date().toISOString());
+        loadId = ins.lastInsertRowid;
+      }
+      if (d.rcRef && d.rateCents) {
+        const rc = db.prepare('SELECT id FROM rate_confirmations WHERE reference = ? OR loadId = ?').get(d.rcRef, loadId);
+        if (!rc) {
+          db.prepare(`INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`)
+            .run(d.rcRef, loadId, d.broker, d.pState, d.dState, d.pDate, d.dDate, d.rateCents, new Date().toISOString());
+        }
+      }
+      log('added ' + d.ref + ' for ' + akash.name + (d.rateCents ? ' at $' + (d.rateCents / 100).toFixed(2) : ' (no rate)'));
+    }
+    const tot = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get();
+    log('rate cons now: ' + tot.n + ' rows, booked $' + (tot.s / 100).toFixed(2));
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('missing akash loads failed', e); }
+}
+
+// Final micro-pass: (a) New City 409386 — read the signed
+// confirmation in AISHA's mailbox (v3's report cut before its
+// lines); (b) Joy Ride 26257 — hunt the rate line in the signed RC.
+async function fetchMissingRcFinal() {
+  try {
+    const marker = 'fetch-missing-rc-final-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('missing rc mail4: ' + m);
+    const allUsers = db.prepare('SELECT * FROM users WHERE outlookRefreshToken IS NOT NULL').all();
+    const hunts = [
+      { t: '409386', hint: 'aisha', nameHint: '409386', words: ['Pickup', 'Deliver', 'Shipper', 'Consignee', 'Origin', 'Destination', 'Rate', 'Total'] },
+      { t: '26257', hint: 'lxlus13', nameHint: 'Signed_RateConfirmation', words: ['Rate', 'Total', 'Line Haul', 'Amount', '$'] },
+    ];
+    for (const h of hunts) {
+      const users = [...allUsers].sort((a, b) => (String(a.outlookEmail || '').toLowerCase().includes(h.hint) ? 0 : 1) - (String(b.outlookEmail || '').toLowerCase().includes(h.hint) ? 0 : 1));
+      let logged = 0;
+      for (const u of users) {
+        if (logged >= 2) break;
+        let accessToken;
+        try { accessToken = await outlookAccessToken(u); } catch { continue; }
+        const page = await outlookGraph(accessToken, '/me/messages?$search=' + encodeURIComponent('"' + h.t + '"') + '&$top=50&$select=id,subject,hasAttachments').catch(() => null);
+        const msgs = ((page && page.value) || []).filter((m) => String(m.subject || '').includes(h.t) && m.hasAttachments);
+        for (const m of msgs) {
+          if (logged >= 2) break;
+          const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`).catch(() => null);
+          const list = ((atts && atts.value) || []).filter((a) => a.id && (a.size || 0) < 12000000 && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '')));
+          list.sort((a, b) => (String(b.name || '').includes(h.nameHint) ? 1 : 0) - (String(a.name || '').includes(h.nameHint) ? 1 : 0));
+          for (const a of list) {
+            if (logged >= 2) break;
+            if (!String(a.name || '').includes(h.nameHint) && logged > 0) continue;
+            const got = await outlookAttachmentBuffer(u, m.id, a.id).catch(() => ({}));
+            if (!got.fileBuffer || !got.fileBuffer.length) continue;
+            const text = String(await extractFileText(got.fileBuffer).catch(() => '') || '').replace(/\s+/g, ' ');
+            if (!text.includes(h.t)) continue;
+            logged += 1;
+            const fields = extractRcLoadFields(text);
+            log(h.t + ': doc "' + (a.name || '') + '" in ' + (u.outlookEmail || u.name) + ' chars=' + text.length + ' places=' + JSON.stringify(fields.places || []) + ' dates=' + JSON.stringify(fields.dates || []) + ' rate=' + JSON.stringify(extractRateConDetails(text)));
+            for (const w of h.words) {
+              const idx = text.toLowerCase().indexOf(w.toLowerCase());
+              if (idx >= 0) log(h.t + ': ~' + w + '~: ' + text.slice(Math.max(0, idx - 100), idx + 280));
+            }
+          }
+        }
+      }
+      log(h.t + ': docs read: ' + logged);
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('missing rc mail4 failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7591,7 +7701,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
