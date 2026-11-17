@@ -4938,6 +4938,65 @@ async function fixCashflowReconciliation() {
 // fix earlier the same evening — the same double-count pattern
 // (OTR schedule money imported from email while the bank feed
 // already carries it). Removed on the owner's standing instruction
+// One-time adjudication round 9 (2026-11-17): undo what the mailbox
+// sweep re-imported earlier today. The 2026-11-16 cleanup had deleted
+// these rows on the owner's rulings, which erased their dedupe
+// fingerprints, so the sweep treated them as new: the four IEL
+// dispatch-sheet rows ($100 GPS fines, not rate cons) WITH loads, the
+// CANCELLED Corcoran LXL-127657 ($2,350) and the FAKE PTG LXL-9841352
+// ($12,000) as rate cons, plus empty shell rate-con rows for the two
+// Armstrong loads (a POD image filed as a rate con — the loads and
+// their PODs stay). Pairs with the permanent guards added the same
+// day: the do-not-import list in createRateCon, the OTR-schedule gate
+// in the import, and PDFs-only in the import's rate-con phase.
+async function adjudicateRateCons9() {
+  try {
+    const marker = 'rc-adjudication9-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rc adjudication9: ' + m);
+    const deleteFileIfUnused = (fileId) => {
+      if (!fileId) return;
+      const usedElsewhere = db.prepare('SELECT id FROM rate_confirmations WHERE fileId = ? LIMIT 1').get(fileId)
+        || db.prepare('SELECT id FROM documents WHERE fileId = ? LIMIT 1').get(fileId);
+      if (!usedElsewhere) {
+        const f = db.prepare('SELECT storedFilename FROM files WHERE id = ?').get(fileId);
+        db.prepare('DELETE FROM files WHERE id = ?').run(fileId);
+        if (f && f.storedFilename) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f.storedFilename)); } catch { /* already gone */ } }
+      }
+    };
+    const deleteRcFully = (row, why) => {
+      db.prepare('DELETE FROM rate_confirmations WHERE id = ?').run(row.id);
+      deleteFileIfUnused(row.fileId);
+      log('deleted rate con ' + row.reference + ' (id ' + row.id + ') — ' + why);
+    };
+    const deleteLoadFully = (load, why) => {
+      for (const rc of db.prepare('SELECT * FROM rate_confirmations WHERE loadId = ?').all(load.id)) deleteRcFully(rc, why);
+      for (const doc of db.prepare('SELECT * FROM documents WHERE loadId = ?').all(load.id)) {
+        db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+        deleteFileIfUnused(doc.fileId);
+      }
+      db.prepare('DELETE FROM loads WHERE id = ?').run(load.id);
+      log('deleted load ' + load.reference + ' (id ' + load.id + ') — ' + why);
+    };
+    // 1. IEL dispatch sheets: rate cons AND their loads out (again).
+    for (const ref of ['LXL-3127767', 'LXL-3020150', 'LXL-3012815', 'LXL-3002349']) {
+      for (const rc of db.prepare('SELECT * FROM rate_confirmations WHERE reference = ?').all(ref)) deleteRcFully(rc, 'IEL dispatch sheet, not a rate confirmation (owner ruling 2026-11-16; re-imported by the 2026-11-17 sweep)');
+      for (const load of db.prepare('SELECT * FROM loads WHERE reference = ?').all(ref)) deleteLoadFully(load, 'IEL dispatch-sheet load (owner ruling 2026-11-16; re-created by the 2026-11-17 sweep)');
+    }
+    // 2. Cancelled Corcoran + fake PTG: rate cons out (no loads exist).
+    for (const ref of ['LXL-127657', 'LXL-9841352']) {
+      for (const rc of db.prepare('SELECT * FROM rate_confirmations WHERE reference = ?').all(ref)) deleteRcFully(rc, ref === 'LXL-127657' ? 'CANCELLED Corcoran load (owner ruling 2026-11-16; re-imported by the 2026-11-17 sweep)' : 'FAKE PTG load (owner ruling 2026-11-16; re-imported by the 2026-11-17 sweep)');
+    }
+    // 3. Armstrong shell rows: rate cons with no rate and no broker —
+    // the loads and their filed PODs are NOT touched.
+    for (const ref of ['LXL-4837432-1', 'LXL-4750931-1']) {
+      for (const rc of db.prepare("SELECT * FROM rate_confirmations WHERE reference = ? AND rateCents IS NULL AND (broker IS NULL OR broker = '')").all(ref)) deleteRcFully(rc, 'empty shell row (POD image filed as a rate con by the 2026-11-17 sweep); the load itself stays, no rate con per the owner');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rc adjudication9 failed', e); }
+}
+
 // from that fix. Exact-single-match guard.
 async function removeOutlookFactoring2() {
   try {
@@ -5019,6 +5078,15 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
     if (!load) throw Object.assign(new Error('Load not found'), { status: 404 });
   }
   const ref = lxlLoadRef(reference || (load && load.reference) || '');
+  // Owner-ruled-out load numbers (2026-11-16 cleanup; a sweep re-imported
+  // them on 2026-11-17 because deleting the rows erased their dedupe
+  // fingerprints): Corcoran 127657 is CANCELLED, PTG 9841352 and WJW
+  // 10425782 are FAKE, Scotlynn 1580304 is CANCELLED, and the four IEL
+  // numbers are dispatch sheets, not rate confirmations (their $100 is
+  // a GPS fine). Never create a rate con for these again.
+  const bareRef = String(ref || '').replace(/^LXL-/i, '');
+  if (['127657', '9841352', '10425782', '1580304', '3020150', '3012815', '3002349', '3127767'].includes(bareRef))
+    throw Object.assign(new Error('This load number is on the do-not-import list (cancelled, fake, or not a rate confirmation)'), { status: 400 });
   const pState = pickupState || (load && stateFromAddress(load.pickupLocation));
   const dState = deliveryState || (load && stateFromAddress(load.deliveryLocation));
   const pDate = pickupDate || (load && dateInZone(load.pickupAt, load.pickupTimezone));
@@ -5551,7 +5619,11 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
           processed += 1;
           try {
             const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`);
-            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || (a.contentType || '').startsWith('image/')) && (a.size || 0) < 12000000);
+            // PDFs only in the rate-con phase: image attachments on
+            // "Rate Confirmation" threads are signed BOLs/PODs, and
+            // filing one as a rate con created empty shell rows
+            // (2026-11-17). Paperwork images belong to the BOL phase.
+            const files = (atts.value || []).filter((a) => a.id && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '')) && (a.size || 0) < 12000000);
             let handled = false;
             for (const att of files) {
               const { fileBuffer } = await outlookAttachmentBuffer(mbUser, m.id, att.id);
@@ -5567,6 +5639,16 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
               if (!key) {
                 counts.heldOut += 1;
                 if (counts.heldOutSubjects.length < 10) counts.heldOutSubjects.push(subject + ' (no load number found)');
+                break;
+              }
+              // Owner's rule (2026-11-16, enforced 2026-11-17): a rate
+              // confirmation is imported ONLY if its load number appears
+              // on an OTR paid schedule. Before this check the import let
+              // off-schedule mail in "on your say-so", which re-created
+              // cancelled/fake/dispatch-sheet rows the owner had removed.
+              if (!onSchedule && run.paidRefs && run.paidRefs.size > 0) {
+                counts.heldOut += 1;
+                if (counts.heldOutSubjects.length < 10) counts.heldOutSubjects.push(subject + ' (not on any OTR schedule)');
                 break;
               }
               let load = null;
@@ -6677,7 +6759,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
