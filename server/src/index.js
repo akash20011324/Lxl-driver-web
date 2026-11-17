@@ -5614,6 +5614,65 @@ async function fetchMissingRcFromMailboxes2() {
   } catch (e) { console.error('missing rc mail2 failed', e); }
 }
 
+// Fetch v3 — read the actual words. v2 found the right threads but
+// the anchored readers came back with fragments (Armstrong: Holland
+// OH + Phoneton OH in one document, Roswell GA in another; Joy Ride:
+// Auburn IN amid garbled OCR; New City: the signed confirmation sits
+// in Aisha's mailbox, which v2's download cap never reached). This
+// pass searches the mailbox that holds each document FIRST, prefers
+// attachments whose name carries the load number, and logs short
+// text excerpts around the key words so the pickup/delivery labels
+// can be read directly.
+async function fetchMissingRcFromMailboxes3() {
+  try {
+    const marker = 'fetch-missing-rc-mail3-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('missing rc mail3: ' + m);
+    const jobs = [
+      { t: '4700709', mailboxHint: 'lxlus13', words: ['Holland', 'Phoneton', 'Roswell', 'Pickup', 'Deliver', 'Consignee', 'Shipper'] },
+      { t: '26257', mailboxHint: 'lxlus13', words: ['Auburn', 'Pickup', 'Deliver', 'Consignee', 'Shipper', 'Origin', 'Destination'] },
+      { t: '409386', mailboxHint: 'aisha', words: ['Pickup', 'Deliver', 'Consignee', 'Shipper', 'Origin', 'Destination', 'Beer', 'Brew'] },
+    ];
+    const allUsers = db.prepare('SELECT * FROM users WHERE outlookRefreshToken IS NOT NULL').all();
+    for (const job of jobs) {
+      const users = [...allUsers].sort((a, b) => (String(a.outlookEmail || '').toLowerCase().includes(job.mailboxHint) ? 0 : 1) - (String(b.outlookEmail || '').toLowerCase().includes(job.mailboxHint) ? 0 : 1));
+      let logged = 0;
+      for (const u of users) {
+        if (logged >= 3) break;
+        let accessToken;
+        try { accessToken = await outlookAccessToken(u); } catch { continue; }
+        const page = await outlookGraph(accessToken, '/me/messages?$search=' + encodeURIComponent('"' + job.t + '"') + '&$top=50&$select=id,subject,hasAttachments').catch(() => null);
+        const msgs = ((page && page.value) || []).filter((m) => String(m.subject || '').includes(job.t) && m.hasAttachments);
+        for (const m of msgs) {
+          if (logged >= 3) break;
+          const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`).catch(() => null);
+          const list = ((atts && atts.value) || []).filter((a) => a.id && (a.size || 0) < 12000000 && ((a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '') || /image\//.test(a.contentType || '') || /\.(png|jpe?g)$/i.test(a.name || '')));
+          list.sort((a, b) => (String(b.name || '').includes(job.t) ? 1 : 0) - (String(a.name || '').includes(job.t) ? 1 : 0));
+          for (const a of list) {
+            if (logged >= 3) break;
+            const got = await outlookAttachmentBuffer(u, m.id, a.id).catch(() => ({}));
+            if (!got.fileBuffer || !got.fileBuffer.length) continue;
+            const text = String(await extractFileText(got.fileBuffer).catch(() => '') || '').replace(/\s+/g, ' ');
+            if (!text.includes(job.t)) continue;
+            const fields = extractRcLoadFields(text);
+            const score = (fields.places ? fields.places.length : 0) + (fields.dates && fields.dates.length ? 1 : 0);
+            log(job.t + ': doc "' + (a.name || '') + '" in ' + (u.outlookEmail || u.name) + ' chars=' + text.length + ' score=' + score + ' places=' + JSON.stringify(fields.places || []) + ' dates=' + JSON.stringify(fields.dates || []));
+            if (score === 0) continue;
+            logged += 1;
+            for (const w of job.words) {
+              const idx = text.toLowerCase().indexOf(w.toLowerCase());
+              if (idx >= 0) log(job.t + ': ~' + w + '~: ' + text.slice(Math.max(0, idx - 120), idx + 260));
+            }
+          }
+        }
+      }
+      log(job.t + ': excerpted docs: ' + logged);
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('missing rc mail3 failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7532,7 +7591,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
