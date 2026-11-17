@@ -1812,8 +1812,22 @@ admin.get('/cashflow', async (req, res) => {
     return [...m.entries()].map(([category, amountCents]) => ({ category, amountCents })).sort((a, b) => b.amountCents - a.amountCents);
   };
   const monthIn = groupBy(agg.all.filter((e) => e.direction === 'in' && inMonth(e)));
-  const monthOut = groupBy(agg.all.filter((e) => e.direction === 'out' && inMonth(e)));
+  let monthOut = groupBy(agg.all.filter((e) => e.direction === 'out' && inMonth(e)));
   for (const f of fixed) if (fixedMonthsThrough(f, monthParam) > 0) monthOut.push({ category: f.category, amountCents: f.amountCents, fixed: true });
+  // One box per category (owner, 2026-11-17): fixed payments merge
+  // into their category group instead of showing as separate tiles —
+  // the two truck payments + Garrett trailer rent are ONE
+  // "Truck payment · fixed" box.
+  {
+    const m = new Map();
+    for (const g of monthOut) {
+      const cur = m.get(g.category) || { category: g.category, amountCents: 0 };
+      cur.amountCents += g.amountCents;
+      if (g.fixed) cur.fixed = true;
+      m.set(g.category, cur);
+    }
+    monthOut = [...m.values()].sort((a, b) => b.amountCents - a.amountCents);
+  }
   const monthInTotal = monthIn.reduce((s, x) => s + x.amountCents, 0);
   const monthOutTotal = monthOut.reduce((s, x) => s + x.amountCents, 0);
   // Per-truck: trip revenue from rate cons (via the load's driver), costs
@@ -1917,8 +1931,17 @@ admin.get('/cashflow/report.csv', (req, res) => {
   } else if (section === 'monthly') {
     const inMonth = (e) => (e.date || '').startsWith(monthParam);
     const mIn = cashGroupBy(all.filter((e) => e.direction === 'in' && inMonth(e)));
-    const mOut = cashGroupBy(all.filter((e) => e.direction === 'out' && inMonth(e)));
-    for (const f of fixed) if (fixedMonthsThrough(f, monthParam) > 0) mOut.push({ category: f.category + ' (fixed)', amountCents: f.amountCents });
+    const mOutRaw = cashGroupBy(all.filter((e) => e.direction === 'out' && inMonth(e)));
+    for (const f of fixed) if (fixedMonthsThrough(f, monthParam) > 0) mOutRaw.push({ category: f.category, amountCents: f.amountCents, fixed: true });
+    const mOutMap = new Map();
+    for (const g of mOutRaw) {
+      const cur = mOutMap.get(g.category) || { category: g.category, amountCents: 0, fixed: false };
+      cur.amountCents += g.amountCents;
+      if (g.fixed) cur.fixed = true;
+      mOutMap.set(g.category, cur);
+    }
+    const mOut = [...mOutMap.values()].sort((a, b) => b.amountCents - a.amountCents)
+      .map((g) => ({ category: g.category + (g.fixed ? ' (fixed)' : ''), amountCents: g.amountCents }));
     const inT = mIn.reduce((s, x) => s + x.amountCents, 0);
     const outT = mOut.reduce((s, x) => s + x.amountCents, 0);
     L.push(q('LXL Cash Flow — Monthly profit and loss — ' + monthParam));
