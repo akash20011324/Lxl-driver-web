@@ -5401,6 +5401,52 @@ async function fixLoad1197586Driver() {
   } catch (e) { console.error('load 1197586 driver fix failed', e); }
 }
 
+// The two Uber Freight loads from the missing-loads hunt (owner
+// confirmed 2026-11-17: both are Arshdeep's, truck 1302). Routes and
+// rates are labelled in Uber's own RC emails; PODs were processed by
+// Uber, and both invoices sit on OTR paid schedules (LXLD-43 and
+// LXLD-40) — the loads ran and were paid, they were just never
+// entered. Added as completed loads with rate con rows, following
+// the portal's existing Uber convention (LXL-<number>).
+async function addMissingUberLoads() {
+  try {
+    const marker = 'add-missing-uber-loads-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('missing uber loads: ' + m);
+    const truck = db.prepare("SELECT driverId FROM trucks WHERE unitNumber = '1302'").get();
+    const arsh = truck && truck.driverId ? db.prepare('SELECT id, name FROM users WHERE id = ?').get(truck.driverId) : null;
+    if (!arsh) { log('skipped — Arsh not resolved'); return; }
+    const defs = [
+      { ref: 'LXL-6988101101', rcRef: '6988101101', rateCents: 250000,
+        pickupLocation: 'Fairburn, GA 30213', pickupWarehouse: 'Mondelez International - Atlanta 3PL, 5355 Campbellton Fairburn Rd',
+        pickupAt: '2026-10-20T09:00:00', pickupTimezone: 'America/New_York',
+        deliveryLocation: 'Middletown, PA', deliveryAt: '2026-10-22T17:00:00', deliveryTimezone: 'America/New_York',
+        pState: 'GA', dState: 'PA', pDate: '2026-10-20', dDate: '2026-10-22',
+        notes: 'Uber Freight UF-6988101101. POD processed by Uber 2026-10-22. On OTR schedule LXLD-43. Added 2026-11-17 from the missing-loads hunt (owner confirmed: Arsh load).' },
+      { ref: 'LXL-1428399333', rcRef: '1428399333', rateCents: 527800,
+        pickupLocation: 'Anderson, IN 46011', pickupWarehouse: 'US DC Interstate Anderson, 7445 S Layton Rd',
+        pickupAt: '2026-10-14T09:00:00', pickupTimezone: 'America/New_York',
+        deliveryLocation: 'Ashland, VA', deliveryAt: '2026-10-16T17:00:00', deliveryTimezone: 'America/New_York',
+        pState: 'IN', dState: 'VA', pDate: '2026-10-14', dDate: '2026-10-16',
+        notes: 'Uber Freight UF-1428399333. POD processed by Uber 2026-10-16. On OTR schedule LXLD-40. Added 2026-11-17 from the missing-loads hunt (owner confirmed: Arsh load).' },
+    ];
+    for (const d of defs) {
+      if (db.prepare('SELECT id FROM loads WHERE reference = ?').get(d.ref)) { log(d.ref + ' already exists, skipped'); continue; }
+      const ins = db.prepare(`INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`)
+        .run(d.ref, arsh.id, d.pickupLocation, d.pickupWarehouse, d.pickupAt, d.pickupTimezone, d.deliveryLocation, d.deliveryAt, d.deliveryTimezone, d.notes, d.deliveryAt, new Date().toISOString());
+      db.prepare(`INSERT INTO rate_confirmations (reference, loadId, broker, pickupState, deliveryState, pickupDate, deliveryDate, rateCents, fileId)
+        VALUES (?, ?, 'Uber Freight', ?, ?, ?, ?, ?, NULL)`)
+        .run(d.rcRef, ins.lastInsertRowid, d.pState, d.dState, d.pDate, d.dDate, d.rateCents);
+      log('added ' + d.ref + ' for ' + arsh.name + ' at $' + (d.rateCents / 100).toFixed(2));
+    }
+    const t = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get();
+    log('rate cons now: ' + t.n + ' rows, booked $' + (t.s / 100).toFixed(2));
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('missing uber loads failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -7319,7 +7365,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
