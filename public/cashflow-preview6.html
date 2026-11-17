@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LXL Cash Flow — Design 6 · KPI Wall</title>
+<style>
+  :root{ --blue:#1E40AF; --blue2:#3B82F6; --gold:#F2B705; --bg:#05070c; --panel:#0c1119; --line:#1c2635;
+    --txt:#e8eef6; --dim:#8494ab; --in:#34d399; --out:#fb7185; }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--txt); font-family:"Segoe UI", -apple-system, Roboto, monospace; padding:16px 14px 40px;}
+  .wrap{max-width:1240px; margin:0 auto;}
+  header{display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+  .logo{font-weight:900; font-size:24px;} .logo span{color:var(--gold);}
+  h1{font-size:18px; letter-spacing:2px; text-transform:uppercase; font-weight:800;}
+  .back{margin-left:auto; color:var(--gold); text-decoration:none; font-size:13px; border:1px solid rgba(242,183,5,.4); padding:6px 11px; border-radius:6px;}
+  .notice{background:rgba(242,183,5,.08); border:1px solid rgba(242,183,5,.3); color:#ffe9a8; border-radius:8px; padding:8px 12px; font-size:12.5px; margin:11px 0;}
+  .monthbar{display:flex; align-items:center; gap:10px; margin:4px 0 12px;}
+  .mbtn{width:34px; height:34px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:#fff; font-size:17px; cursor:pointer;}
+  .mlabel{font-size:16px; font-weight:800; letter-spacing:1.5px; min-width:160px; text-align:center; text-transform:uppercase;}
+  .wall{display:grid; grid-template-columns:repeat(4, 1fr); gap:9px;}
+  @media (max-width:1000px){ .wall{grid-template-columns:repeat(2, 1fr);} }
+  @media (max-width:520px){ .wall{grid-template-columns:1fr;} }
+  .tile{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:11px 13px; position:relative; overflow:hidden;}
+  .tile:before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--blue2);}
+  .tile.gold:before{background:var(--gold);} .tile.gn:before{background:var(--in);} .tile.rd:before{background:var(--out);}
+  .tlab{font-size:10.5px; letter-spacing:1.4px; color:var(--dim); text-transform:uppercase; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .tval{font-size:22px; font-weight:800; margin-top:3px; font-variant-numeric:tabular-nums;}
+  .tsub{font-size:11.5px; color:var(--dim); margin-top:2px;}
+  .sect{font-size:12px; letter-spacing:2px; color:var(--dim); text-transform:uppercase; font-weight:800; margin:18px 0 8px;}
+  .in{color:var(--in);} .out{color:var(--out);} .gold{color:var(--gold);}
+  table{width:100%; border-collapse:collapse; font-size:13.5px; font-variant-numeric:tabular-nums;}
+  th{ text-align:left; color:var(--dim); font-size:11px; letter-spacing:1.2px; text-transform:uppercase; padding:6px 8px; border-bottom:1px solid var(--line);}
+  td{padding:6.5px 8px; border-bottom:1px solid #131c2b;}
+  td.n, th.n{text-align:right;}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:13px 15px;}
+  .grid2{display:grid; grid-template-columns:1.2fr .8fr; gap:9px;}
+  @media (max-width:900px){ .grid2{grid-template-columns:1fr;} }
+  .err{background:rgba(251,113,133,.12); border:1px solid rgba(251,113,133,.4); border-radius:8px; padding:13px; font-size:14px;}
+  .spin{color:var(--dim); text-align:center; padding:30px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">LXL<span>➤</span></div>
+    <h1>Cash Flow · KPI Wall</h1>
+    <a class="back" href="/">← Portal</a>
+  </header>
+  <div class="notice">⭐ <b>Design 6 · KPI Wall preview</b> — every number on one wall, nothing hidden. Real, live books; your current Cash Flow page is untouched.</div>
+  <div class="monthbar">
+    <button class="mbtn" id="prevM">‹</button>
+    <div class="mlabel" id="mLabel">…</div>
+    <button class="mbtn" id="nextM">›</button>
+  </div>
+  <div id="root"><div class="spin">Loading your books…</div></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const money = (c, dec) => (c == null ? '—' : (c < 0 ? '-$' : '$') + Math.abs(c / 100).toLocaleString('en-US', { minimumFractionDigits: dec ? 2 : 0, maximumFractionDigits: dec ? 2 : 0 }));
+let curKey = new Date().toISOString().slice(0, 7);
+function monthName(key) { const [y, m] = key.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }); }
+function shiftMonth(key, d) { const [y, m] = key.split('-').map(Number); return new Date(y, m - 1 + d, 1).toISOString().slice(0, 7); }
+$('#prevM').onclick = () => { curKey = shiftMonth(curKey, -1); load(); };
+$('#nextM').onclick = () => { curKey = shiftMonth(curKey, 1); load(); };
+
+async function load() {
+  $('#mLabel').textContent = monthName(curKey);
+  const token = localStorage.getItem('lxl_token') || '';
+  if (!token) { $('#root').innerHTML = '<div class="err">You are not signed in on this browser. Open the portal, sign in, then reload this page.</div>'; return; }
+  let d;
+  try {
+    const r = await fetch('/api/admin/cashflow?month=' + curKey, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+  } catch (e) { $('#root').innerHTML = '<div class="err">Could not load the books (' + e.message + '). Reload to try again.</div>'; return; }
+  const m = d.month, bb = d.bankBalance;
+  const perDay = (() => { const [y, mo] = curKey.split('-').map(Number); const days = new Date(y, mo, 0).getDate(); return Math.round(m.outTotalCents / days); })();
+  const topTiles = `
+    <div class="tile gn"><div class="tlab">In · ${monthName(curKey)}</div><div class="tval in">${money(m.inTotalCents)}</div><div class="tsub">${m.inGroups.length} income categories</div></div>
+    <div class="tile rd"><div class="tlab">Out · ${monthName(curKey)}</div><div class="tval out">${money(m.outTotalCents)}</div><div class="tsub">≈ ${money(perDay)} per day</div></div>
+    <div class="tile ${m.profitCents >= 0 ? 'gn' : 'rd'}"><div class="tlab">Profit · ${monthName(curKey)}</div><div class="tval ${m.profitCents >= 0 ? 'in' : 'out'}">${money(m.profitCents)}</div><div class="tsub">${m.inTotalCents > 0 ? Math.round(m.profitCents / m.inTotalCents * 100) : 0}% of money in</div></div>
+    <div class="tile gold"><div class="tlab">Bank · BofA ••${bb ? (bb.mask || '1214') : '1214'}</div><div class="tval gold">${bb ? money(bb.currentCents) : '—'}</div><div class="tsub">Available ${bb ? money(bb.availableCents) : '—'}</div></div>`;
+  const catTiles = [...m.outGroups].sort((a, b) => b.amountCents - a.amountCents).map(g => `
+    <div class="tile"><div class="tlab">${g.category}${g.fixed ? ' · fixed' : ''}</div><div class="tval">${money(g.amountCents)}</div>
+    <div class="tsub">${m.outTotalCents ? Math.round(g.amountCents / m.outTotalCents * 1000) / 10 : 0}% of money out</div></div>`).join('');
+  const inTiles = m.inGroups.map(g => `
+    <div class="tile gn"><div class="tlab">${g.category}</div><div class="tval in">${money(g.amountCents)}</div>
+    <div class="tsub">${m.inTotalCents ? Math.round(g.amountCents / m.inTotalCents * 1000) / 10 : 0}% of money in</div></div>`).join('');
+  const truckRows = (d.truckMonthly || []).map(t => `<tr><td><b>Truck ${t.unitNumber}</b></td><td class="n">${t.loadsInMonth}</td>
+    <td class="n in">${money(t.revenueCents)}</td><td class="n">${money(t.fuelCents)}</td><td class="n">${money(t.driverPayCents)}</td>
+    <td class="n">${money(t.maintCents)}</td><td class="n">${money(t.otherCents)}</td>
+    <td class="n ${t.profitCents >= 0 ? 'in' : 'out'}"><b>${money(t.profitCents)}</b></td>
+    <td class="n">${t.revenueCents > 0 ? Math.round(t.profitCents / t.revenueCents * 100) : 0}%</td></tr>`).join('');
+  const weekRows = [...d.weekly].reverse().map(w => { const net = w.inCents - w.outCents;
+    const lab = new Date(w.weekStart + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `<tr><td>Week of ${lab}</td><td class="n in">${money(w.inCents)}</td><td class="n out">${money(w.outCents)}</td><td class="n ${net >= 0 ? 'in' : 'out'}"><b>${money(net)}</b></td></tr>`; }).join('');
+  const allTiles = `
+    <div class="tile gold"><div class="tlab">Booked · rate cons</div><div class="tval gold">${money(d.bookedCents)}</div><div class="tsub">all time</div></div>
+    <div class="tile gn"><div class="tlab">Received · since May 2026</div><div class="tval in">${money(d.receivedCents)}</div><div class="tsub">all time</div></div>
+    <div class="tile rd"><div class="tlab">Paid out · since May 2026</div><div class="tval out">${money(d.outCents)}</div><div class="tsub">all time</div></div>
+    <div class="tile ${d.netCents >= 0 ? 'gn' : 'rd'}"><div class="tlab">Net · since May 2026</div><div class="tval ${d.netCents >= 0 ? 'in' : 'out'}">${money(d.netCents)}</div><div class="tsub">all time</div></div>`;
+  $('#root').innerHTML = `
+  <div class="wall">${topTiles}</div>
+  <div class="sect">Expenses by category — ${monthName(curKey)}</div>
+  <div class="wall">${catTiles || '<div class="tile"><div class="tlab">No expenses</div></div>'}</div>
+  <div class="sect">Income by category — ${monthName(curKey)}</div>
+  <div class="wall">${inTiles || '<div class="tile"><div class="tlab">No income</div></div>'}</div>
+  <div class="sect">Trucks — ${monthName(curKey)}</div>
+  <div class="panel"><table><tr><th>Truck</th><th class="n">Loads</th><th class="n">Revenue</th><th class="n">Fuel</th><th class="n">Driver pay</th><th class="n">Maint.</th><th class="n">Other</th><th class="n">Profit</th><th class="n">Margin</th></tr>${truckRows}</table></div>
+  <div class="grid2" style="margin-top:9px">
+    <div class="panel"><div class="sect" style="margin-top:0">Weekly — last 8 weeks</div><table><tr><th>Week</th><th class="n">In</th><th class="n">Out</th><th class="n">Net</th></tr>${weekRows}</table></div>
+    <div><div class="sect" style="margin-top:0">All time</div><div class="wall" style="grid-template-columns:1fr 1fr">${allTiles}</div>
+    <div class="panel" style="margin-top:9px"><div class="sect" style="margin-top:0">Fixed monthly payments</div>
+    ${(d.fixed || []).map(f => `<div style="display:flex;justify-content:space-between;font-size:13.5px;padding:4px 0;border-bottom:1px solid #131c2b"><span>${f.category}</span><b>${money(f.amountCents)}/mo</b></div>`).join('') || '<div style="color:var(--dim)">None set</div>'}
+    <div style="color:var(--dim);font-size:12px;margin-top:8px">Bank inbox waiting: <b style="color:var(--txt)">${(d.bankPending || []).length}</b></div></div></div>
+  </div>`;
+}
+load();
+</script>
+</body>
+</html>
