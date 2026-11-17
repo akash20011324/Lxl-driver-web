@@ -5372,10 +5372,18 @@ async function fixLoad1197586Driver() {
     const marker = 'fix-load-1197586-driver-2026-11-17';
     if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
     const log = (m) => console.log('load 1197586 driver: ' + m);
-    const arsh = db.prepare("SELECT id FROM users WHERE name LIKE 'Arshdeep%' ORDER BY id LIMIT 1").get();
+    // Resolve Arshdeep through truck 1302's assigned driver (the
+    // name-prefix match found nobody on the first run, 2026-11-17).
+    const truck = db.prepare("SELECT id, driverId FROM trucks WHERE unitNumber = '1302'").get();
+    let arsh = truck && truck.driverId ? db.prepare('SELECT id, name FROM users WHERE id = ?').get(truck.driverId) : null;
+    if (!arsh) arsh = db.prepare("SELECT id, name FROM users WHERE name LIKE '%Arsh%' ORDER BY id LIMIT 1").get();
     const load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-1197586'").get();
-    if (!arsh || !load) { log('skipped arsh=' + (arsh ? arsh.id : 'none') + ' load=' + (load ? load.id : 'none')); return; }
-    const truck = db.prepare("SELECT id FROM trucks WHERE unitNumber = '1302'").get();
+    if (!arsh || !load) {
+      log('skipped arsh=' + (arsh ? arsh.id : 'none') + ' load=' + (load ? load.id : 'none'));
+      for (const u of db.prepare('SELECT id, name FROM users ORDER BY id').all()) log('user ' + u.id + ' = ' + JSON.stringify(u.name));
+      return;
+    }
+    log('arsh resolved: id=' + arsh.id + ' name=' + JSON.stringify(arsh.name));
     const trailer = db.prepare("SELECT id FROM trailers WHERE unitNumber = '5302'").get();
     log('before driverId=' + load.driverId + ' truckId=' + (load.truckId ?? null) + ' trailerId=' + (load.trailerId ?? null));
     const cols = db.prepare('PRAGMA table_info(loads)').all().map((c) => c.name);
