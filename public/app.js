@@ -2898,13 +2898,13 @@ async function viewCashflow(main) {
     '<div class="maint-odo">' + fmtMoney(t.profitCents) + ' <span>profit</span></div></div>' +
     '<div class="cf-truck-stats">' +
     '<span>Made <strong>' + fmtMoney(t.revenueCents) + '</strong></span>' +
-    '<span>Fuel <strong>−' + fmtMoney(t.fuelCents) + '</strong></span>' +
-    '<span>Driver pay <strong>−' + fmtMoney(t.driverPayCents) + '</strong></span>' +
+    '<span>Fuel · receipts <strong>−' + fmtMoney(t.fuelCents) + '</strong></span>' +
+    '<span>Driver pay · mi × 65¢ <strong>−' + fmtMoney(t.driverPayCents) + '</strong></span>' +
     '<span>Maintenance <strong>−' + fmtMoney(t.maintCents) + '</strong></span>' +
     '<span>Other <strong>−' + fmtMoney(t.otherCents) + '</strong></span></div>' +
     (t.trips.length ? t.trips.map((trip) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(trip.reference) + '</strong></div>' +
-      '<span class="muted">Rate ' + fmtMoney(trip.rateCents) + '</span>' +
-      '<span class="muted">Trip expenses −' + fmtMoney(trip.expensesCents) + '</span>' +
+      '<span class="muted">Rate ' + fmtMoney(trip.rateCents) + (trip.miles ? ' · ' + trip.miles + ' mi' : '') + '</span>' +
+      '<span class="muted">' + (trip.fuelCents != null ? 'Fuel −' + fmtMoney(trip.fuelCents) + ' · Pay −' + fmtMoney(trip.driverPayCents) + (trip.otherCents ? ' · Other −' + fmtMoney(trip.otherCents) : '') : 'Trip expenses −' + fmtMoney(trip.expensesCents)) + '</span>' +
       '<span class="cf-amt ' + (trip.profitCents >= 0 ? 'in' : 'out') + '">' + (trip.profitCents >= 0 ? '+' : '−') + fmtMoney(Math.abs(trip.profitCents)) + '</span></div>').join('')
       : '<p class="empty">No trips with a rate con yet for this truck.</p>') +
     '</section>').join('');
@@ -2913,13 +2913,13 @@ async function viewCashflow(main) {
     '<div class="maint-odo">' + fmtMoney(t.profitCents) + ' <span>profit — ' + esc(monthName) + '</span></div></div>' +
     '<div class="cf-truck-stats">' +
     '<span>Made <strong>' + fmtMoney(t.revenueCents) + '</strong></span>' +
-    '<span>Fuel <strong>−' + fmtMoney(t.fuelCents) + '</strong></span>' +
-    '<span>Driver pay <strong>−' + fmtMoney(t.driverPayCents) + '</strong></span>' +
+    '<span>Fuel · receipts <strong>−' + fmtMoney(t.fuelCents) + '</strong></span>' +
+    '<span>Driver pay · mi × 65¢ <strong>−' + fmtMoney(t.driverPayCents) + '</strong></span>' +
     '<span>Maintenance <strong>−' + fmtMoney(t.maintCents) + '</strong></span>' +
     '<span>Other <strong>−' + fmtMoney(t.otherCents) + '</strong></span></div>' +
     (t.trips.length ? t.trips.map((trip) => '<div class="cf-row"><div class="cf-row-main"><strong>' + esc(trip.reference) + '</strong></div>' +
-      '<span class="muted">Rate ' + fmtMoney(trip.rateCents) + '</span>' +
-      '<span class="muted">Trip expenses −' + fmtMoney(trip.expensesCents) + '</span>' +
+      '<span class="muted">Rate ' + fmtMoney(trip.rateCents) + (trip.miles ? ' · ' + trip.miles + ' mi' : '') + '</span>' +
+      '<span class="muted">' + (trip.fuelCents != null ? 'Fuel −' + fmtMoney(trip.fuelCents) + ' · Pay −' + fmtMoney(trip.driverPayCents) + (trip.otherCents ? ' · Other −' + fmtMoney(trip.otherCents) : '') : 'Trip expenses −' + fmtMoney(trip.expensesCents)) + '</span>' +
       '<span class="cf-amt ' + (trip.profitCents >= 0 ? 'in' : 'out') + '">' + (trip.profitCents >= 0 ? '+' : '−') + fmtMoney(Math.abs(trip.profitCents)) + '</span></div>').join('')
       : '<p class="empty">No trips booked this month for this truck.</p>') +
     '</section>').join('');

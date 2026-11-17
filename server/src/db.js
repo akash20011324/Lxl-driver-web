@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS loads (
   deliveryWarehouse TEXT,
   deliveryLat REAL,
   deliveryLng REAL,
+  miles REAL,
   deliveryAt TEXT NOT NULL,
   deliveryTimezone TEXT NOT NULL,
   deliveryNumber TEXT,
@@ -324,6 +325,13 @@ export function openDb(dataDir) {
     const ceCols = db.prepare('PRAGMA table_info(cash_entries)').all();
     if (ceCols.length && !ceCols.some((c) => c.name === 'loadId'))
       db.exec('ALTER TABLE cash_entries ADD COLUMN loadId INTEGER REFERENCES loads(id)');
+  } catch { /* table may not exist yet on a brand-new database */ }
+  // Trucks profit v2: road miles cached on each load (driver pay in the
+  // Trucks profit section = miles x $0.65, owner's rule 2026-11-17).
+  try {
+    const loadCols = db.prepare('PRAGMA table_info(loads)').all();
+    if (loadCols.length && !loadCols.some((c) => c.name === 'miles'))
+      db.exec('ALTER TABLE loads ADD COLUMN miles REAL');
   } catch { /* table may not exist yet on a brand-new database */ }
   // Bulk RC import: remember which Outlook message each rate con came from.
   try {

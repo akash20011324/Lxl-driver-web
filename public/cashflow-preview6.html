@@ -135,7 +135,7 @@ async function load() {
   <div class="sect">Income by category — ${monthName(curKey)}</div>
   <div class="wall">${inTiles || '<div class="tile"><div class="tlab">No income</div></div>'}</div>
   <div class="sect">Trucks — ${monthName(curKey)}</div>
-  <div class="panel"><table><tr><th>Truck</th><th class="n">Loads</th><th class="n">Revenue</th><th class="n">Fuel</th><th class="n">Driver pay</th><th class="n">Maint.</th><th class="n">Other</th><th class="n">Profit</th><th class="n">Margin</th></tr>${truckRows}</table></div>
+  <div class="panel"><table><tr><th>Truck</th><th class="n">Loads</th><th class="n">Revenue</th><th class="n">Fuel (receipts)</th><th class="n">Pay (mi × $0.65)</th><th class="n">Maint.</th><th class="n">Other</th><th class="n">Profit</th><th class="n">Margin</th></tr>${truckRows}</table></div>
   <div style="margin-top:9px">
     <div><div class="sect" style="margin-top:0">All time</div><div class="wall" style="grid-template-columns:1fr 1fr">${allTiles}</div></div>
     <div class="panel" style="margin-top:9px"><div class="sect" style="margin-top:0">Fixed monthly payments</div>

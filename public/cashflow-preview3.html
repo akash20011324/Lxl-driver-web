@@ -105,8 +105,8 @@ async function load() {
       <div class="gauge"><i style="width:${margin}%"></i></div>
       <div class="glabel"><span>Profit margin</span><span>${t.revenueCents > 0 ? Math.round(t.profitCents / t.revenueCents * 100) : 0}% of ${money(t.revenueCents)} revenue</span></div>
       <div class="costs">
-        <div><span>Fuel (Pilot)</span><b>${money(t.fuelCents)}</b></div>
-        <div><span>Driver pay</span><b>${money(t.driverPayCents)}</b></div>
+        <div><span>Fuel (receipts)</span><b>${money(t.fuelCents)}</b></div>
+        <div><span>Driver pay (mi × $0.65)</span><b>${money(t.driverPayCents)}</b></div>
         <div><span>Maintenance &amp; repairs</span><b>${money(t.maintCents)}</b></div>
         <div><span>Other costs</span><b>${money(t.otherCents)}</b></div>
       </div>

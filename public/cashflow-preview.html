@@ -158,8 +158,8 @@ async function load() {
     const margin = t.revenueCents > 0 ? Math.round(t.profitCents / t.revenueCents * 100) : 0;
     return `<div class="card"><div class="tunit">Truck ${t.unitNumber} <small>· ${t.loadsInMonth} loads this month</small></div>
       <div class="trow"><span>Revenue (loads)</span><b class="in">${money(t.revenueCents)}</b></div>
-      <div class="trow"><span>Fuel (Pilot)</span><b>${money(t.fuelCents)}</b></div>
-      <div class="trow"><span>Driver pay</span><b>${money(t.driverPayCents)}</b></div>
+      <div class="trow"><span>Fuel (receipts)</span><b>${money(t.fuelCents)}</b></div>
+      <div class="trow"><span>Driver pay (mi × $0.65)</span><b>${money(t.driverPayCents)}</b></div>
       <div class="trow"><span>Maintenance &amp; repairs</span><b>${money(t.maintCents)}</b></div>
       <div class="trow"><span>Other costs</span><b>${money(t.otherCents)}</b></div>
       <div class="tprofit"><span class="klabel">Truck profit</span><span class="v ${pc}">${money(t.profitCents)} <small style="font-size:13px;color:var(--dim)">${margin}% margin</small></span></div></div>`;

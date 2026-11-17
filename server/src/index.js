@@ -1657,45 +1657,47 @@ function cashAllEntries() {
 }
 
 // Per-truck monthly profit: revenue from rate cons booked that month,
-// minus fuel (the company's Pilot weekly total for the month, split by
-// each truck's share of the month's loads — the weekly bill has no
-// truck tag), driver pay (tagged entries + that driver's advances),
-// maintenance/repairs and other tagged costs.
+// minus fuel (the fuel receipts the driver uploaded — on his loads,
+// plus any he uploaded without a load), driver pay (each load's road
+// miles x $0.65), maintenance/repairs and other tagged costs. Owner's
+// rule, 2026-11-17: this Trucks profit section uses receipts + mileage
+// pay; the company Cash Flow totals still run on the Pilot weekly bill
+// and the entered entries.
 function truckMonthlyFor(monthParam, entries, advanceRows) {
   const inMonth = (e) => (e.date || '').startsWith(monthParam);
   const truckRows = db.prepare('SELECT * FROM trucks ORDER BY unitNumber').all();
-  const monthFuelTotal = entries.filter((e) => e.direction === 'out' && e.category.startsWith('Fuel') && inMonth(e)).reduce((s, e) => s + e.amountCents, 0);
   const loadsInMonth = truckRows.map((t) => (t.driverId ? db.prepare('SELECT COUNT(*) AS n FROM loads WHERE driverId = ? AND substr(pickupAt, 1, 7) = ?').get(t.driverId, monthParam).n : 0));
   const totalLoadsMonth = loadsInMonth.reduce((s, n) => s + n, 0);
-  let fuelAssigned = 0;
   const trucks = truckRows.map((t, ti) => {
     const trips = t.driverId ? db.prepare(
-      `SELECT l.id AS loadId, l.reference AS reference, rc.rateCents AS rateCents FROM loads l
+      `SELECT l.id AS loadId, l.reference AS reference, rc.rateCents AS rateCents, l.miles AS miles FROM loads l
        JOIN rate_confirmations rc ON rc.loadId = l.id
        WHERE l.driverId = ? AND rc.rateCents IS NOT NULL AND substr(rc.pickupDate, 1, 7) = ? ORDER BY l.id DESC`,
     ).all(t.driverId, monthParam).map((trip) => {
-      const exp = db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM cash_entries WHERE loadId = ? AND direction = 'out'").get(trip.loadId).s;
-      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, expensesCents: exp, profitCents: trip.rateCents - exp };
+      const parts = tripProfitParts(trip);
+      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, miles: trip.miles ?? null, fuelCents: parts.fuelCents, driverPayCents: parts.driverPayCents, otherCents: parts.otherCents, expensesCents: parts.expensesCents, profitCents: trip.rateCents - parts.expensesCents };
     }) : [];
     const sumCatM = (cats) => entries.filter((e) => e.direction === 'out' && e.truckId === t.id && inMonth(e) && cats.includes(e.category)).reduce((s, e) => s + e.amountCents, 0);
     const revenueCents = trips.reduce((s, x) => s + x.rateCents, 0);
-    let fuelCents = 0;
-    if (monthFuelTotal > 0 && totalLoadsMonth > 0) {
-      fuelCents = ti === truckRows.length - 1 ? monthFuelTotal - fuelAssigned : Math.round((monthFuelTotal * loadsInMonth[ti]) / totalLoadsMonth);
-      fuelAssigned += fuelCents;
-    }
-    const driverPayCents = sumCatM(['Driver pay'])
-      + advanceRows.filter((a) => String(a.decidedAt || '').startsWith(monthParam) && (db.prepare('SELECT id FROM trucks WHERE driverId = ?').get(a.driverId) || {}).id === t.id).reduce((s, a) => s + a.amountCents, 0);
+    const unattachedFuelCents = t.driverId ? db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM documents WHERE kind = 'fuel_receipt' AND loadId IS NULL AND driverId = ? AND substr(createdAt, 1, 7) = ?").get(t.driverId, monthParam).s : 0;
+    const fuelCents = trips.reduce((s, x) => s + x.fuelCents, 0) + unattachedFuelCents;
+    const driverPayCents = trips.reduce((s, x) => s + x.driverPayCents, 0);
     const maintCents = sumCatM(['Maintenance', 'Repairs']);
     const knownM = new Set(['Driver pay', 'Maintenance', 'Repairs']);
     const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && inMonth(e) && !knownM.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
     const costs = fuelCents + driverPayCents + maintCents + otherCents;
     return { truckId: t.id, unitNumber: t.unitNumber, trips, revenueCents, fuelCents, driverPayCents, maintCents, otherCents, profitCents: revenueCents - costs, loadsInMonth: loadsInMonth[ti] };
   });
-  return { trucks, monthFuelTotalCents: monthFuelTotal, totalLoadsMonth };
+  return { trucks, monthFuelTotalCents: trucks.reduce((s, t) => s + t.fuelCents, 0), totalLoadsMonth };
 }
 
-admin.get('/cashflow', (req, res) => {
+admin.get('/cashflow', async (req, res) => {
+  // Trucks profit pays drivers by the mile: fill in road miles for any
+  // load still missing them (cached on the load afterwards).
+  try {
+    const needMiles = db.prepare("SELECT * FROM loads WHERE miles IS NULL AND status != 'cancelled' ORDER BY id DESC LIMIT 40").all();
+    for (const l of needMiles) { try { await ensureLoadMiles(l); } catch { /* best effort */ } }
+  } catch { /* miles column may not exist yet */ }
   const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
   const rcTotal = db.prepare('SELECT COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get().s;
   const entryRows = db.prepare(
@@ -1756,21 +1758,20 @@ admin.get('/cashflow', (req, res) => {
   const truckRows = db.prepare('SELECT * FROM trucks ORDER BY unitNumber').all();
   const trucksOut = truckRows.map((t) => {
     const trips = t.driverId ? db.prepare(
-      `SELECT l.id AS loadId, l.reference AS reference, rc.rateCents AS rateCents FROM loads l
+      `SELECT l.id AS loadId, l.reference AS reference, rc.rateCents AS rateCents, l.miles AS miles FROM loads l
        JOIN rate_confirmations rc ON rc.loadId = l.id
        WHERE l.driverId = ? AND rc.rateCents IS NOT NULL ORDER BY l.id DESC`,
     ).all(t.driverId).map((trip) => {
-      const exp = db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM cash_entries WHERE loadId = ? AND direction = 'out'").get(trip.loadId).s;
-      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, expensesCents: exp, profitCents: trip.rateCents - exp };
+      const parts = tripProfitParts(trip);
+      return { loadId: trip.loadId, reference: trip.reference, rateCents: trip.rateCents, miles: trip.miles ?? null, fuelCents: parts.fuelCents, driverPayCents: parts.driverPayCents, otherCents: parts.otherCents, expensesCents: parts.expensesCents, profitCents: trip.rateCents - parts.expensesCents };
     }) : [];
     const sumCat = (cats) => entries.filter((e) => e.direction === 'out' && e.truckId === t.id && cats.includes(e.category)).reduce((s, e) => s + e.amountCents, 0);
     const revenueCents = trips.reduce((s, x) => s + x.rateCents, 0);
-    const fuelCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
-    const driverPayCents = sumCat(['Driver pay'])
-      + advanceRows.filter((a) => {
-        const truckOfDriver = db.prepare('SELECT id FROM trucks WHERE driverId = ?').get(a.driverId);
-        return truckOfDriver && truckOfDriver.id === t.id;
-      }).reduce((s, a) => s + a.amountCents, 0);
+    // Trucks-profit fuel = the driver's uploaded fuel receipts (on his
+    // loads + any uploaded without a load); driver pay = miles x $0.65.
+    const unattachedFuelCents = t.driverId ? db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM documents WHERE kind = 'fuel_receipt' AND loadId IS NULL AND driverId = ?").get(t.driverId).s : 0;
+    const fuelCents = trips.reduce((s, x) => s + x.fuelCents, 0) + unattachedFuelCents;
+    const driverPayCents = trips.reduce((s, x) => s + x.driverPayCents, 0);
     const maintCents = sumCat(['Maintenance', 'Repairs']);
     const known = new Set(['Driver pay', 'Maintenance', 'Repairs']);
     const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && !known.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
@@ -3091,6 +3092,54 @@ async function ensurePickupCoords(load) {
     load.id,
   );
   return coords;
+}
+
+// Trucks profit (owner's rule, 2026-11-17): driver pay for a load is
+// its road miles x $0.65, and the load's fuel cost is the fuel receipts
+// the driver uploaded on that load — NOT the entered Driver pay
+// entries and NOT the Pilot weekly split. Company Cash Flow totals are
+// unaffected (Pilot weekly stays the fuel there).
+const DRIVER_PAY_PER_MILE_CENTS = 65;
+
+// Road miles for a load, cached on loads.miles: OSRM public routing
+// first, straight-line distance x 1.18 as the fallback.
+async function ensureLoadMiles(load) {
+  if (typeof load.miles === 'number' && load.miles > 0) return load.miles;
+  const p = await ensurePickupCoords(load);
+  const dl = await ensureDeliveryCoords(load);
+  if (!p || !dl) return null;
+  let miles = null;
+  try {
+    const r = await fetch('https://router.project-osrm.org/route/v1/driving/' + p.lng + ',' + p.lat + ';' + dl.lng + ',' + dl.lat + '?overview=false');
+    if (r.ok) {
+      const j = await r.json();
+      const dist = j && j.routes && j.routes[0] && j.routes[0].distance;
+      if (Number.isFinite(dist) && dist > 0) miles = dist / 1609.344;
+    }
+  } catch { /* fall through to the straight-line estimate */ }
+  if (miles == null) {
+    const m = distanceMeters(p.lat, p.lng, dl.lat, dl.lng);
+    if (Number.isFinite(m) && m > 0) miles = (m / 1609.344) * 1.18;
+  }
+  if (miles == null || !(miles > 0)) return null;
+  miles = Math.round(miles * 10) / 10;
+  try { db.prepare('UPDATE loads SET miles = ? WHERE id = ?').run(miles, load.id); } catch { /* miles column may not exist yet */ }
+  return miles;
+}
+
+function loadFuelReceiptCents(loadId) {
+  return db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM documents WHERE loadId = ? AND kind = 'fuel_receipt'").get(loadId).s;
+}
+
+// One trip's profit parts under the Trucks-profit rules: fuel = the
+// receipts uploaded on the load, driver pay = miles x $0.65, other =
+// cash out entries tagged to the load (fuel/driver-pay categories
+// excluded so nothing double-counts).
+function tripProfitParts(trip) {
+  const fuelCents = loadFuelReceiptCents(trip.loadId);
+  const driverPayCents = typeof trip.miles === 'number' && trip.miles > 0 ? Math.round(trip.miles * DRIVER_PAY_PER_MILE_CENTS) : 0;
+  const otherCents = db.prepare("SELECT COALESCE(SUM(amountCents), 0) AS s FROM cash_entries WHERE loadId = ? AND direction = 'out' AND category NOT LIKE 'Fuel%' AND category != 'Driver pay'").get(trip.loadId).s;
+  return { fuelCents, driverPayCents, otherCents, expensesCents: fuelCents + driverPayCents + otherCents };
 }
 
 // How far an active load has travelled toward its delivery, as a whole
@@ -6526,4 +6575,14 @@ app.listen(PORT, () => {
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
+  // Backfill road miles for the Trucks profit section (driver pay =
+  // miles x $0.65), shortly after boot so the pin reset above settles.
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const rows = db.prepare("SELECT * FROM loads WHERE miles IS NULL AND status != 'cancelled'").all();
+        for (const l of rows) { try { await ensureLoadMiles(l); } catch { /* best effort */ } }
+      } catch { /* miles column may not exist yet */ }
+    })();
+  }, 20000);
 });
