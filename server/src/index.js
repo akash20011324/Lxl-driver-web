@@ -1695,7 +1695,7 @@ admin.get('/cashflow', async (req, res) => {
   // Trucks profit pays drivers by the mile: fill in road miles for any
   // load still missing them (cached on the load afterwards).
   try {
-    const needMiles = db.prepare("SELECT * FROM loads WHERE miles IS NULL AND status != 'cancelled' ORDER BY id DESC LIMIT 40").all();
+    const needMiles = db.prepare("SELECT * FROM loads WHERE miles IS NULL AND status != 'cancelled' ORDER BY id DESC LIMIT 12").all();
     for (const l of needMiles) { try { await ensureLoadMiles(l); } catch { /* best effort */ } }
   } catch { /* miles column may not exist yet */ }
   const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
@@ -3101,30 +3101,63 @@ async function ensurePickupCoords(load) {
 // unaffected (Pilot weekly stays the fuel there).
 const DRIVER_PAY_PER_MILE_CENTS = 65;
 
-// Road miles for a load, cached on loads.miles: OSRM public routing
-// first, straight-line distance x 1.18 as the fallback.
-async function ensureLoadMiles(load) {
-  if (typeof load.miles === 'number' && load.miles > 0) return load.miles;
-  const p = await ensurePickupCoords(load);
-  const dl = await ensureDeliveryCoords(load);
-  if (!p || !dl) return null;
-  let miles = null;
-  try {
-    const r = await fetch('https://router.project-osrm.org/route/v1/driving/' + p.lng + ',' + p.lat + ';' + dl.lng + ',' + dl.lat + '?overview=false');
-    if (r.ok) {
-      const j = await r.json();
-      const dist = j && j.routes && j.routes[0] && j.routes[0].distance;
-      if (Number.isFinite(dist) && dist > 0) miles = dist / 1609.344;
-    }
-  } catch { /* fall through to the straight-line estimate */ }
-  if (miles == null) {
-    const m = distanceMeters(p.lat, p.lng, dl.lat, dl.lng);
-    if (Number.isFinite(m) && m > 0) miles = (m / 1609.344) * 1.18;
+function cityStateOf(location) {
+  const parts = String(location || '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const m = parts[i].match(/^([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/i);
+    if (m && i > 0) return parts[i - 1] + ', ' + m[1].toUpperCase();
   }
-  if (miles == null || !(miles > 0)) return null;
-  miles = Math.round(miles * 10) / 10;
-  try { db.prepare('UPDATE loads SET miles = ? WHERE id = ?').run(miles, load.id); } catch { /* miles column may not exist yet */ }
-  return miles;
+  return null;
+}
+
+// Fast coordinates for the miles calculation: the stored/gate pin when
+// there is one, otherwise a city-level Nominatim lookup (plenty
+// accurate for road miles, and far faster than the full address chain).
+async function milesCoords(load, kind) {
+  const lat = kind === 'pickup' ? load.pickupLat : load.deliveryLat;
+  const lng = kind === 'pickup' ? load.pickupLng : load.deliveryLng;
+  if (typeof lat === 'number' && typeof lng === 'number') return { lat, lng };
+  const cs = cityStateOf(kind === 'pickup' ? load.pickupLocation : load.deliveryLocation);
+  if (cs) {
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(cs), { headers: { 'User-Agent': 'LXL-Driver/1.0 (lubanaxpress.com)' }, signal: AbortSignal.timeout(6000) });
+      if (r.ok) {
+        const rows = await r.json();
+        if (rows && rows[0]) {
+          const la = Number(rows[0].lat), lo = Number(rows[0].lon);
+          if (Number.isFinite(la) && Number.isFinite(lo)) return { lat: la, lng: lo };
+        }
+      }
+    } catch { /* fall through to the full geocode chain */ }
+  }
+  return kind === 'pickup' ? ensurePickupCoords(load) : ensureDeliveryCoords(load);
+}
+
+// Road miles for a load, cached on loads.miles: OSRM public routing
+// first, straight-line distance x 1.18 as the fallback. A load whose
+// route cannot be resolved gets miles = -1 so it is not retried on
+// every request (the boot backfill gives it one more try per boot).
+async function ensureLoadMiles(load) {
+  if (typeof load.miles === 'number' && load.miles !== 0) return load.miles > 0 ? load.miles : null;
+  const p = await milesCoords(load, 'pickup');
+  const dl = await milesCoords(load, 'delivery');
+  let miles = null;
+  if (p && dl) {
+    try {
+      const r = await fetch('https://router.project-osrm.org/route/v1/driving/' + p.lng + ',' + p.lat + ';' + dl.lng + ',' + dl.lat + '?overview=false', { signal: AbortSignal.timeout(8000) });
+      if (r.ok) {
+        const j = await r.json();
+        const dist = j && j.routes && j.routes[0] && j.routes[0].distance;
+        if (Number.isFinite(dist) && dist > 0) miles = dist / 1609.344;
+      }
+    } catch { /* fall through to the straight-line estimate */ }
+    if (miles == null) {
+      const m = distanceMeters(p.lat, p.lng, dl.lat, dl.lng);
+      if (Number.isFinite(m) && m > 0) miles = (m / 1609.344) * 1.18;
+    }
+  }
+  try { db.prepare('UPDATE loads SET miles = ? WHERE id = ?').run(miles != null && miles > 0 ? Math.round(miles * 10) / 10 : -1, load.id); } catch { /* miles column may not exist yet */ }
+  return miles != null && miles > 0 ? Math.round(miles * 10) / 10 : null;
 }
 
 function loadFuelReceiptCents(loadId) {
@@ -6580,6 +6613,8 @@ app.listen(PORT, () => {
   setTimeout(() => {
     void (async () => {
       try {
+        // One retry per boot for loads whose route failed last time.
+        try { db.prepare("UPDATE loads SET miles = NULL WHERE miles = -1").run(); } catch { /* ignore */ }
         const rows = db.prepare("SELECT * FROM loads WHERE miles IS NULL AND status != 'cancelled'").all();
         for (const l of rows) { try { await ensureLoadMiles(l); } catch { /* best effort */ } }
       } catch { /* miles column may not exist yet */ }

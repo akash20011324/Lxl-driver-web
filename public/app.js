@@ -3010,12 +3010,12 @@ async function viewCashflow(main) {
     '<p class="small muted">Straight from your bank account — most of these categorize themselves (factoring money in, Pilot weekly to Fuel, tolls, driver Zelles to Driver pay). Only the ones the system cannot place wait here: categorize one once and it learns that pattern for next time. Your profit comes from the categorized books, never from the bank total.</p>' +
     (bankPending.length ? bankPending.map(bankRow).join('') : '<p class="empty">Nothing waiting — every bank transaction is handled.</p>') +
     '<h2 class="cf-h2">3 · Per truck — ' + esc(monthName) + '</h2>' +
-    '<p class="small muted">What each truck made this month: rate-con revenue minus fuel (the Pilot weekly total for the month, split by each truck\'s share of the month\'s loads), driver pay, maintenance and other tagged costs. Use the month switcher in section 2 to change the month.</p>' +
+    '<p class="small muted">What each truck made this month: rate-con revenue minus fuel (the receipts the driver uploaded on each load), driver pay (each load\'s miles × $0.65), maintenance and other tagged costs. Use the month switcher in section 2 to change the month.</p>' +
     (truckMonthPanels || '<p class="empty">No trucks yet.</p>') +
     '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTrucks">⬇ Download per-truck ' + esc(monthName) + ' report (CSV)</button></div>' +
     '<h2 class="cf-h2">Entries</h2>' +
     (entries.length ? entries.map(entryRow).join('') : '<p class="empty">No entries yet — import from Outlook or add the first one.</p>') +
-    '<p class="small muted">Driver fuel receipts stay with their loads and are NOT counted here — only the Pilot weekly bill counts as fuel. Approved driver advances are counted automatically.</p>';
+    '<p class="small muted">Company books above run on the Pilot weekly bill for fuel. In the per-truck profit panels, fuel is the driver\'s uploaded receipts and driver pay is miles × $0.65. Approved driver advances are counted automatically in the company books.</p>';
   const addCard = main.querySelector('#cfAddCard');
   const outlookCard = main.querySelector('#cfOutlookCard');
   const form = main.querySelector('#cfEntryForm');
