@@ -2706,13 +2706,27 @@ async function viewDocuments(main) {
       const list = Array.isArray(convs) ? convs : [];
       body.innerHTML = '<p class="small muted">Connected as <strong>' + esc(outlook.email || '') + '</strong> — tap the conversation to send to.</p>' +
         (list.length
-          ? list.map(c => '<button class="conv-row" data-conv="' + esc(c.conversationId) + '"><span class="conv-main">' +
+          ? '<input id="docsConvSearch" class="docs-search" type="search" placeholder="Search broker — name, email or subject" autocomplete="off" style="width:100%;margin-bottom:10px">' +
+            list.map(c => '<button class="conv-row" data-conv="' + esc(c.conversationId) + '"><span class="conv-main">' +
             '<span class="conv-name">' + esc(c.fromName || c.fromEmail || '') + '</span>' +
             '<span class="conv-subject">' + esc(c.subject || '') + '</span>' +
             '<span class="conv-snippet muted small">' + esc(c.snippet || '') + '</span></span>' +
-            '<span class="conv-date muted small">' + fmtDate(c.lastAt) + '</span></button>').join('')
+            '<span class="conv-date muted small">' + fmtDate(c.lastAt) + '</span></button>').join('') +
+            '<p class="empty" id="docsConvNone" hidden>No conversation matches that search.</p>'
           : '<p class="empty">No conversations in your inbox yet.</p>');
       body.querySelectorAll('[data-conv]').forEach(b => b.addEventListener('click', () => loadThread(b.dataset.conv)));
+      const convSearch = document.getElementById('docsConvSearch');
+      if (convSearch) convSearch.addEventListener('input', () => {
+        const q = convSearch.value.trim().toLowerCase();
+        let visible = 0;
+        body.querySelectorAll('[data-conv]').forEach((row) => {
+          const show = !q || row.textContent.toLowerCase().includes(q);
+          row.style.display = show ? '' : 'none';
+          if (show) visible++;
+        });
+        const none = document.getElementById('docsConvNone');
+        if (none) none.hidden = !(q && visible === 0);
+      });
     } catch (err) {
       body.innerHTML = '<p class="muted">' + esc(err.message || 'Could not load conversations.') + '</p>';
     }
