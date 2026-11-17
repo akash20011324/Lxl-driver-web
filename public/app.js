@@ -2993,6 +2993,8 @@ async function viewCashflow(main) {
     cf6Tile('Received', d.receivedCents || 0, 'pos') +
     cf6Tile('Paid out', d.outCents || 0, 'neg') +
     cf6Tile('Net', d.netCents || 0, (d.netCents || 0) >= 0 ? 'pos' : 'neg');
+  const cf6ExpTilesAll = [...(totals.outGroups || [])].sort((a, b) => b.amountCents - a.amountCents).map((g) => cf6Tile(g.category + (g.fixed ? ' · fixed' : ''), g.amountCents, 'neg', cf6Share(g.amountCents, d.outCents || 0))).join('');
+  const cf6IncTilesAll = [...(totals.inGroups || [])].sort((a, b) => b.amountCents - a.amountCents).map((g) => cf6Tile(g.category, g.amountCents, 'pos')).join('');
   main.innerHTML = '<div class="rc-head"><h1>Cash Flow</h1><span>' +
     '<button class="btn-blue btn" id="cfOutlookBtn">Import from Outlook</button> ' +
     '<button class="btn-ghost btn" id="cfAddToggle">+ Add entry</button></span></div>' +
@@ -3005,7 +3007,7 @@ async function viewCashflow(main) {
     '<div class="cf6-sect">Income by category — ' + esc(monthName) + '</div><div class="cf6-wall">' + cf6IncTiles + '</div>' +
     '<div class="cf6-sect">Trucks — ' + esc(monthName) + '</div>' +
     '<section class="cf6-panel"><table class="cf6-table"><tr><th>Truck</th><th class="n">Loads</th><th class="n">Revenue</th><th class="n">Fuel (receipts)</th><th class="n">Pay (mi × $0.65)</th><th class="n">Maint.</th><th class="n">Other</th><th class="n">Profit</th><th class="n">Margin</th></tr>' + cf6TruckRows + '</table>' +
-    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlMonthly">⬇ Download ' + esc(monthName) + ' report (CSV)</button></div></section>' +
+    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlMonthly">⬇ Download ' + esc(monthName) + ' report (CSV)</button> <button class="btn-ghost btn-sm" id="cfDlTrucks">⬇ Download per-truck ' + esc(monthName) + ' report (CSV)</button></div></section>' +
     '<section class="card hidden" id="cfOutlookCard"><h3>Import from Outlook</h3>' +
     (outlook.connected
       ? '<p class="small muted">Connected: ' + esc(outlook.email || '') + ' — pick the factoring payment, toll bill or Pilot weekly email; the amount is read from its attachment and you confirm it before saving.</p>' +
@@ -3029,9 +3031,9 @@ async function viewCashflow(main) {
     '</div><div class="form-actions"><button class="btn" type="submit">Save entry</button> ' +
     '<button class="btn-ghost" type="button" id="cfAddCancel">Cancel</button></div></form></section>' +
     '<div class="cf6-sect">All time — since May 2026</div><div class="cf6-wall">' + allTimeWall + '</div>' +
-    '<section class="cf-panel"><div class="cf-cols"><div><h4>Money in — by category (all time)</h4>' + groupRows(totals.inGroups, '+') + '</div>' +
-    '<div><h4>Money out — by category (all time)</h4>' + groupRows(totals.outGroups, '−') + '</div></div>' +
-    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTotal">⬇ Download total report (CSV)</button></div></section>' +
+    '<div class="cf6-sect">Expenses by category — all time</div><div class="cf6-wall">' + cf6ExpTilesAll + '</div>' +
+    '<div class="cf6-sect">Income by category — all time</div><div class="cf6-wall">' + cf6IncTilesAll + '</div>' +
+    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTotal">⬇ Download total report (CSV)</button></div>' +
     '<h2 class="cf-h2">Fixed monthly payments</h2>' +
     '<p class="small muted">Set once — they count automatically in every month\'s profit above. Don\'t add these by hand as entries too.</p>' +
     (fixedRows || '<p class="empty">No fixed payments yet.</p>') +
@@ -3043,13 +3045,9 @@ async function viewCashflow(main) {
     '<h2 class="cf-h2">Bank transactions — categorize</h2>' +
     '<p class="small muted">Straight from your bank account — most of these categorize themselves (factoring money in, Pilot weekly to Fuel, tolls, driver Zelles to Driver pay). Only the ones the system cannot place wait here: categorize one once and it learns that pattern for next time. Your profit comes from the categorized books, never from the bank total.</p>' +
     (bankPending.length ? bankPending.map(bankRow).join('') : '<p class="empty">Nothing waiting — every bank transaction is handled.</p>') +
-    '<h2 class="cf-h2">Per truck — trip detail — ' + esc(monthName) + '</h2>' +
-    '<p class="small muted">What each truck made this month: rate-con revenue minus fuel (the receipts the driver uploaded on each load), driver pay (each load\'s miles × $0.65), maintenance and other tagged costs. Use the month switcher in section 2 to change the month.</p>' +
-    (truckMonthPanels || '<p class="empty">No trucks yet.</p>') +
-    '<div class="form-actions"><button class="btn-ghost btn-sm" id="cfDlTrucks">⬇ Download per-truck ' + esc(monthName) + ' report (CSV)</button></div>' +
     '<h2 class="cf-h2">Entries</h2>' +
     (entries.length ? entries.map(entryRow).join('') : '<p class="empty">No entries yet — import from Outlook or add the first one.</p>') +
-    '<p class="small muted">Company books above run on the Pilot weekly bill for fuel. In the per-truck profit panels, fuel is the driver\'s uploaded receipts and driver pay is miles × $0.65. Approved driver advances are counted automatically in the company books.</p>';
+    '<p class="small muted">Company books above run on the Pilot weekly bill for fuel. In the trucks table, fuel is the driver\'s uploaded receipts and driver pay is miles × $0.65. Approved driver advances are counted automatically in the company books.</p>';
   const addCard = main.querySelector('#cfAddCard');
   const outlookCard = main.querySelector('#cfOutlookCard');
   const form = main.querySelector('#cfEntryForm');
