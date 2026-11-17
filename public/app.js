@@ -2231,6 +2231,9 @@ function loadCardHtml(l) {
       (l.deliveryWarehouse ? '<div class="lc-addr">' + esc(l.deliveryLocation) + '</div>' : '') +
       '<div class="lc-date">' + fmtDate(l.deliveryAt) + '</div></div>' +
     '</div>' +
+    (l.stops && (l.stops.pickups.length > 1 || l.stops.deliveries.length > 1)
+      ? '<div class="small muted" style="margin-top:6px">Stops: ' + [...l.stops.pickups.map((s, i) => 'Pickup ' + (i + 1) + ' ' + esc(s.location)), ...l.stops.deliveries.map((s, i) => 'Delivery ' + (i + 1) + ' ' + esc(s.location))].join(' &middot; ') + '</div>'
+      : '') +
     '<div class="lc-bottom"><span class="lc-driver">Driver: ' + esc(l.driverName || '—') +
       (l.truckUnit ? ' &middot; Truck ' + esc(l.truckUnit) : '') + (l.trailerUnit ? ' &middot; Trailer ' + esc(l.trailerUnit) : '') + '</span>' +
     '<span class="lc-actions"><button class="btn btn-ghost btn-sm" data-edit-load="' + l.id + '">Edit</button> ' +
@@ -2255,14 +2258,20 @@ async function viewLoads(main) {
     '<div class="card" id="assignCard" hidden><h2>Assign load</h2><form id="addLoadForm">' +
     '<label>Driver<select id="al-driver" required>' + driverOptions() + '</select></label>' +
     '<label>Reference<input id="al-ref" required placeholder="e.g. LXL-1001"></label>' +
-    '<label>Pickup location<input id="al-pickup" required placeholder="City, ST or full address"></label>' +
-    '<label>Pickup warehouse name <span class="muted">(optional)</span><input id="al-pickup-wh" placeholder="e.g. Walmart DC 6048"></label>' +
-    '<label>Pickup date &amp; time<input id="al-pickup-at" type="datetime-local" required></label>' +
-    '<label>Pickup number<input id="al-pickup-no" placeholder="Optional"></label>' +
-    '<label>Delivery location<input id="al-delivery" required placeholder="City, ST or full address"></label>' +
-    '<label>Delivery warehouse name <span class="muted">(optional)</span><input id="al-delivery-wh" placeholder="e.g. Costco Depot"></label>' +
-    '<label>Delivery date &amp; time<input id="al-delivery-at" type="datetime-local" required></label>' +
-    '<label>Delivery number<input id="al-delivery-no" placeholder="Optional"></label>' +
+    '<div id="al-pickups"><div class="al-stop-block">' +
+    '<label>Pickup location<input id="al-pickup" class="al-s-loc" required placeholder="City, ST or full address"></label>' +
+    '<label>Pickup warehouse name <span class="muted">(optional)</span><input id="al-pickup-wh" class="al-s-wh" placeholder="e.g. Walmart DC 6048"></label>' +
+    '<label>Pickup date &amp; time<input id="al-pickup-at" class="al-s-at" type="datetime-local" required></label>' +
+    '<label>Pickup number<input id="al-pickup-no" class="al-s-no" placeholder="Optional"></label>' +
+    '</div></div>' +
+    '<div style="text-align:right;margin:2px 0 10px"><button class="btn btn-sm" type="button" id="al-add-pickup">+ Pickup</button></div>' +
+    '<div id="al-deliveries"><div class="al-stop-block">' +
+    '<label>Delivery location<input id="al-delivery" class="al-s-loc" required placeholder="City, ST or full address"></label>' +
+    '<label>Delivery warehouse name <span class="muted">(optional)</span><input id="al-delivery-wh" class="al-s-wh" placeholder="e.g. Costco Depot"></label>' +
+    '<label>Delivery date &amp; time<input id="al-delivery-at" class="al-s-at" type="datetime-local" required></label>' +
+    '<label>Delivery number<input id="al-delivery-no" class="al-s-no" placeholder="Optional"></label>' +
+    '</div></div>' +
+    '<div style="text-align:right;margin:2px 0 10px"><button class="btn btn-sm" type="button" id="al-add-delivery">+ Delivery</button></div>' +
     '<label>Notes<textarea id="al-notes" rows="2" placeholder="Optional"></textarea></label>' +
     '<button class="btn" type="submit">Assign load</button></form></div>' +
     (list.length
@@ -2279,24 +2288,81 @@ async function viewLoads(main) {
   toggleBtn.addEventListener('click', () => setAssignOpen(assignCard.hidden));
 
   const form = document.getElementById('addLoadForm');
+
+  // Multi-stop support: "+ Pickup" / "+ Delivery" add another stop
+  // block (location, warehouse, date & time, and its own pickup /
+  // delivery number). The default stays one pickup + one delivery.
+  const stopBlockHtml = (kind, n) => {
+    const cap = kind === 'pickup' ? 'Pickup' : 'Delivery';
+    return '<div class="al-stop-block"><div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px"><strong>' + cap + ' ' + n + '</strong>' +
+      '<button class="btn btn-ghost btn-sm" type="button" data-remove-stop>Remove</button></div>' +
+      '<label>' + cap + ' location<input class="al-s-loc" required placeholder="City, ST or full address"></label>' +
+      '<label>' + cap + ' warehouse name <span class="muted">(optional)</span><input class="al-s-wh" placeholder="e.g. ' + (kind === 'pickup' ? 'Walmart DC 6048' : 'Costco Depot') + '"></label>' +
+      '<label>' + cap + ' date &amp; time<input class="al-s-at" type="datetime-local" required></label>' +
+      '<label>' + cap + ' number<input class="al-s-no" placeholder="Optional"></label></div>';
+  };
+  const renumberStops = (containerId, kind) => {
+    document.querySelectorAll('#' + containerId + ' .al-stop-block').forEach((b, i) => {
+      const h = b.querySelector('strong');
+      if (h) h.textContent = (kind === 'pickup' ? 'Pickup ' : 'Delivery ') + (i + 1);
+    });
+  };
+  const addStopBlock = (kind, values, insertFirst) => {
+    const container = document.getElementById(kind === 'pickup' ? 'al-pickups' : 'al-deliveries');
+    if (container.querySelectorAll('.al-stop-block').length >= 4) { toast('Up to 4 stops of each kind per load.', 'err'); return null; }
+    const wrap = document.createElement('div');
+    wrap.innerHTML = stopBlockHtml(kind, container.querySelectorAll('.al-stop-block').length + 1);
+    const block = wrap.firstElementChild;
+    if (insertFirst) container.insertBefore(block, container.firstElementChild);
+    else container.appendChild(block);
+    if (values) {
+      block.querySelector('.al-s-loc').value = values.location || '';
+      block.querySelector('.al-s-wh').value = values.warehouse || '';
+      block.querySelector('.al-s-at').value = values.at ? toLocalInput(values.at) : '';
+      block.querySelector('.al-s-no').value = values.number || '';
+    }
+    renumberStops(container.id, kind);
+    return block;
+  };
+  document.getElementById('al-add-pickup').addEventListener('click', () => addStopBlock('pickup'));
+  document.getElementById('al-add-delivery').addEventListener('click', () => addStopBlock('delivery'));
+  form.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-remove-stop]');
+    if (!btn) return;
+    const block = btn.closest('.al-stop-block');
+    const container = block.parentElement;
+    const kind = container.id === 'al-pickups' ? 'pickup' : 'delivery';
+    block.remove();
+    renumberStops(container.id, kind);
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const pickupAt = document.getElementById('al-pickup-at').value;
-    const deliveryAt = document.getElementById('al-delivery-at').value;
+    const readBlock = (b) => ({
+      location: b.querySelector('.al-s-loc').value.trim(),
+      warehouse: b.querySelector('.al-s-wh').value.trim() || undefined,
+      at: b.querySelector('.al-s-at').value ? new Date(b.querySelector('.al-s-at').value).toISOString() : undefined,
+      number: b.querySelector('.al-s-no').value.trim() || undefined,
+    });
+    const pickups = [...document.querySelectorAll('#al-pickups .al-stop-block')].map(readBlock);
+    const deliveries = [...document.querySelectorAll('#al-deliveries .al-stop-block')].map(readBlock);
+    const p0 = pickups[0];
+    const dN = deliveries[deliveries.length - 1];
     const body = {
       driverId: Number(document.getElementById('al-driver').value),
       reference: document.getElementById('al-ref').value.trim(),
-      pickupLocation: document.getElementById('al-pickup').value.trim(),
-      pickupWarehouse: document.getElementById('al-pickup-wh').value.trim() || undefined,
-      pickupAt: pickupAt ? new Date(pickupAt).toISOString() : undefined,
+      pickupLocation: p0.location,
+      pickupWarehouse: p0.warehouse,
+      pickupAt: p0.at,
       pickupTimezone: browserTimezone(),
-      pickupNumber: document.getElementById('al-pickup-no').value.trim() || undefined,
-      deliveryLocation: document.getElementById('al-delivery').value.trim(),
-      deliveryWarehouse: document.getElementById('al-delivery-wh').value.trim() || undefined,
-      deliveryAt: deliveryAt ? new Date(deliveryAt).toISOString() : undefined,
+      pickupNumber: p0.number,
+      deliveryLocation: dN.location,
+      deliveryWarehouse: dN.warehouse,
+      deliveryAt: dN.at,
       deliveryTimezone: browserTimezone(),
-      deliveryNumber: document.getElementById('al-delivery-no').value.trim() || undefined,
+      deliveryNumber: dN.number,
       notes: document.getElementById('al-notes').value.trim() || undefined,
+      stops: { pickups, deliveries },
     };
     try {
       if (state.editingLoadId) {
@@ -2326,6 +2392,14 @@ async function viewLoads(main) {
     document.getElementById('al-delivery-at').value = toLocalInput(l.deliveryAt);
     document.getElementById('al-delivery-no').value = l.deliveryNumber || '';
     document.getElementById('al-notes').value = l.notes || '';
+    // Multi-stop loads: rebuild the extra stop blocks. Extra pickups
+    // append after Pickup 1; extra deliveries go BEFORE the final
+    // delivery block (which holds the load's delivery fields), so the
+    // on-screen order stays the travel order.
+    if (l.stops) {
+      (l.stops.pickups || []).slice(1).forEach((s) => addStopBlock('pickup', s));
+      [...(l.stops.deliveries || []).slice(0, -1)].reverse().forEach((s) => addStopBlock('delivery', s, true));
+    }
     form.closest('.card').querySelector('h2').textContent = 'Edit load ' + (l.reference || '');
     form.querySelector('button[type="submit"]').textContent = 'Save changes';
     let cancelBtn = document.getElementById('cancelEditBtn');
@@ -4405,12 +4479,21 @@ async function viewDriverLoads(main) {
   }));
 }
 
+function stopDetailLine(label, s) {
+  return '<div class="small" style="margin-top:4px"><strong>' + label + ':</strong> ' + esc(s.warehouse || s.location) +
+    (s.warehouse ? ' <span class="muted">(' + esc(s.location) + ')</span>' : '') +
+    (s.at ? ' &middot; ' + fmtDate(s.at) : '') + (s.number ? ' &middot; Ref: ' + esc(s.number) : '') + '</div>';
+}
+
 function activeLoadHtml(l) {
   return '<p><strong>' + esc(l.reference) + '</strong> · <span class="pill ' + (l.bolStatus === 'wrong' ? 'red' : l.bolStatus === 'clean' ? 'green' : 'blue') + '">BOL: ' + esc(l.bolStatus || 'pending') + '</span></p>' +
     '<div class="grid2">' +
     '<div class="detail-box"><div class="k">Pickup</div><div class="v" style="font-size:16px">' + esc(l.pickupWarehouse || l.pickupLocation) + '</div><div class="muted small">' + (l.pickupWarehouse ? esc(l.pickupLocation) + '<br>' : '') + fmtDate(l.pickupAt) + (l.pickupNumber ? '<br>Ref: ' + esc(l.pickupNumber) : '') + '</div></div>' +
     '<div class="detail-box"><div class="k">Delivery</div><div class="v" style="font-size:16px">' + esc(l.deliveryWarehouse || l.deliveryLocation) + '</div><div class="muted small">' + (l.deliveryWarehouse ? esc(l.deliveryLocation) + '<br>' : '') + fmtDate(l.deliveryAt) + (l.deliveryNumber ? '<br>Ref: ' + esc(l.deliveryNumber) : '') + '</div></div>' +
     '</div>' +
+    (l.stops && (l.stops.pickups.length > 1 || l.stops.deliveries.length > 1)
+      ? '<div class="detail-box mt"><div class="k">All stops</div>' + [...l.stops.pickups.map((s, i) => stopDetailLine('Pickup ' + (i + 1), s)), ...l.stops.deliveries.map((s, i) => stopDetailLine('Delivery ' + (i + 1), s))].join('') + '</div>'
+      : '') +
     (l.notes ? '<p class="small mt">Notes: ' + esc(l.notes) + '</p>' : '') +
     '<div class="grid2 mt">' +
     '<div><h3>Upload BOL scan</h3><form id="bolForm" class="inline-form">' +

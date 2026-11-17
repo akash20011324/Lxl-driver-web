@@ -132,6 +132,52 @@ function serializeTrailer(t) {
   };
 }
 
+function parseStops(raw) {
+  if (!raw) return null;
+  try {
+    const s = JSON.parse(raw);
+    if (s && Array.isArray(s.pickups) && Array.isArray(s.deliveries) && s.pickups.length && s.deliveries.length) return s;
+  } catch { /* not JSON — ignore */ }
+  return null;
+}
+
+// One-line summary of every stop, appended to the load notes so any
+// client (including the current driver app build) shows all stops.
+function stopsSummary(stops) {
+  const fmt = (kind, s, i) => kind + ' ' + (i + 1) + ': ' + (s.warehouse || s.location) + (s.warehouse ? ' (' + s.location + ')' : '')
+    + (s.at ? ' — ' + new Date(s.at).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '')
+    + (s.number ? ', #' + s.number : '');
+  return 'Stops — ' + [...stops.pickups.map((s, i) => fmt('Pickup', s, i)), ...stops.deliveries.map((s, i) => fmt('Delivery', s, i))].join('; ');
+}
+
+function notesWithStops(notes, stops) {
+  const base = String(notes || '').split('\n').filter((line) => !line.startsWith('Stops — ')).join('\n').trim();
+  if (!stops) return base || null;
+  const summary = stopsSummary(stops);
+  return base ? base + '\n' + summary : summary;
+}
+
+// Sanitize a stops payload from the assign/edit forms. Returns null
+// unless there is at least one valid pickup and delivery AND more
+// than the default single pickup + single delivery.
+function cleanStopsPayload(raw) {
+  if (!raw || !Array.isArray(raw.pickups) || !Array.isArray(raw.deliveries)) return null;
+  const clean = (s) => {
+    if (!s || !String(s.location || '').trim()) return null;
+    return {
+      location: String(s.location).trim(),
+      warehouse: s.warehouse && String(s.warehouse).trim() ? String(s.warehouse).trim() : null,
+      at: s.at && String(s.at) ? String(s.at) : null,
+      number: s.number && String(s.number).trim() ? String(s.number).trim() : null,
+    };
+  };
+  const pickups = raw.pickups.map(clean).filter(Boolean).slice(0, 4);
+  const deliveries = raw.deliveries.map(clean).filter(Boolean).slice(0, 4);
+  if (!pickups.length || !deliveries.length) return null;
+  if (pickups.length === 1 && deliveries.length === 1) return null;
+  return { pickups, deliveries };
+}
+
 function serializeLoad(l) {
   if (!l) return null;
   return {
@@ -149,6 +195,7 @@ function serializeLoad(l) {
     deliveryAt: l.deliveryAt,
     deliveryTimezone: l.deliveryTimezone,
     deliveryNumber: l.deliveryNumber ?? null,
+    stops: parseStops(l.stops),
     notes: l.notes ?? null,
     status: l.status,
     bolStatus: l.bolStatus ?? null,
@@ -2319,18 +2366,26 @@ admin.post('/loads', (req, res) => {
   const {
     driverId,
     reference,
-    pickupLocation,
-    pickupWarehouse,
-    pickupAt,
     pickupTimezone,
-    pickupNumber,
-    deliveryLocation,
-    deliveryWarehouse,
-    deliveryAt,
     deliveryTimezone,
-    deliveryNumber,
     notes,
   } = req.body || {};
+  // Multi-stop loads: when the form sends extra pickups/deliveries,
+  // the load's own columns become the FIRST pickup and the LAST
+  // delivery; the full stop list is stored as JSON.
+  const stops = cleanStopsPayload(req.body && req.body.stops);
+  const p0 = stops ? stops.pickups[0] : {
+    location: req.body.pickupLocation, warehouse: req.body.pickupWarehouse,
+    at: req.body.pickupAt, number: req.body.pickupNumber,
+  };
+  const dN = stops ? stops.deliveries[stops.deliveries.length - 1] : {
+    location: req.body.deliveryLocation, warehouse: req.body.deliveryWarehouse,
+    at: req.body.deliveryAt, number: req.body.deliveryNumber,
+  };
+  const pickupLocation = p0.location; const pickupWarehouse = p0.warehouse;
+  const pickupAt = p0.at; const pickupNumber = p0.number;
+  const deliveryLocation = dN.location; const deliveryWarehouse = dN.warehouse;
+  const deliveryAt = dN.at; const deliveryNumber = dN.number;
   if (!driverId || !reference || !pickupLocation || !pickupAt || !deliveryLocation || !deliveryAt)
     return err(res, 400, 'driverId, reference, pickup and delivery details are required');
   // Timezone is no longer asked in the form — the time is entered in the
@@ -2342,7 +2397,7 @@ admin.post('/loads', (req, res) => {
   const ts = now();
   const id = db
     .prepare(
-      "INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, deliveryNumber, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+      "INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, deliveryNumber, notes, stops, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     )
     .run(
       lxlLoadRef(reference),
@@ -2357,7 +2412,8 @@ admin.post('/loads', (req, res) => {
       deliveryAt,
       deliveryTimezone || tz,
       deliveryNumber ?? null,
-      notes ?? null,
+      notesWithStops(notes, stops),
+      stops ? JSON.stringify(stops) : null,
       ts,
     ).lastInsertRowid;
   deactivateDemo(db); // first real load deactivates demo
@@ -2397,7 +2453,23 @@ admin.post('/loads/:id/status', (req, res) => {
 admin.post('/loads/:id/edit', (req, res) => {
   const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.id);
   if (!load) return err(res, 404, 'Load not found');
-  const { pickupLocation, pickupWarehouse, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryNumber, notes } = req.body || {};
+  let { pickupLocation, pickupWarehouse, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryNumber, notes } = req.body || {};
+  // Multi-stop edit: the full stop list replaces the stored one and
+  // the primary columns follow its first pickup / last delivery.
+  const stops = cleanStopsPayload(req.body && req.body.stops);
+  if (stops) {
+    const p0 = stops.pickups[0];
+    const dN = stops.deliveries[stops.deliveries.length - 1];
+    pickupLocation = p0.location; pickupWarehouse = p0.warehouse; pickupNumber = p0.number;
+    deliveryLocation = dN.location; deliveryWarehouse = dN.warehouse; deliveryNumber = dN.number;
+    notes = notesWithStops(notes, stops);
+    db.prepare('UPDATE loads SET stops = ? WHERE id = ?').run(JSON.stringify(stops), load.id);
+  } else if (req.body && req.body.stops) {
+    // The form sent a single pickup + single delivery — clear any
+    // stored multi-stop list and its notes summary.
+    db.prepare('UPDATE loads SET stops = NULL WHERE id = ?').run(load.id);
+    notes = notesWithStops(notes, null);
+  }
   const clean = (v) => (v && String(v).trim() ? String(v).trim() : null);
   db.prepare(
     'UPDATE loads SET pickupLocation = COALESCE(?, pickupLocation), pickupWarehouse = ?, pickupNumber = ?, deliveryLocation = COALESCE(?, deliveryLocation), deliveryWarehouse = ?, deliveryNumber = ?, notes = ? WHERE id = ?',

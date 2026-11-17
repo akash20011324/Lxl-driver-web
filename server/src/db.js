@@ -333,6 +333,15 @@ export function openDb(dataDir) {
     if (loadCols.length && !loadCols.some((c) => c.name === 'miles'))
       db.exec('ALTER TABLE loads ADD COLUMN miles REAL');
   } catch { /* table may not exist yet on a brand-new database */ }
+  // Multi-stop loads (owner, 2026-11-17): the full pickup/delivery
+  // stop list as JSON ({pickups:[...], deliveries:[...]}); the load's
+  // own pickup/delivery columns stay the FIRST pickup and the LAST
+  // delivery so routing, pins and completion keep working as before.
+  try {
+    const loadCols2 = db.prepare('PRAGMA table_info(loads)').all();
+    if (loadCols2.length && !loadCols2.some((c) => c.name === 'stops'))
+      db.exec('ALTER TABLE loads ADD COLUMN stops TEXT');
+  } catch { /* table may not exist yet on a brand-new database */ }
   // Bulk RC import: remember which Outlook message each rate con came from.
   try {
     const rcCols = db.prepare('PRAGMA table_info(rate_confirmations)').all();
