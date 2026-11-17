@@ -5128,6 +5128,54 @@ async function fixTransportFundingFixed() {
   } catch (e) { console.error('fixed truck payments TF failed', e); }
 }
 
+// Manual add (owner, 2026-11-17): RTC Transportation load 001 528772
+// would not upload — the RC writes its stops without commas
+// ("Keasbey NJ 08832"), which the reader missed (fixed in
+// scanRcPlaces). Read from the document itself: pickup US Beverage
+// Packers LLC, Keasbey NJ 08832, appt 11/17/26 17:00; delivery
+// HT Hackney, Opp AL 36467, appt 11/19/26 10:00AM; Amount $2,950.00.
+// The owner assigned it to Akash.
+async function addRtc528772Load() {
+  try {
+    const marker = 'rtc-528772-manual-add-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rtc 528772 add: ' + m);
+    let load = db.prepare("SELECT * FROM loads WHERE reference = 'LXL-528772'").get();
+    if (!load) {
+      const driver = db.prepare("SELECT id FROM users WHERE role = 'driver' AND active = 1 AND LOWER(name) LIKE '%akash%'").get();
+      if (!driver) { log('SKIPPED — Akash driver row not found'); return; }
+      const id = db.prepare(
+        "INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+      ).run('LXL-528772', driver.id,
+        'Keasbey, NJ 08832', 'US Beverage Packers LLC', '2026-11-17T17:00:00', 'America/New_York',
+        'Opp, AL 36467', 'HT Hackney', '2026-11-19T10:00:00', 'America/Chicago',
+        'Broker: RTC Transportation. BOL 5358088, PO 302120, EDI 3871671, PU 777278. Juice, 42,085 lbs — PROTECT FROM FREEZING. MacroPoint required.',
+        now()).lastInsertRowid;
+      load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
+      log('created load LXL-528772 for Akash (Keasbey, NJ -> Opp, AL)');
+    } else {
+      log('load LXL-528772 already exists (id ' + load.id + ')');
+    }
+    // Rate con: link the row the failed upload created if it is
+    // there; otherwise create it from the document. Either way the
+    // rate is the document's Amount column: $2,950.00.
+    const rows = db.prepare("SELECT * FROM rate_confirmations WHERE reference LIKE '%528772%'").all();
+    if (rows.length > 1) log('WARNING: ' + rows.length + ' RC rows match 528772');
+    const row = rows.find((r) => !r.loadId) || rows[0];
+    if (row) {
+      db.prepare("UPDATE rate_confirmations SET loadId = ?, rateCents = ?, broker = COALESCE(broker, 'RTC Transportation'), pickupState = 'NJ', deliveryState = 'AL', pickupDate = '2026-11-17', deliveryDate = '2026-11-19' WHERE id = ?")
+        .run(load.id, 295000, row.id);
+      log('linked existing RC row ' + row.id + ' and set rate $2,950.00');
+    } else {
+      const r = db.prepare('INSERT INTO rate_confirmations (reference, loadId, broker, rateCents, pickupState, deliveryState, pickupDate, deliveryDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run('LXL-528772', load.id, 'RTC Transportation', 295000, 'NJ', 'AL', '2026-11-17', '2026-11-19', now());
+      log('created RC row ' + r.lastInsertRowid + ' at $2,950.00 (no file)');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+    log('done');
+  } catch (e) { console.error('rtc 528772 add failed', e); }
+}
+
 // One-time cash flow reconciliation fix (2026-11-16, owner approved
 // after the manual bank-vs-portal check): (1) remove the
 // Outlook-imported Factoring payment of $3,972.50 dated 2026-11-16 —
@@ -5547,6 +5595,20 @@ function scanRcPlaces(t, base) {
   const nameAlt = Object.keys(US_STATE_NAMES).join('|');
   const reZip = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
   while ((m = reZip.exec(t))) add(m[1], m[2], m[3], base + m.index);
+  // No-comma addresses ("Keasbey NJ 08832" — RTC/Power9 writes city
+  // and state separated by a space only, and the reader missed the
+  // stops entirely, owner report 2026-11-17). Guarded harder than
+  // the comma forms: the ZIP prefix must agree with the state code,
+  // and a leading single-letter token (a street direction, the "E"
+  // in "601 Highway 52 E") is dropped before the city is cleaned.
+  const reNoComma = /([A-Z][A-Za-z .'-]{1,30})\s+([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
+  while ((m = reNoComma.exec(t))) {
+    if (stateFromZip3(m[3].slice(0, 3)) !== m[2]) continue;
+    let city = m[1];
+    const toks = city.split(/\s+/);
+    if (toks.length > 1 && toks[0].length === 1) city = toks.slice(1).join(' ');
+    add(city, m[2], m[3], base + m.index);
+  }
   const reZipBad = /([A-Z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/g;
   while ((m = reZipBad.exec(t))) {
     if (US_STATE_CODES.has(m[2])) continue;
@@ -5589,6 +5651,20 @@ function extractRcRouteAnchored(text) {
       if (pu && dl) return [pu, dl].map(({ city, state, zip }) => ({ city, state, zip }));
     }
   }
+  // Side-by-side stop blocks (RTC style): both section labels sit on
+  // one header line, before both addresses, so the window above
+  // finds no pickup. Take the first address after the pickup label,
+  // then the first address after it that also follows the delivery
+  // label.
+  for (const p of pus) {
+    const pu = places.find((x) => x.idx > p);
+    if (!pu) continue;
+    for (const d of dls) {
+      if (d <= p) continue;
+      const dl = places.find((x) => x.idx > Math.max(d, pu.idx));
+      if (dl) return [pu, dl].map(({ city, state, zip }) => ({ city, state, zip }));
+    }
+  }
   return null;
 }
 
@@ -5615,7 +5691,7 @@ function extractRcLoadFields(text, subject) {
   // "Order #" column is followed by "Total Weight", and the reader
   // filed the load as "TOTAL").
   let loadRef = null;
-  for (const m of all.matchAll(/(?:load|order|reference|ref|pro|shipment|trip|booking)\s*(?:#|no\.?|number|id)?\s*[:#]\s*([A-Z0-9][A-Z0-9-]{3,20})/gi)) {
+  for (const m of all.matchAll(/(?:load|order|reference|ref|pro|shipment|trip|booking)\s*(?:#|no\.?|number|id)?\s*[:#]\s*(?:\d{1,3}\s+)?([A-Z0-9][A-Z0-9-]{3,20})/gi)) {
     if (/\d/.test(m[1])) { loadRef = m[1].toUpperCase(); break; }
   }
   if (!loadRef && subject) {
@@ -7007,7 +7083,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
