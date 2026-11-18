@@ -110,6 +110,68 @@ function toast(msg, kind) {
 }
 function showError(e) { toast(e && e.message ? e.message : 'Something went wrong.', 'error'); }
 
+/* ---------- in-page confirm / password dialogs ---------- */
+/* Native window.confirm() / window.prompt() are silently swallowed in
+   some embedded browsers / in-app webviews (they return at once,
+   showing nothing), which made confirm-guarded buttons look dead.
+   These helpers render the same docs-modal pattern as the Relay ID
+   modal — it renders in every client. confirmModal resolves true when
+   the user confirms, false on cancel / ✕ / backdrop click.
+   passwordModal resolves the typed password, or null on cancel; the
+   length + match checks keep the old prompt flow's toast messages and
+   leave the dialog open so the admin can fix a typo. */
+function confirmModal(opts) {
+  return new Promise((resolve) => {
+    const old = document.getElementById('confirmModal');
+    if (old) old.remove();
+    const modal = document.createElement('div');
+    modal.id = 'confirmModal';
+    modal.className = 'docs-modal-backdrop';
+    modal.innerHTML = '<div class="docs-modal" style="max-width:440px"><div class="docs-modal-head"><strong>' + esc(opts.title || 'Are you sure?') + '</strong>' +
+      '<button class="btn btn-ghost btn-sm" id="confirmModalClose" type="button">✕</button></div>' +
+      '<p class="small">' + esc(opts.message || '').replace(/\n/g, '<br>') + '</p>' +
+      '<div class="form-actions"><button class="btn ' + (opts.danger ? 'btn-danger' : 'btn-blue') + '" id="confirmModalYes" type="button">' + esc(opts.confirmLabel || 'Confirm') + '</button>' +
+      '<button class="btn btn-ghost" id="confirmModalNo" type="button">' + esc(opts.cancelLabel || 'Cancel') + '</button></div></div>';
+    document.body.appendChild(modal);
+    const done = (v) => { modal.remove(); resolve(v); };
+    document.getElementById('confirmModalClose').addEventListener('click', () => done(false));
+    document.getElementById('confirmModalNo').addEventListener('click', () => done(false));
+    document.getElementById('confirmModalYes').addEventListener('click', () => done(true));
+    modal.addEventListener('click', (e) => { if (e.target === modal) done(false); });
+  });
+}
+
+function passwordModal(name) {
+  return new Promise((resolve) => {
+    const old = document.getElementById('passwordModal');
+    if (old) old.remove();
+    const modal = document.createElement('div');
+    modal.id = 'passwordModal';
+    modal.className = 'docs-modal-backdrop';
+    modal.innerHTML = '<div class="docs-modal" style="max-width:440px"><div class="docs-modal-head"><strong>Reset password — ' + esc(name) + '</strong>' +
+      '<button class="btn btn-ghost btn-sm" id="passwordModalClose" type="button">✕</button></div>' +
+      '<div class="field"><label for="passwordModalInput">New password (at least 8 characters)</label>' +
+      '<input id="passwordModalInput" type="password" autocomplete="new-password"></div>' +
+      '<div class="field"><label for="passwordModalInput2">Type the new password again to confirm</label>' +
+      '<input id="passwordModalInput2" type="password" autocomplete="new-password"></div>' +
+      '<div class="form-actions"><button class="btn btn-blue" id="passwordModalSave" type="button">Reset password</button>' +
+      '<button class="btn btn-ghost" id="passwordModalCancel" type="button">Cancel</button></div></div>';
+    document.body.appendChild(modal);
+    const done = (v) => { modal.remove(); resolve(v); };
+    document.getElementById('passwordModalClose').addEventListener('click', () => done(null));
+    document.getElementById('passwordModalCancel').addEventListener('click', () => done(null));
+    modal.addEventListener('click', (e) => { if (e.target === modal) done(null); });
+    const input = document.getElementById('passwordModalInput');
+    input.focus();
+    document.getElementById('passwordModalSave').addEventListener('click', () => {
+      const pw = input.value;
+      if (pw.length < 8) { toast('Password must be at least 8 characters.', 'error'); return; }
+      if (document.getElementById('passwordModalInput2').value !== pw) { toast('Passwords do not match.', 'error'); return; }
+      done(pw);
+    });
+  });
+}
+
 /* ---------- API ---------- */
 async function api(path, opts) {
   opts = opts || {};
@@ -437,7 +499,7 @@ async function viewUnitDocuments(main) {
     if (d) downloadFile(d.url, d.filename, true, d.mimeType);
   }));
   main.querySelectorAll('[data-unit-doc-del]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('Delete this document?')) return;
+    if (!(await confirmModal({ title: 'Delete document', message: 'Delete this document?', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api('/api/admin/equipment-documents/' + b.dataset.unitDocDel, { method: 'DELETE' });
       toast('Document deleted.', 'ok');
@@ -1737,7 +1799,7 @@ async function viewDrivers(main) {
   main.querySelectorAll('[data-toggle-driver]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.toggleDriver;
     const active = btn.dataset.active === 'true';
-    if (!confirm((active ? 'Activate' : 'Deactivate') + ' this driver?')) return;
+    if (!(await confirmModal({ title: (active ? 'Activate' : 'Deactivate') + ' driver', message: (active ? 'Activate' : 'Deactivate') + ' this driver?', confirmLabel: active ? 'Activate' : 'Deactivate', danger: !active }))) return;
     try {
       await api('/api/admin/drivers/' + id + '/active', { method: 'POST', body: JSON.stringify({ active }) });
       toast('Driver ' + (active ? 'activated' : 'deactivated') + '.', 'ok');
@@ -1747,7 +1809,7 @@ async function viewDrivers(main) {
   main.querySelectorAll('[data-delete-driver]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.deleteDriver;
     const name = btn.dataset.driverName || 'this driver';
-    if (!confirm('Delete ' + name + '? This removes the driver profile and unassigns their truck and trailer. It cannot be undone.')) return;
+    if (!(await confirmModal({ title: 'Delete driver', message: 'Delete ' + name + '? This removes the driver profile and unassigns their truck and trailer. It cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api('/api/admin/drivers/' + id, { method: 'DELETE' });
       toast('Driver deleted.', 'ok');
@@ -1914,12 +1976,10 @@ async function viewDrivers(main) {
   main.querySelectorAll('[data-reset-driver]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.resetDriver;
     const name = btn.dataset.driverName || 'this driver';
-    const pw = prompt('New password for ' + name + ' (at least 8 characters):');
+    // In-page dialog, never window.prompt() (silently swallowed in
+    // some clients — see passwordModal above).
+    const pw = await passwordModal(name);
     if (pw === null) return;
-    if (pw.length < 8) { toast('Password must be at least 8 characters.', 'error'); return; }
-    const pw2 = prompt('Type the new password again to confirm:');
-    if (pw2 === null) return;
-    if (pw2 !== pw) { toast('Passwords do not match.', 'error'); return; }
     try {
       await api('/api/admin/drivers/' + id + '/password', { method: 'POST', body: JSON.stringify({ password: pw }) });
       toast('Password reset. ' + name + ' will need to sign in again with the new password.', 'ok');
@@ -2049,7 +2109,7 @@ async function viewDriverDocuments(main) {
     if (d) downloadFile(d.url, d.filename, true, d.mimeType);
   }));
   main.querySelectorAll('[data-ddoc-del]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('Delete this document?')) return;
+    if (!(await confirmModal({ title: 'Delete document', message: 'Delete this document?', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api('/api/admin/driver-documents/' + b.dataset.ddocDel, { method: 'DELETE' });
       toast('Document deleted.', 'ok');
@@ -2153,12 +2213,10 @@ async function viewAdmins(main) {
   main.querySelectorAll('[data-reset-admin]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.resetAdmin;
     const name = btn.dataset.adminName || 'this admin';
-    const pw = prompt('New password for ' + name + ' (at least 8 characters):');
+    // In-page dialog, never window.prompt() (silently swallowed in
+    // some clients — see passwordModal above).
+    const pw = await passwordModal(name);
     if (pw === null) return;
-    if (pw.length < 8) { toast('Password must be at least 8 characters.', 'error'); return; }
-    const pw2 = prompt('Type the new password again to confirm:');
-    if (pw2 === null) return;
-    if (pw2 !== pw) { toast('Passwords do not match.', 'error'); return; }
     try {
       await api('/api/admin/admins/' + id + '/password', { method: 'POST', body: JSON.stringify({ password: pw }) });
       toast('Password reset. ' + name + ' will need to sign in again with the new password.', 'ok');
@@ -2167,7 +2225,7 @@ async function viewAdmins(main) {
   main.querySelectorAll('[data-delete-admin]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.deleteAdmin;
     const name = btn.dataset.adminName || 'this admin';
-    if (!confirm('Delete ' + name + '? They will no longer be able to sign in to the Admin Portal.')) return;
+    if (!(await confirmModal({ title: 'Delete admin', message: 'Delete ' + name + '? They will no longer be able to sign in to the Admin Portal.', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api('/api/admin/admins/' + id, { method: 'DELETE' });
       toast('Admin deleted.', 'ok');
@@ -2618,7 +2676,7 @@ async function viewLoads(main) {
 
   main.querySelectorAll('[data-delete-load]').forEach((b) => b.addEventListener('click', async () => {
     const l = list.find((x) => String(x.id) === b.dataset.deleteLoad);
-    if (!confirm('Delete load ' + (l ? l.reference : '') + '? This removes the load completely. This can\'t be undone.')) return;
+    if (!(await confirmModal({ title: 'Delete load', message: 'Delete load ' + (l ? l.reference : '') + '? This removes the load completely. This can\'t be undone.', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api('/api/admin/loads/' + b.dataset.deleteLoad, { method: 'DELETE' });
       toast('Load deleted.', 'ok');
@@ -2642,7 +2700,7 @@ async function viewLoads(main) {
     } catch (err) { showError(err); }
   }));
   main.querySelectorAll('[data-reopen-load]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('Reopen this load? It becomes active again for the driver.')) return;
+    if (!(await confirmModal({ title: 'Reopen load', message: 'Reopen this load? It becomes active again for the driver.', confirmLabel: 'Reopen' }))) return;
     try {
       await api('/api/admin/loads/' + b.dataset.reopenLoad + '/status', { method: 'POST', body: JSON.stringify({ status: 'active' }) });
       toast('Load reopened.', 'ok');
@@ -3020,7 +3078,7 @@ async function viewRequests(main) {
     } catch (err) { showError(err); }
   };
   main.querySelectorAll('[data-approve]').forEach(b => b.addEventListener('click', () => decide(b.dataset.approve, 'approved')));
-  main.querySelectorAll('[data-deny]').forEach(b => b.addEventListener('click', () => {
+  main.querySelectorAll('[data-deny]').forEach(b => b.addEventListener('click', async () => {
     const id = b.dataset.deny;
     const noteEl = main.querySelector('[data-note="' + id + '"]');
     const reason = noteEl ? noteEl.value.trim() : '';
@@ -3029,7 +3087,7 @@ async function viewRequests(main) {
       if (noteEl) noteEl.focus();
       return;
     }
-    if (!confirm('Deny this request?\n\nReason: ' + reason)) return;
+    if (!(await confirmModal({ title: 'Deny request', message: 'Deny this request?\n\nReason: ' + reason, confirmLabel: 'Deny', danger: true }))) return;
     decide(id, 'denied');
   }));
 }
@@ -3144,7 +3202,7 @@ async function viewMaintenance(main) {
     } catch (err) { showError(err); }
   }));
   main.querySelectorAll('[data-delitem]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('Stop tracking "' + b.dataset.name + '"? Its service history stays saved.')) return;
+    if (!(await confirmModal({ title: 'Stop tracking', message: 'Stop tracking "' + b.dataset.name + '"? Its service history stays saved.', confirmLabel: 'Stop tracking', danger: true }))) return;
     try {
       await api('/api/admin/maintenance/items/' + b.dataset.delitem, { method: 'DELETE' });
       renderAdminView('maintenance');
@@ -3416,7 +3474,7 @@ async function viewCashflow(main) {
     } catch (err) { showError(err); }
   });
   main.querySelectorAll('[data-delfixed]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('Remove this fixed payment?')) return;
+    if (!(await confirmModal({ title: 'Remove fixed payment', message: 'Remove this fixed payment?', confirmLabel: 'Remove', danger: true }))) return;
     try {
       await api('/api/admin/cashflow/fixed/' + b.dataset.delfixed, { method: 'DELETE' });
       renderAdminView('cashflow');
@@ -3527,7 +3585,7 @@ async function viewCashflow(main) {
     } catch (err) { showError(err); }
   });
   main.querySelectorAll('[data-delentry]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('Delete this entry?')) return;
+    if (!(await confirmModal({ title: 'Delete entry', message: 'Delete this entry?', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api('/api/admin/cashflow/entries/' + b.dataset.delentry, { method: 'DELETE' });
       renderAdminView('cashflow');
@@ -3787,7 +3845,7 @@ async function viewDispatch(main) {
   if (delBtn) delBtn.addEventListener('click', async () => {
     const ids = [...selectedMsgIds];
     if (!ids.length || !state.dispatchDriverId) return;
-    if (!confirm('Delete ' + ids.length + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone? The driver will no longer see them either.')) return;
+    if (!(await confirmModal({ title: 'Delete messages', message: 'Delete ' + ids.length + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone? The driver will no longer see them either.', confirmLabel: 'Delete', danger: true }))) return;
     try {
       const r = await api('/api/admin/messages/' + state.dispatchDriverId, { method: 'DELETE', body: JSON.stringify({ ids }) });
       toast('Deleted ' + (r && r.deleted != null ? r.deleted : ids.length) + ' message' + (ids.length === 1 ? '' : 's') + ' for everyone.' + (r && r.skippedOld ? ' ' + r.skippedOld + ' skipped — older than 7 minutes.' : ''), 'ok');
@@ -4133,7 +4191,7 @@ async function renderBrokerAccesses() {
   }));
   host.querySelectorAll('[data-delete-broker]').forEach((btn) => btn.addEventListener('click', async () => {
     const a = rows.find((r) => r.id === Number(btn.dataset.deleteBroker));
-    if (!confirm('Delete tracking access for ' + (a ? a.brokerName : 'this broker') + '? Their link stops working right away.')) return;
+    if (!(await confirmModal({ title: 'Delete tracking access', message: 'Delete tracking access for ' + (a ? a.brokerName : 'this broker') + '? Their link stops working right away.', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api('/api/admin/broker-access/' + btn.dataset.deleteBroker, { method: 'DELETE' });
       toast('Broker access deleted.', 'ok');
@@ -4467,7 +4525,7 @@ async function viewRateCons(main) {
     if (r && r.url) downloadFile(r.url, r.filename, false, r.mimeType);
   }));
   main.querySelectorAll('[data-rc-del]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('Delete this rate confirmation?')) return;
+    if (!(await confirmModal({ title: 'Delete rate confirmation', message: 'Delete this rate confirmation?', confirmLabel: 'Delete', danger: true }))) return;
     try { await api('/api/admin/rate-confirmations/' + b.dataset.rcDel, { method: 'DELETE' }); toast('Rate confirmation deleted.', 'ok'); renderAdminView('ratecons'); }
     catch (err) { showError(err); }
   }));
@@ -4650,7 +4708,7 @@ async function viewDriverTrailer(main) {
   }));
   const rel = document.getElementById('releaseTrailer');
   if (rel) rel.addEventListener('click', async () => {
-    if (!confirm('Release your current trailer?')) return;
+    if (!(await confirmModal({ title: 'Release trailer', message: 'Release your current trailer?', confirmLabel: 'Release' }))) return;
     try {
       await api('/api/driver/trailers/release', { method: 'POST', body: JSON.stringify({}) });
       toast('Trailer released.', 'ok');
@@ -4766,7 +4824,7 @@ function bindActiveLoad(main, load) {
   document.getElementById('bolWrong').addEventListener('click', () => bolStatus('wrong'));
   document.getElementById('completeLoad').addEventListener('click', async () => {
     if (!load.bolStatus) { showError(new Error('Mark the BOL result first — tap Clean BOL or Wrong BOL.')); return; }
-    if (!confirm('Mark this load complete?')) return;
+    if (!(await confirmModal({ title: 'Complete load', message: 'Mark this load complete?', confirmLabel: 'Mark complete' }))) return;
     const body = {};
     try {
       const pos = await new Promise((resolve) => {

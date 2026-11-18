@@ -3268,7 +3268,10 @@ admin.post('/loads', (req, res) => {
   // delivery-location gate has coordinates by delivery day.
   void ensureDeliveryCoords(db.prepare('SELECT * FROM loads WHERE id = ?').get(id));
   void ensurePickupCoords(db.prepare('SELECT * FROM loads WHERE id = ?').get(id));
-  notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${reference}: ${pickupWarehouse || pickupLocation} → ${deliveryWarehouse || deliveryLocation}.`).catch(() => {});
+  // Tell the driver (fire-and-forget): the stored display ref
+  // (LXL-<broker number>) + route — the same 'load_assigned' body the
+  // Add-RC auto-load path sends.
+  notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${load.reference}: ${load.pickupLocation} → ${load.deliveryLocation}.`).catch(() => {});
   res.status(201).json(load);
 });
 
@@ -3294,11 +3297,24 @@ admin.post('/loads/:id/status', (req, res) => {
   res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
 });
 
-// Edit a load's addresses (admin only): fixes typos like the LXL-2038499
-// pickup "Lebno". Times, driver and reference never change here.
+// Edit a load (admin only): fixes typos like the LXL-2038499 pickup
+// "Lebno", and reassigns the driver when the form's driver differs
+// from the load's — the portal's edit form always sends its driver
+// dropdown, which this endpoint used to ignore. A reassignment pushes
+// 'New load assigned' to the new driver, exactly like a fresh create.
+// Times and reference never change here.
 admin.post('/loads/:id/edit', (req, res) => {
   const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.id);
   if (!load) return err(res, 404, 'Load not found');
+  // Reassignment: only when the body names a different, valid driver.
+  // An absent/empty driverId leaves the assignment untouched (loads
+  // are never unassigned through edit).
+  const requestedDriverId = req.body && req.body.driverId != null && req.body.driverId !== '' ? Number(req.body.driverId) : null;
+  const reassignTo = requestedDriverId !== null && Number.isFinite(requestedDriverId) && requestedDriverId !== load.driverId ? requestedDriverId : null;
+  if (reassignTo !== null) {
+    const newDriver = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(reassignTo);
+    if (!newDriver) return err(res, 404, 'Driver not found');
+  }
   let { pickupLocation, pickupWarehouse, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryNumber, notes } = req.body || {};
   // Multi-stop edit: the full stop list replaces the stored one and
   // the primary columns follow its first pickup / last delivery.
@@ -3337,7 +3353,15 @@ admin.post('/loads/:id/edit', (req, res) => {
   if (clean(pickupLocation) && clean(pickupLocation) !== load.pickupLocation) {
     db.prepare('UPDATE loads SET pickupLat = NULL, pickupLng = NULL WHERE id = ?').run(load.id);
   }
-  res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
+  if (reassignTo !== null) {
+    db.prepare('UPDATE loads SET driverId = ? WHERE id = ?').run(reassignTo, load.id);
+  }
+  const updated = db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id);
+  if (reassignTo !== null) {
+    // Tell the new driver (fire-and-forget — never blocks the save).
+    notifyDriver(db, reassignTo, 'load_assigned', 'New load assigned', `Load ${updated.reference}: ${updated.pickupLocation} → ${updated.deliveryLocation}.`).catch(() => {});
+  }
+  res.json(serializeLoad(updated));
 });
 
 // Delete a load outright (admin only): the load, its documents and
@@ -8985,16 +9009,54 @@ app.get('/files/:id', auth, (req, res) => {
         allowed = !!unit && unit.driverId === req.user.id;
       }
     }
+    if (!allowed) {
+      // The caller's own profile photo: the files row can predate the
+      // current account (photo uploaded by a very old build, account
+      // later recreated), leaving the row's driverId pointing at a dead
+      // user id. users.photoUrl pointing at this exact file proves the
+      // photo is the caller's own, so allow it.
+      const me = db.prepare('SELECT photoUrl FROM users WHERE id = ?').get(req.user.id);
+      if (me && me.photoUrl === `/files/${file.id}`) allowed = true;
+    }
     if (!allowed) return err(res, 403, 'Forbidden');
   }
   const filePath = path.join(UPLOADS_DIR, file.storedFilename);
   if (!fs.existsSync(filePath)) return err(res, 404, 'File not found');
+  // Sniff the real type from the file's magic bytes. Photos uploaded by
+  // very old builds can be stored with no extension and a generic
+  // mimeType (application/octet-stream); serving that type makes iOS
+  // refuse to decode the image (the black profile photo bug). A sniffed
+  // image/PDF type therefore WINS over the extension map and the stored
+  // mimeType below. Generic ftyp brands are deliberately NOT sniffed —
+  // voice-note .m4a/.mp4 files share the ftyp box and must keep the
+  // extension-based type.
+  let sniffedType = null;
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const head = Buffer.alloc(16);
+      const bytesRead = fs.readSync(fd, head, 0, 16, 0);
+      const b = head.subarray(0, bytesRead);
+      if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) sniffedType = 'image/jpeg';
+      else if (b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) sniffedType = 'image/png';
+      else if (b.length >= 4 && b.toString('latin1', 0, 4) === 'GIF8') sniffedType = 'image/gif';
+      else if (b.length >= 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP') sniffedType = 'image/webp';
+      else if (b.length >= 4 && b.toString('latin1', 0, 4) === '%PDF') sniffedType = 'application/pdf';
+      else if (b.length >= 12 && b.toString('latin1', 4, 8) === 'ftyp') {
+        const brand = b.toString('latin1', 8, 12);
+        if (['heic', 'heix', 'mif1', 'msf1', 'hevc'].includes(brand)) sniffedType = 'image/heic';
+        else if (['avif', 'avis'].includes(brand)) sniffedType = 'image/avif';
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch { /* sniffing is best-effort; fall through to extension/mime */ }
   // View must open inline (PDF in a browser tab); Download forces a save.
   // The stored mimeType can be generic (e.g. from an email attachment), so
   // prefer the type implied by the file extension when it is known.
   const ext = path.extname(file.storedFilename).toLowerCase();
   const extType = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.txt': 'text/plain', '.m4a': 'audio/mp4', '.mp4': 'audio/mp4', '.aac': 'audio/aac', '.mp3': 'audio/mpeg' }[ext];
-  const type = extType || (file.mimeType && file.mimeType !== 'application/octet-stream' ? file.mimeType : 'application/octet-stream');
+  const type = sniffedType || extType || (file.mimeType && file.mimeType !== 'application/octet-stream' ? file.mimeType : 'application/octet-stream');
   res.type(type);
   res.set('Content-Disposition', (req.query.download === '1' ? 'attachment' : 'inline') + '; filename="' + String(file.originalFilename || file.storedFilename).replace(/"/g, '') + '"');
   res.sendFile(filePath);
@@ -9053,6 +9115,22 @@ app.listen(PORT, () => {
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
+  // Photo self-heal (black-avatar fix): a profile photo whose files row
+  // or on-disk file is gone can never load — the app would keep trying
+  // to render it and sit on a black circle on every screen. Clear the
+  // stale photoUrl at boot so the app falls back to the driver's
+  // initials instead. Wrapped so it can never take the server down.
+  try {
+    const photoUsers = db.prepare('SELECT id, photoUrl FROM users WHERE photoUrl IS NOT NULL').all();
+    for (const u of photoUsers) {
+      const m = /^\/files\/(\d+)$/.exec(String(u.photoUrl).trim());
+      const row = m ? getFileRow(m[1]) : null;
+      if (!row || !fs.existsSync(path.join(UPLOADS_DIR, row.storedFilename))) {
+        db.prepare('UPDATE users SET photoUrl = NULL WHERE id = ?').run(u.id);
+        console.log(`[photo-heal] cleared stale photoUrl for user ${u.id}`);
+      }
+    }
+  } catch (e) { console.error('[photo-heal] failed', e); }
   // Backfill road miles for the Trucks profit section (driver pay =
   // miles x $0.65), shortly after boot so the pin reset above settles.
   setTimeout(() => {
