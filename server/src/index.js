@@ -4317,6 +4317,47 @@ async function dumpRc528772() {
   } catch (e) { console.error('rcdump failed:', e.message); }
 }
 
+// One-off (owner, 2026-11-17): the RC row for LXL-528772 has no stored
+// file, so pull the RC PDF from the connected mailboxes and log its text
+// to read the street addresses off the document itself.
+async function fetchRc528772() {
+  try {
+    const marker = 'fetch-rc-528772-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('rcfetch: ' + m);
+    const users = db.prepare('SELECT * FROM users WHERE outlookRefreshToken IS NOT NULL ORDER BY isMainAdmin DESC, id').all();
+    log('mailboxes: ' + users.map((u) => u.outlookEmail || u.name).join(', '));
+    let downloaded = 0;
+    for (const u of users) {
+      if (downloaded >= 6) break;
+      let accessToken;
+      try { accessToken = await outlookAccessToken(u); } catch { log('no token for ' + (u.outlookEmail || u.name)); continue; }
+      const page = await outlookGraph(accessToken, '/me/messages?$search=' + encodeURIComponent('"528772"') + '&$top=25&$select=id,subject,receivedDateTime,hasAttachments').catch(() => null);
+      const msgs = ((page && page.value) || []);
+      log(msgs.length + ' message(s) in ' + (u.outlookEmail || u.name) + (msgs.length ? ' — ' + msgs.map((m) => m.subject || '(no subject)').join(' || ') : ''));
+      for (const m of msgs) {
+        if (downloaded >= 6) break;
+        if (!m.hasAttachments) continue;
+        const atts = await outlookGraph(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size`).catch(() => null);
+        for (const a of ((atts && atts.value) || [])) {
+          if (downloaded >= 6) break;
+          if (!a.id || (a.size || 0) >= 12000000) continue;
+          const isPdf = (a.contentType || '').includes('pdf') || /\.pdf$/i.test(a.name || '');
+          if (!isPdf) continue;
+          const got = await outlookAttachmentBuffer(u, m.id, a.id).catch(() => ({}));
+          if (!got.fileBuffer || !got.fileBuffer.length) { log('attachment "' + (a.name || '') + '" could not be downloaded'); continue; }
+          downloaded += 1;
+          const text = cleanRateText(await pdfTextFromBuffer(got.fileBuffer).catch(() => ''));
+          log('attachment "' + (a.name || '') + '" from [' + (m.subject || '') + '] chars=' + text.length);
+          if (text.length) log('RC TEXT BEGIN\n' + text.slice(0, 6000) + '\nRC TEXT END');
+        }
+      }
+    }
+    log('attachments downloaded: ' + downloaded);
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+  } catch (e) { console.error('rcfetch failed:', e.message); }
+}
+
 // Adjudication (2026-11-16): corrections verified by READING the rate
 // confirmation documents themselves (the automatic reader had taken
 // load WEIGHTS — "41545.67L" — for rates on the Armstrong PDFs, and
@@ -7736,7 +7777,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
