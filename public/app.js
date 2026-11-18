@@ -1751,17 +1751,44 @@ async function viewDrivers(main) {
       renderAdminView('drivers');
     } catch (err) { showError(err); }
   }));
-  main.querySelectorAll('[data-relay-driver]').forEach(btn => btn.addEventListener('click', async () => {
+  main.querySelectorAll('[data-relay-driver]').forEach(btn => btn.addEventListener('click', () => {
     const id = btn.dataset.relayDriver;
     const name = btn.dataset.driverName || 'this driver';
     const current = btn.dataset.relayId || '';
-    const value = prompt('Relay Driver ID for ' + name + ' — the 16-digit ID from the Relay portal (Drivers → profile → Settings). Leave empty to unlink:', current);
-    if (value === null) return;
-    try {
-      await api('/api/admin/drivers/' + id + '/relay-id', { method: 'POST', body: JSON.stringify({ relayDriverId: value.trim() }) });
-      toast(value.trim() ? ('Relay ID saved for ' + name + '.') : ('Relay ID removed for ' + name + '.'), 'ok');
-      renderAdminView('drivers');
-    } catch (err) { showError(err); }
+    // In-page dialog, NOT window.prompt(): native prompt() is silently
+    // swallowed (returns null at once, showing nothing) in embedded
+    // browsers / in-app webviews, which made this button look dead —
+    // the click fired, prompt() bailed, and the handler returned.
+    // The docs-modal pattern below renders in every client.
+    const old = document.getElementById('relayIdModal');
+    if (old) old.remove();
+    const modal = document.createElement('div');
+    modal.id = 'relayIdModal';
+    modal.className = 'docs-modal-backdrop';
+    modal.innerHTML = '<div class="docs-modal" style="max-width:440px"><div class="docs-modal-head"><strong>Relay Driver ID — ' + esc(name) + '</strong>' +
+      '<button class="btn btn-ghost btn-sm" id="relayIdClose" type="button">✕</button></div>' +
+      '<p class="small muted">The 16-digit ID from the Relay portal (Drivers → profile → Settings). Leave empty to unlink.</p>' +
+      '<div class="field"><label for="relayIdInput">Relay Driver ID</label>' +
+      '<input id="relayIdInput" inputmode="numeric" autocomplete="off" value="' + esc(current) + '"></div>' +
+      '<div class="form-actions"><button class="btn btn-blue" id="relayIdSave" type="button">Save</button>' +
+      '<button class="btn btn-ghost" id="relayIdCancel" type="button">Cancel</button></div></div>';
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    document.getElementById('relayIdClose').addEventListener('click', close);
+    document.getElementById('relayIdCancel').addEventListener('click', close);
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    const input = document.getElementById('relayIdInput');
+    input.focus();
+    input.select();
+    document.getElementById('relayIdSave').addEventListener('click', async () => {
+      const value = input.value.trim();
+      try {
+        await api('/api/admin/drivers/' + id + '/relay-id', { method: 'POST', body: JSON.stringify({ relayDriverId: value }) });
+        toast(value ? ('Relay ID saved for ' + name + '.') : ('Relay ID removed for ' + name + '.'), 'ok');
+        close();
+        renderAdminView('drivers');
+      } catch (err) { showError(err); }
+    });
   }));
   main.querySelectorAll('[data-reset-driver]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.resetDriver;
