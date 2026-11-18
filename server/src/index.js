@@ -56,6 +56,7 @@ function publicUser(u) {
     email: u.email,
     phone: u.phone ?? null,
     relayDriverId: u.relay_driver_id ?? null,
+    relayStartCode: u.relay_start_code ?? null,
     photoUrl: u.photoUrl ?? null,
     emergencyContact: u.emergencyContact ?? null,
     active: !!u.active,
@@ -1534,6 +1535,57 @@ const RELAY_DRIVERS_URL = RELAY_API_BASE + '/api/integrations/drivers/';
 // fill was ~$614). Sent as a string: the schema requires that type.
 const RELAY_FUEL_CODE_CONSTRAINT = '700';
 
+// Shared one-time-code DELETE at Relay (build 34): the driver cancel
+// route and the ADMIN cancel route both land here. Relay soft-deletes
+// the code; per the spec that is only allowed while the code is in
+// `created` status. Returns { ok: true } on Relay's 2xx, otherwise
+// { ok: false, status, relayMsg } — or { ok: false, networkError: true,
+// error } when Relay could not be reached at all.
+async function relayDeleteFuelCode(apiKey, codeId) {
+  let resp;
+  let data = null;
+  try {
+    resp = await fetch(RELAY_FUEL_CODES_URL + encodeURIComponent(codeId), {
+      method: 'DELETE',
+      headers: { Authorization: apiKey },
+      signal: AbortSignal.timeout(20000),
+    });
+    data = await resp.json().catch(() => null);
+  } catch (e) {
+    return { ok: false, networkError: true, error: e };
+  }
+  if (resp.ok) return { ok: true, status: resp.status };
+  return {
+    ok: false,
+    status: resp.status,
+    relayMsg:
+      relayText(data?.message) || relayText(data?.error) || relayText(data?.detail),
+  };
+}
+
+// Relay's fuel-code LIST endpoint requires dtstart/dtend; the admin
+// "active codes" view asks for TODAY's codes — today at 00:00 in
+// America/New_York (fleet time) as RFC3339 with the ET offset.
+function relayEtStartOfTodayRfc3339() {
+  const at = new Date();
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(at);
+  const part = (t) => dateParts.find((p) => p.type === t)?.value || '';
+  const offsetName =
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      timeZoneName: 'longOffset',
+    })
+      .formatToParts(at)
+      .find((p) => p.type === 'timeZoneName')?.value || 'GMT-05:00';
+  const offset = offsetName.replace('GMT', '') || '+00:00';
+  return `${part('year')}-${part('month')}-${part('day')}T00:00:00${offset}`;
+}
+
 // integration_id (16-digit, stored on the user) -> Relay external
 // driver id (dr_…). Resolved lazily and cached for the life of the
 // process; a miss re-checks Relay rather than trusting a stale map.
@@ -1681,9 +1733,233 @@ driver.post('/relay/fuel-code', async (req, res) => {
   console.log(
     `Relay fuel code issued for driver ${req.user.id}${locationId ? ` at location ${locationId}` : ''}`,
   );
+  // Build 34: the app also gets Relay's reference for the code
+  // (code_id — the handle the Cancel button deletes by; it is not
+  // the code itself) and the driver's Relay START CODE, which the
+  // pump asks for BEFORE the fuel code. Relay delivers the start
+  // code by SMS only — the API has no field for it — so it is data:
+  // the per-driver value dispatch stored from the driver's Relay
+  // text wins, then the fleet-wide RELAY_START_CODE env var.
+  const startCode =
+    relayText(req.user.relay_start_code) ||
+    relayText(process.env.RELAY_START_CODE) ||
+    null;
   // No expires_at exists in Relay's schema — the app renders an
   // expiry only when one is provided.
-  res.json({ code, expiresAt: null });
+  res.json({ code, code_id: reference, start_code: startCode, expiresAt: null });
+});
+
+// Cancel a one-time Relay fuel code (build 34, owner): the driver
+// issued a code in the app and is not going to use it — the app's
+// Cancel button lands here with Relay's code reference (code_id).
+// Relay soft-deletes the code (DELETE /api/integrations/fuelcodes/
+// {id}); per the spec that is only allowed while the code is in
+// `created` status — a code already active at a pump or used cannot
+// be cancelled, and Relay's own message is surfaced when it refuses.
+// The cancellation is audit-logged (driver, reference, time — never
+// the code itself, which the server never stores).
+driver.post('/relay/fuel-code/cancel', async (req, res) => {
+  const relayId = relayText(req.user.relay_driver_id);
+  if (!relayId) {
+    return res.status(409).json({
+      error: 'relay_not_linked',
+      message: "Your Relay account isn't linked yet — dispatch is setting it up.",
+    });
+  }
+  const apiKey = process.env.RELAY_API_KEY;
+  if (!apiKey) return err(res, 503, 'Relay is not configured on the server yet.');
+  const codeId = relayText(req.body?.code_id);
+  if (!codeId || !codeId.startsWith('code_')) {
+    return err(res, 400, 'That fuel code reference looks invalid.');
+  }
+  const result = await relayDeleteFuelCode(apiKey, codeId);
+  if (result.networkError) {
+    console.error(
+      `Relay fuel code cancel: request to Relay failed for driver ${req.user.id}: ${result.error?.message || 'unknown error'}`,
+    );
+    return err(
+      res,
+      502,
+      'Could not reach Relay to cancel the code. Check your signal and try again.',
+    );
+  }
+  if (!result.ok) {
+    console.error(
+      `Relay fuel code cancel: Relay API answered HTTP ${result.status} for driver ${req.user.id}` +
+        (result.relayMsg ? `: ${result.relayMsg}` : ''),
+    );
+    return err(
+      res,
+      502,
+      result.relayMsg
+        ? `Relay said: ${result.relayMsg}`
+        : 'Relay could not cancel that code. It may already be in use at the pump.',
+    );
+  }
+  try {
+    db.prepare(
+      'INSERT INTO relay_fuel_code_cancellations (driver_id, driver_integration_id, relay_reference, created_at) VALUES (?, ?, ?, ?)',
+    ).run(req.user.id, relayId, codeId, now());
+  } catch (e) {
+    console.error('Relay fuel code cancel: audit log insert failed', e);
+  }
+  console.log(`Relay fuel code cancelled for driver ${req.user.id} (ref ${codeId})`);
+  res.json({ ok: true });
+});
+
+// The driver's Relay fuel POLICY assignment (build 34, owner — he
+// holds a Pilot policy in Relay and wants it visible in the app, not
+// just one-time codes). Verified against Relay's official TMS Fuel
+// OpenAPI spec (tmsfuel.yaml, read 2026-11-18):
+//   GET /fuel/policies/policy-assignments/{driver_id}
+//     -> PolicyAssignmentFuelPolicy {id, policy_id, policy_name,
+//        enabled, limits: [{type, mode, amount, unit, frequency,
+//        usage, remaining}]}; 404 when the driver has no assignment.
+//   The spec's path template carries {driver_id} but declares the
+//   parameter "in: query" — both styles are tried. Policies are
+//   created/edited ONLY in the Relay portal; this API is view-only,
+//   and one-time codes are NOT subject to the policy (Relay's own
+//   wording) — this endpoint only SURFACES the real assignment.
+// Base-path note: the spec mounts everything under
+// /api/integrations, but the live transactions route is
+// /api/fuel/transactions/ — both mounts are tried, and which one
+// answered (plus the response's keys, never the key) is logged once
+// per fetch so the live shape can be verified after deploy.
+const relayPolicyCache = new Map(); // userId -> { at, payload }
+const RELAY_POLICY_CACHE_MS = 5 * 60 * 1000;
+
+const RELAY_POLICY_LIMIT_LABELS = {
+  PolicyLimitTypeDef: 'DEF',
+  PolicyLimitTypeReefer: 'Reefer fuel',
+  PolicyLimitTypeCash: 'Cash',
+  PolicyLimitTypeNonFuel: 'Non-fuel',
+  PolicyLimitTypeNonFuelAdditive: 'Additives',
+  PolicyLimitTypeNonFuelOil: 'Oil',
+  PolicyLimitTypeNonFuelScales: 'Scales',
+  PolicyLimitTypeCardGeneral: 'Fuel',
+  PolicyLimitTypeCardCATScales: 'CAT scales',
+  PolicyLimitTypeGas: 'Gasoline',
+  PolicyLimitTypeLumper: 'Lumper',
+};
+
+function relayPolicyLimitLabel(rawType) {
+  const t = relayText(rawType);
+  if (!t) return 'Limit';
+  if (RELAY_POLICY_LIMIT_LABELS[t]) return RELAY_POLICY_LIMIT_LABELS[t];
+  // Unknown enum value: prettify rather than show the raw token —
+  // "PolicyLimitTypeDiesel" -> "Diesel".
+  const stripped = t.replace(/^PolicyLimitType/, '');
+  const spaced = stripped.replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return spaced || t;
+}
+
+driver.get('/relay/policy', async (req, res) => {
+  const relayId = relayText(req.user.relay_driver_id);
+  if (!relayId) {
+    return res.status(409).json({
+      error: 'relay_not_linked',
+      message: "Your Relay account isn't linked yet — dispatch is setting it up.",
+    });
+  }
+  const apiKey = process.env.RELAY_API_KEY;
+  if (!apiKey) return err(res, 503, 'Relay is not configured on the server yet.');
+  const cached = relayPolicyCache.get(req.user.id);
+  if (cached && Date.now() - cached.at < RELAY_POLICY_CACHE_MS) {
+    return res.json(cached.payload);
+  }
+  const driverId = await resolveRelayDriverId(apiKey, relayId);
+  if (!driverId) {
+    console.error(
+      `Relay policy: could not resolve a Relay driver id for driver ${req.user.id} (integration_id ${relayId})`,
+    );
+    return res.status(502).json({
+      error: 'relay_driver_unresolved',
+      message:
+        'Your Relay driver account could not be matched yet. Try again in a moment, or let dispatch know.',
+    });
+  }
+  const enc = encodeURIComponent(driverId);
+  const attempts = [
+    `${RELAY_API_BASE}/api/integrations/fuel/policies/policy-assignments/${enc}`,
+    `${RELAY_API_BASE}/api/integrations/fuel/policies/policy-assignments/?driver_id=${enc}`,
+    `${RELAY_API_BASE}/api/fuel/policies/policy-assignments/${enc}`,
+    `${RELAY_API_BASE}/api/fuel/policies/policy-assignments/?driver_id=${enc}`,
+  ];
+  let lastRelayMsg = null;
+  for (const url of attempts) {
+    let resp;
+    let data = null;
+    try {
+      resp = await fetch(url, {
+        headers: { Authorization: apiKey },
+        signal: AbortSignal.timeout(20000),
+      });
+      data = await resp.json().catch(() => null);
+    } catch (e) {
+      console.error(
+        `Relay policy: request failed for driver ${req.user.id}: ${e?.message || 'unknown error'}`,
+      );
+      return err(
+        res,
+        502,
+        'Could not reach Relay to read your fuel policy. Try again in a moment.',
+      );
+    }
+    console.log(
+      `Relay policy: ${url.replace(RELAY_API_BASE, '')} -> HTTP ${resp.status}, keys: ${
+        data && typeof data === 'object' ? Object.keys(data).join(',') : '(none)'
+      }`,
+    );
+    if (resp.ok && data && typeof data === 'object') {
+      const limits = (Array.isArray(data.limits) ? data.limits : []).map((l) => ({
+        label: relayPolicyLimitLabel(l?.type),
+        amount: relayText(l?.amount),
+        unit: relayText(l?.unit),
+        period: relayText(l?.frequency),
+        used: relayText(l?.usage),
+        remaining: relayText(l?.remaining),
+      }));
+      const payload = {
+        assigned: true,
+        policy_name: relayText(data.policy_name) || relayText(data.name) || null,
+        enabled: data.enabled !== false,
+        limits,
+      };
+      relayPolicyCache.set(req.user.id, { at: Date.now(), payload });
+      return res.json(payload);
+    }
+    if (resp.status === 404) {
+      // Maybe the wrong mount/style — try the next one. Remember the
+      // message: a genuine "assignment not found" 404 is how the
+      // loop ends; anything else is reported honestly below.
+      lastRelayMsg =
+        relayText(data?.message) || relayText(data?.error) || relayText(data?.detail) || lastRelayMsg;
+      continue;
+    }
+    const relayMsg =
+      relayText(data?.message) || relayText(data?.error) || relayText(data?.detail);
+    console.error(
+      `Relay policy: Relay API answered HTTP ${resp.status} for driver ${req.user.id}` +
+        (relayMsg ? `: ${relayMsg}` : ''),
+    );
+    return err(
+      res,
+      502,
+      relayMsg
+        ? `Relay said: ${relayMsg}`
+        : 'Relay could not read your fuel policy right now. Try again in a moment.',
+    );
+  }
+  // Every style 404'd. Relay's assignment endpoint 404s when the
+  // driver has no policy assignment — that is the genuine answer;
+  // anything that reads like a routing/unknown-endpoint error is
+  // still surfaced in the log above for post-deploy verification.
+  console.log(
+    `Relay policy: no assignment found for driver ${req.user.id} (Relay: ${lastRelayMsg || '404'})`,
+  );
+  const payload = { assigned: false };
+  relayPolicyCache.set(req.user.id, { at: Date.now(), payload });
+  res.json(payload);
 });
 
 app.use('/api/driver', driver);
@@ -1896,6 +2172,24 @@ admin.post('/drivers/:id/relay-id', (req, res) => {
     return err(res, 400, 'That Relay Driver ID looks invalid');
   db.prepare('UPDATE users SET relay_driver_id = ? WHERE id = ?').run(value || null, driverUser.id);
   res.json({ ok: true, relayDriverId: value || null });
+});
+
+// Set or clear a driver's Relay START CODE (build 34). Relay texts
+// the driver a short numeric start code with each one-time fuel
+// code — he enters it at the pump BEFORE the fuel code. The Relay
+// API has no field for it, so dispatch stores here the number from
+// the driver's own Relay text; the app then shows it as Step 1 in
+// the Fuel Here sheet. An empty value clears it (the fleet-wide
+// RELAY_START_CODE env var, when set, is the fallback). Admin only.
+admin.post('/drivers/:id/relay-start-code', (req, res) => {
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.id);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  const raw = req.body?.relayStartCode;
+  const value = raw === null || raw === undefined ? '' : String(raw).trim();
+  if (value && !/^[0-9]{4,8}$/.test(value))
+    return err(res, 400, 'That Relay start code looks invalid — it is the 4–8 digit number from the driver’s Relay text.');
+  db.prepare('UPDATE users SET relay_start_code = ? WHERE id = ?').run(value || null, driverUser.id);
+  res.json({ ok: true, relayStartCode: value || null });
 });
 
 admin.get('/trucks', (_req, res) => {
@@ -8524,6 +8818,153 @@ admin.get('/relay/transactions', (_req, res) => {
 admin.post('/relay/sync', async (_req, res) => {
   const result = await syncRelayTransactions();
   res.json({ ok: true, ...result });
+});
+
+// Active Relay fuel codes for one driver (build 34, URGENT owner ask
+// 2026-11-18): the build-33 server never stored a code's Relay id, so
+// the only way to find — and cancel — a live code (the test code
+// issued on the owner's own driver account that afternoon) is Relay's
+// LIST endpoint:
+//   GET /api/integrations/fuelcodes/?driver_id={dr_id}
+//       &dtstart={today 00:00 ET, RFC3339}&dtend={now, RFC3339}
+// The date params are REQUIRED, and the endpoint returns codes in
+// active or locked status. The full code value is returned to the
+// admin portal on purpose: this is the company's own admin surface,
+// and Relay's own app displays the full code too. On 404 the
+// /api/fuel/ mount is tried as well (the same base-path uncertainty
+// as the policy read). Relay errors surface honestly as 502s with
+// Relay's message.
+admin.get('/relay/fuel-codes', async (req, res) => {
+  const userId = relayText(req.query?.user_id);
+  if (!userId) return err(res, 400, 'user_id is required.');
+  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  if (!target) return err(res, 404, 'Driver not found.');
+  const relayId = relayText(target.relay_driver_id);
+  if (!relayId) return err(res, 409, 'That driver has no Relay Driver ID on file.');
+  const apiKey = process.env.RELAY_API_KEY;
+  if (!apiKey) return err(res, 503, 'Relay is not configured on the server yet.');
+  const driverId = await resolveRelayDriverId(apiKey, relayId);
+  if (!driverId) {
+    return err(
+      res,
+      502,
+      'Relay could not match that driver yet — no Relay driver record or transaction found.',
+    );
+  }
+  const qs =
+    '?driver_id=' +
+    encodeURIComponent(driverId) +
+    '&dtstart=' +
+    encodeURIComponent(relayEtStartOfTodayRfc3339()) +
+    '&dtend=' +
+    encodeURIComponent(new Date().toISOString());
+  const attempts = [
+    RELAY_FUEL_CODES_URL + qs,
+    RELAY_API_BASE + '/api/fuel/fuelcodes/' + qs,
+  ];
+  let lastMsg = null;
+  for (const url of attempts) {
+    let resp;
+    let data = null;
+    try {
+      resp = await fetch(url, {
+        headers: { Authorization: apiKey },
+        signal: AbortSignal.timeout(20000),
+      });
+      data = await resp.json().catch(() => null);
+    } catch (e) {
+      console.error(
+        `Relay fuel codes list: request failed for user ${target.id}: ${e?.message || 'unknown error'}`,
+      );
+      return err(res, 502, 'Could not reach Relay to list fuel codes.');
+    }
+    const list = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.results)
+        ? data.results
+        : Array.isArray(data?.data)
+          ? data.data
+          : null;
+    console.log(
+      `Relay fuel codes list: ${url.replace(RELAY_API_BASE, '').split('?')[0]} -> HTTP ${resp.status}, ` +
+        (list
+          ? `${list.length} code(s)`
+          : `keys: ${data && typeof data === 'object' ? Object.keys(data).join(',') : '(none)'}`),
+    );
+    if (resp.ok) {
+      const codes = (list || [])
+        .map((c) => ({
+          code_id: relayText(c?.id),
+          code: relayText(c?.code),
+          constraint_amount: relayText(c?.constraint_amount),
+          type: relayText(c?.type),
+          status: relayText(c?.status),
+          created_at: relayText(c?.created_at),
+        }))
+        .filter((c) => c.code_id);
+      return res.json(codes);
+    }
+    if (resp.status === 404) {
+      lastMsg =
+        relayText(data?.message) || relayText(data?.error) || relayText(data?.detail) || lastMsg;
+      continue;
+    }
+    const relayMsg =
+      relayText(data?.message) || relayText(data?.error) || relayText(data?.detail);
+    return err(
+      res,
+      502,
+      relayMsg ? `Relay said: ${relayMsg}` : `Relay answered HTTP ${resp.status} listing fuel codes.`,
+    );
+  }
+  return err(
+    res,
+    502,
+    lastMsg ? `Relay said: ${lastMsg}` : 'Relay could not list fuel codes.',
+  );
+});
+
+// Admin cancel of a driver's one-time Relay code — the same Relay
+// DELETE as the driver route (shared helper above), audit-logged
+// into relay_fuel_code_cancellations with the ADMIN's user id in the
+// driver_id column (the code's driver is identifiable from Relay's
+// own records via the reference).
+admin.post('/relay/fuel-codes/cancel', async (req, res) => {
+  const apiKey = process.env.RELAY_API_KEY;
+  if (!apiKey) return err(res, 503, 'Relay is not configured on the server yet.');
+  const codeId = relayText(req.body?.code_id);
+  if (!codeId || !codeId.startsWith('code_')) {
+    return err(res, 400, 'That fuel code reference looks invalid.');
+  }
+  const result = await relayDeleteFuelCode(apiKey, codeId);
+  if (result.networkError) {
+    console.error(
+      `Relay admin fuel code cancel: request to Relay failed for admin ${req.user.id}: ${result.error?.message || 'unknown error'}`,
+    );
+    return err(res, 502, 'Could not reach Relay to cancel the code.');
+  }
+  if (!result.ok) {
+    console.error(
+      `Relay admin fuel code cancel: Relay API answered HTTP ${result.status} for admin ${req.user.id}` +
+        (result.relayMsg ? `: ${result.relayMsg}` : ''),
+    );
+    return err(
+      res,
+      502,
+      result.relayMsg
+        ? `Relay said: ${result.relayMsg}`
+        : 'Relay could not cancel that code. It may already be in use at the pump.',
+    );
+  }
+  try {
+    db.prepare(
+      'INSERT INTO relay_fuel_code_cancellations (driver_id, driver_integration_id, relay_reference, created_at) VALUES (?, ?, ?, ?)',
+    ).run(req.user.id, null, codeId, now());
+  } catch (e) {
+    console.error('Relay admin fuel code cancel: audit log insert failed', e);
+  }
+  console.log(`Relay fuel code cancelled by admin ${req.user.id} (ref ${codeId})`);
+  res.json({ ok: true });
 });
 
 app.use('/api/admin', admin);

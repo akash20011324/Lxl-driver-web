@@ -356,6 +356,17 @@ CREATE TABLE IF NOT EXISTS relay_fuel_code_log (
   relay_reference TEXT,
   created_at TEXT NOT NULL
 );
+-- One row per one-time fuel code a driver CANCELLED from the app
+-- (POST /api/driver/relay/fuel-code/cancel, build 34). Audit only —
+-- Relay's code reference and who cancelled it, when. Kept separate
+-- from the issuance log so an issuance row is never rewritten.
+CREATE TABLE IF NOT EXISTS relay_fuel_code_cancellations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  driver_id INTEGER REFERENCES users(id),
+  driver_integration_id TEXT,
+  relay_reference TEXT,
+  created_at TEXT NOT NULL
+);
 `;
 
 export function openDb(dataDir) {
@@ -467,6 +478,16 @@ export function openDb(dataDir) {
   // fills it in; transactions with no matching driver stay unlinked.
   if (!columns.some((c) => c.name === 'relay_driver_id')) {
     db.exec('ALTER TABLE users ADD COLUMN relay_driver_id TEXT');
+  }
+  // Relay start code (build 34): the short numeric code Relay texts
+  // the driver with each one-time fuel code — he enters it at the
+  // pump FIRST, then the fuel code. It is an account/driver value
+  // delivered by Relay over SMS; the API has no field for it, so
+  // dispatch stores here what Relay texted (per driver, since Relay
+  // may text different drivers different codes). NULL until filled;
+  // the server falls back to the RELAY_START_CODE env var.
+  if (!columns.some((c) => c.name === 'relay_start_code')) {
+    db.exec('ALTER TABLE users ADD COLUMN relay_start_code TEXT');
   }
   // BOL departure reminder state on loads: when the driver was last seen
   // at the pickup, and when the "please upload the BOL" push was sent.
