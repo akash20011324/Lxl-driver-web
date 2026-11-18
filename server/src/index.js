@@ -1177,6 +1177,236 @@ driver.get('/equipment-documents', (req, res) => {
   res.json(rows.map(serializeEquipmentDoc));
 });
 
+// ---------------------------------------------------------------------------
+// Relay Payments fuel transactions (owner, 2026-11-18)
+// The server polls Relay's TMS Fuel API and stores the transactions in
+// relay_transactions for the admin portal and the driver app to read.
+// IMPORT ONLY: nothing here posts to Cash Flow — how Relay fuel counts
+// in the company books is still the owner's decision (the standing rule
+// is that Pilot weekly billing is the only fuel in Cash Flow). The API
+// key is read from the RELAY_API_KEY environment variable ONLY — never
+// stored in the database, the code, a log line, or any response. When
+// the variable is unset the sync is disabled and quietly does nothing.
+// ---------------------------------------------------------------------------
+const RELAY_API_BASE = 'https://app.relaypayments.com';
+const RELAY_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+
+// Relay sends every money/quantity as a string ("613.64", "78.352") —
+// parse tolerantly: real numbers pass through, junk becomes null.
+function relayMoney(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const n = Number.parseFloat(String(value).replace(/[^0-9.\-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+function relayText(value) {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s ? s : null;
+}
+
+function relayTransactionCount() {
+  try {
+    return db.prepare('SELECT COUNT(*) AS c FROM relay_transactions').get().c;
+  } catch {
+    return 0;
+  }
+}
+
+function serializeRelayTransaction(t) {
+  if (!t) return null;
+  let items = [];
+  try {
+    items = t.items ? JSON.parse(t.items) : [];
+  } catch {
+    items = [];
+  }
+  return {
+    id: t.id,
+    transactionId: t.transaction_id,
+    createdAt: t.created_at ?? null,
+    driverId: t.driver_id ?? null,
+    driverIntegrationId: t.driver_integration_id ?? null,
+    driverName: t.driver_name ?? null,
+    truckNumber: t.truck_number ?? null,
+    merchantName: t.merchant_name ?? null,
+    locationName: t.location_name ?? null,
+    city: t.city ?? null,
+    state: t.state ?? null,
+    storeNumber: t.store_number ?? null,
+    totalPaid: t.total_paid ?? null,
+    totalRetail: t.total_retail ?? null,
+    totalSaved: t.total_saved ?? null,
+    cashAdvance: t.cash_advance ?? null,
+    isDirectBill:
+      t.is_direct_bill === null || t.is_direct_bill === undefined ? null : !!t.is_direct_bill,
+    fuelCodeType: t.fuel_code_type ?? null,
+    items,
+    importedAt: t.imported_at,
+  };
+}
+
+let relaySyncRunning = false;
+
+/**
+ * One Relay sync pass. Returns { enabled, added, total } (plus an error
+ * note on failure). With no RELAY_API_KEY configured this is a no-op.
+ * The window is rolling: from the newest stored transaction minus one
+ * day (so a late correction still lands) — or the last 7 days on the
+ * first run — up to now. Both date params are ALWAYS sent, correctly
+ * formatted: Relay silently returns the ENTIRE history when they are
+ * missing or malformed. Transactions dedupe on Relay's transaction_id.
+ */
+async function syncRelayTransactions() {
+  const apiKey = process.env.RELAY_API_KEY;
+  if (!apiKey) return { enabled: false, added: 0, total: relayTransactionCount() };
+  if (relaySyncRunning) return { enabled: true, added: 0, total: relayTransactionCount() };
+  relaySyncRunning = true;
+  try {
+    const latest = db.prepare('SELECT MAX(created_at) AS m FROM relay_transactions').get()?.m;
+    const end = new Date();
+    let start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
+    if (latest) {
+      const t = new Date(latest).getTime();
+      if (Number.isFinite(t)) start = new Date(t - 24 * 60 * 60 * 1000);
+    }
+    // The key goes ONLY in the Authorization header, as the raw key
+    // (no "Bearer" prefix) — Relay rejects anything else with a 403.
+    const url =
+      RELAY_API_BASE +
+      '/api/fuel/transactions/?dtstart=' +
+      encodeURIComponent(start.toISOString()) +
+      '&dtend=' +
+      encodeURIComponent(end.toISOString());
+    const resp = await fetch(url, {
+      headers: { Authorization: apiKey },
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!resp.ok) {
+      console.error(`Relay sync: Relay API answered HTTP ${resp.status}`);
+      return {
+        enabled: true,
+        added: 0,
+        total: relayTransactionCount(),
+        error: `Relay API HTTP ${resp.status}`,
+      };
+    }
+    const list = await resp.json().catch(() => null);
+    if (!Array.isArray(list)) {
+      console.error('Relay sync: unexpected response shape from Relay API');
+      return {
+        enabled: true,
+        added: 0,
+        total: relayTransactionCount(),
+        error: 'Unexpected Relay API response',
+      };
+    }
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO relay_transactions
+        (transaction_id, created_at, driver_integration_id, driver_id, driver_name, truck_number,
+         merchant_name, location_name, city, state, store_number, total_paid, total_retail,
+         total_saved, cash_advance, is_direct_bill, fuel_code_type, items, raw, imported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    let added = 0;
+    for (const tx of list) {
+      try {
+        if (!tx || typeof tx !== 'object' || !tx.transaction_id) continue;
+        const drv = tx.driver && typeof tx.driver === 'object' ? tx.driver : {};
+        const integrationId = relayText(drv.integration_id);
+        const driverName = relayText([drv.first_name, drv.last_name].filter(Boolean).join(' '));
+        let driverId = null;
+        if (integrationId) {
+          const u = db
+            .prepare("SELECT id FROM users WHERE relay_driver_id = ? AND role = 'driver'")
+            .get(integrationId);
+          if (u) driverId = u.id;
+        }
+        const prompts = Array.isArray(tx.prompts) ? tx.prompts : [];
+        const truckPrompt = prompts.find(
+          (p) => p && typeof p.label === 'string' && p.label.trim().toLowerCase() === 'truck #',
+        );
+        const merchant = tx.merchant && typeof tx.merchant === 'object' ? tx.merchant : {};
+        const loc = tx.location && typeof tx.location === 'object' ? tx.location : {};
+        const items = (Array.isArray(tx.fuel_items) ? tx.fuel_items : []).map((fi) => ({
+          type: relayText(fi?.fuel_type),
+          description: relayText(fi?.fuel_type_description),
+          gallons: relayMoney(fi?.volume),
+          retailPricePerUnit: relayMoney(fi?.retail_price_per_unit),
+          discountedPricePerUnit: relayMoney(fi?.discounted_price_per_unit),
+          totalRetailPrice: relayMoney(fi?.total_retail_price),
+          totalDiscountedPrice: relayMoney(fi?.total_discounted_price),
+          discountAmount: relayMoney(fi?.discount_amount),
+        }));
+        const r = insert.run(
+          String(tx.transaction_id),
+          relayText(tx.created_at),
+          integrationId,
+          driverId,
+          driverName,
+          truckPrompt ? relayText(truckPrompt.value) : null,
+          relayText(merchant.name),
+          relayText(loc.name),
+          relayText(loc.city),
+          relayText(loc.state),
+          relayText(loc.fuel_merchant_location_id),
+          relayMoney(tx.total_amount_paid),
+          relayMoney(tx.total_retail_price),
+          relayMoney(tx.total_amount_saved),
+          relayMoney(tx.cash_advance),
+          tx.is_direct_bill === null || tx.is_direct_bill === undefined
+            ? null
+            : tx.is_direct_bill
+              ? 1
+              : 0,
+          relayText(tx.fuel_code_type),
+          JSON.stringify(items),
+          JSON.stringify(tx),
+          now(),
+        );
+        if (r.changes) added += 1;
+      } catch {
+        // One malformed transaction must never sink the whole sync.
+      }
+    }
+    // Link rows that were imported before a driver's Relay ID was on
+    // file (or whose driver was created after the import).
+    try {
+      db.prepare(
+        `UPDATE relay_transactions
+            SET driver_id = (SELECT u.id FROM users u
+                              WHERE u.relay_driver_id = relay_transactions.driver_integration_id
+                                AND u.role = 'driver')
+          WHERE driver_id IS NULL AND driver_integration_id IS NOT NULL`,
+      ).run();
+    } catch {
+      // best effort
+    }
+    if (added) console.log(`Relay sync: imported ${added} new fuel transaction(s)`);
+    return { enabled: true, added, total: relayTransactionCount() };
+  } catch (e) {
+    console.error('Relay sync failed:', e?.message || 'unknown error');
+    return { enabled: true, added: 0, total: relayTransactionCount(), error: 'Relay sync failed' };
+  } finally {
+    relaySyncRunning = false;
+  }
+}
+
+// The driver's own Relay fuel transactions — only the ones Relay
+// reports under his Relay Driver ID. A driver with no Relay ID on file
+// simply has none yet.
+driver.get('/relay/transactions', (req, res) => {
+  const relayId = req.user.relay_driver_id;
+  if (!relayId) return res.json([]);
+  const rows = db
+    .prepare(
+      'SELECT * FROM relay_transactions WHERE driver_integration_id = ? ORDER BY created_at DESC, id DESC LIMIT 200',
+    )
+    .all(String(relayId));
+  res.json(rows.map(serializeRelayTransaction));
+});
+
 app.use('/api/driver', driver);
 
 // ---------------------------------------------------------------------------
@@ -7985,6 +8215,22 @@ admin.delete('/driver-documents/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// Relay Payments: read the imported fuel transactions (newest first),
+// and run one sync on demand. Import/read only — Relay fuel never
+// posts to Cash Flow from here. Responses carry counts only, never any
+// key material; with RELAY_API_KEY unset the sync reports enabled:false.
+admin.get('/relay/transactions', (_req, res) => {
+  const rows = db
+    .prepare('SELECT * FROM relay_transactions ORDER BY created_at DESC, id DESC LIMIT 200')
+    .all();
+  res.json(rows.map(serializeRelayTransaction));
+});
+
+admin.post('/relay/sync', async (_req, res) => {
+  const result = await syncRelayTransactions();
+  res.json({ ok: true, ...result });
+});
+
 app.use('/api/admin', admin);
 
 // ---------------------------------------------------------------------------
@@ -8061,6 +8307,12 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
+  // Relay fuel-transaction sync: once on boot, then every 30 minutes.
+  // A quiet no-op unless RELAY_API_KEY is set in the environment.
+  void syncRelayTransactions();
+  setInterval(() => {
+    void syncRelayTransactions();
+  }, RELAY_SYNC_INTERVAL_MS);
   void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixIelLoadDates(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); await setVerifiedPlates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.

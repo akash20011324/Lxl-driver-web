@@ -312,6 +312,38 @@ CREATE TABLE IF NOT EXISTS fixed_payments (
   active INTEGER NOT NULL DEFAULT 1,
   createdAt TEXT NOT NULL
 );
+
+-- Relay Payments fuel transactions, imported by the server's Relay sync
+-- (owner, 2026-11-18). Import/read only: rows here NEVER post to Cash
+-- Flow on their own — how Relay fuel counts in the company books is a
+-- separate owner decision. Amounts are REAL dollars parsed from the
+-- string amounts Relay sends; items/raw keep the full per-product
+-- detail. transaction_id is Relay's own unique id (the dedupe key).
+CREATE TABLE IF NOT EXISTS relay_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  transaction_id TEXT NOT NULL UNIQUE,
+  created_at TEXT,
+  driver_integration_id TEXT,
+  driver_id INTEGER REFERENCES users(id),
+  driver_name TEXT,
+  truck_number TEXT,
+  merchant_name TEXT,
+  location_name TEXT,
+  city TEXT,
+  state TEXT,
+  store_number TEXT,
+  total_paid REAL,
+  total_retail REAL,
+  total_saved REAL,
+  cash_advance REAL,
+  is_direct_bill INTEGER,
+  fuel_code_type TEXT,
+  items TEXT,
+  raw TEXT,
+  imported_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_relay_tx_created ON relay_transactions (created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_relay_tx_driver ON relay_transactions (driver_integration_id);
 `;
 
 export function openDb(dataDir) {
@@ -416,6 +448,13 @@ export function openDb(dataDir) {
   }
   if (!columns.some((c) => c.name === 'adminKind')) {
     db.exec("ALTER TABLE users ADD COLUMN adminKind TEXT DEFAULT 'dispatcher'");
+  }
+  // Relay Payments: the driver's 16-digit Relay Driver ID — the TMS
+  // Fuel API's Integration_ID — matched against imported Relay fuel
+  // transactions so each driver sees only his own. NULL until an admin
+  // fills it in; transactions with no matching driver stay unlinked.
+  if (!columns.some((c) => c.name === 'relay_driver_id')) {
+    db.exec('ALTER TABLE users ADD COLUMN relay_driver_id TEXT');
   }
   // BOL departure reminder state on loads: when the driver was last seen
   // at the pickup, and when the "please upload the BOL" push was sent.
