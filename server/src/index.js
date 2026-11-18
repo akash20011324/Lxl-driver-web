@@ -1432,6 +1432,7 @@ driver.get('/relay/transactions', (req, res) => {
 // ---------------------------------------------------------------------------
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.openstreetmap.fr/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.nro.at/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
@@ -1476,34 +1477,29 @@ function overpassOnce(endpoint, query, timeoutMs) {
   })();
 }
 
-// Race every endpoint; resolve with the first NON-EMPTY element list.
-// Empty lists are collected, not raced: only when every endpoint has
-// answered (or failed) does an all-empty outcome resolve as [] — and
-// when every endpoint failed, reject with the last error seen.
-function overpassRace(query, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    let settled = 0;
-    let sawEmptySuccess = false;
-    let lastError = new Error('all Overpass endpoints failed');
-    for (const ep of OVERPASS_ENDPOINTS) {
-      overpassOnce(ep, query, timeoutMs).then(
-        (elements) => {
-          if (elements.length) return resolve(elements);
-          sawEmptySuccess = true;
-          settled += 1;
-          if (settled === OVERPASS_ENDPOINTS.length) resolve([]);
-        },
-        (e) => {
-          lastError = e instanceof Error ? e : new Error(String(e));
-          settled += 1;
-          if (settled === OVERPASS_ENDPOINTS.length) {
-            if (sawEmptySuccess) resolve([]);
-            else reject(lastError);
-          }
-        },
-      );
+// Try every endpoint IN ORDER and take the first NON-EMPTY element
+// list. Sequential, not a parallel race: the public mirrors' fair-use
+// policies allow only a couple of concurrent requests per IP, and a
+// five-way parallel burst of the same heavy query gets queued or
+// dropped wholesale (measured 2026-11-18 — the burst failed on every
+// endpoint while the same query answered fine one endpoint at a time).
+// Empty lists are collected, not accepted early: only when every
+// endpoint has answered empty does the lookup resolve as [] — and when
+// every endpoint failed, reject with the last error seen.
+async function overpassRace(query, timeoutMs) {
+  let sawEmptySuccess = false;
+  let lastError = new Error('all Overpass endpoints failed');
+  for (const ep of OVERPASS_ENDPOINTS) {
+    try {
+      const elements = await overpassOnce(ep, query, timeoutMs);
+      if (elements.length) return elements;
+      sawEmptySuccess = true;
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
     }
-  });
+  }
+  if (sawEmptySuccess) return [];
+  throw lastError;
 }
 
 function fuelElementsToStations(elements, center, into) {
@@ -1550,22 +1546,42 @@ driver.get('/fuel-stations', async (req, res) => {
     return res.json({ ...hit.payload, cached: true });
   }
   const center = { lat, lng };
-  const genericQ = `[out:json][timeout:25];nwr["amenity"="fuel"](around:30000,${lat},${lng});out center 150;`;
-  const pilotQ = `[out:json][timeout:50];(nwr["amenity"="fuel"]["brand"~"Pilot|Flying J",i](around:100000,${lat},${lng});nwr["amenity"="fuel"]["name"~"Pilot|Flying J",i](around:100000,${lat},${lng}););out center 80;`;
-  const results = await Promise.allSettled([
-    overpassRace(genericQ, 25000),
-    overpassRace(pilotQ, 45000),
-  ]);
+  const genericQ = `[out:json][timeout:20];nwr["amenity"="fuel"](around:30000,${lat},${lng});out center 150;`;
+  // The Pilot pass is NODES ONLY: Pilot/Flying J truck stops are mapped
+  // as nodes in OSM, and the node+way version of this 100 km regex query
+  // times out on the public mirrors (measured 2026-11-18: nodes-only
+  // answered in ~24 s where the nwr version never answered at all). It
+  // runs only after the generic pass settles — never concurrently.
+  const pilotQ = `[out:json][timeout:35];(node["brand"~"Pilot|Flying J",i](around:100000,${lat},${lng});node["amenity"="fuel"]["name"~"Pilot|Flying J",i](around:100000,${lat},${lng}););out center 80;`;
+  const wrap = (p) => p.then((v) => ({ ok: true, v }), (e) => ({ ok: false, e }));
   const merged = new Map();
   let okPasses = 0;
   let lastError = null;
-  for (const r of results) {
-    if (r.status === 'fulfilled') {
-      okPasses += 1;
-      fuelElementsToStations(r.value, center, merged);
-    } else {
-      lastError = r.reason;
-    }
+  const g = await wrap(overpassRace(genericQ, 22000));
+  if (g.ok) {
+    okPasses += 1;
+    fuelElementsToStations(g.v, center, merged);
+  } else {
+    lastError = g.e;
+  }
+  // The Pilot pass only ADDS Pilot/Flying J stops in the 30–100 km band
+  // (anything closer is already in the generic pass, which covers every
+  // fuel stop within 30 km). When the generic pass already found a
+  // Pilot, answer now instead of holding the driver hostage to the slow
+  // pass — give it a 3 s grace to merge, then respond either way.
+  const hasPilot = [...merged.values()].some((s) => s.isPilot);
+  const p =
+    !g.ok || !hasPilot
+      ? await wrap(overpassRace(pilotQ, 38000))
+      : await Promise.race([
+          wrap(overpassRace(pilotQ, 38000)),
+          new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+        ]);
+  if (p?.ok) {
+    okPasses += 1;
+    fuelElementsToStations(p.v, center, merged);
+  } else if (p && !p.ok && !lastError) {
+    lastError = p.e;
   }
   if (!okPasses) {
     console.error(
