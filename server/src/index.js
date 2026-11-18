@@ -7733,7 +7733,7 @@ admin.get('/equipment-documents', (req, res) => {
   res.json(rows.map(serializeEquipmentDoc));
 });
 
-const EQUIP_DOC_TYPES = ['cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'other'];
+const EQUIP_DOC_TYPES = ['cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'permit_nm', 'permit_ky', 'permit_ct', 'permit_ny_hut', 'other'];
 const EXPIRY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 admin.post('/equipment-documents', upload.single('file'), async (req, res) => {

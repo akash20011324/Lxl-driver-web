@@ -272,10 +272,16 @@ function openWallpaperEditor(file, onSet) {
 const EQUIP_DOC_LABELS = {
   cab_card: 'Cab Card', insurance: 'Insurance',
   annual_inspection: 'Annual Inspection', ifta: 'IFTA License', title: 'Title',
-  permit: 'Permit', other: 'Other',
+  permit: 'Permit',
+  permit_nm: 'New Mexico Permit', permit_ky: 'Kentucky Permit',
+  permit_ct: 'Connecticut Permit', permit_ny_hut: 'NY HUT Permit',
+  other: 'Other',
 };
 const EQUIP_DOC_TYPES_ALL = Object.keys(EQUIP_DOC_LABELS);
-const EQUIP_DOC_CORE = ['cab_card', 'insurance', 'annual_inspection', 'ifta'];
+const EQUIP_DOC_CORE = ['cab_card', 'insurance', 'annual_inspection', 'ifta', 'permit_nm', 'permit_ky', 'permit_ct', 'permit_ny_hut'];
+// Truck-only types (owner's rules): IFTA and the state permits belong to
+// the truck; trailers never get tiles or upload options for them.
+const EQUIP_DOC_TRUCK_ONLY = ['ifta', 'permit_nm', 'permit_ky', 'permit_ct', 'permit_ny_hut'];
 // Trailers have NO IFTA license (owner's rule, 2026-11-15) — IFTA is the
 // truck's. Trailer tiles: cab card, insurance, annual inspection only.
 const EQUIP_DOC_CORE_TRAILER = ['cab_card', 'insurance', 'annual_inspection'];
@@ -385,7 +391,7 @@ async function viewUnitDocuments(main) {
     '<div class="card"><h3>Add another document</h3>' +
     '<form class="unit-doc-form" id="udAddForm">' +
     '<div class="field"><label>Document type</label><select name="docType">' +
-    EQUIP_DOC_TYPES_ALL.filter(t => target.type !== 'trailer' || t !== 'ifta').map(t => '<option value="' + t + '">' + EQUIP_DOC_LABELS[t] + '</option>').join('') +
+    EQUIP_DOC_TYPES_ALL.filter(t => target.type !== 'trailer' || !EQUIP_DOC_TRUCK_ONLY.includes(t)).map(t => '<option value="' + t + '">' + EQUIP_DOC_LABELS[t] + '</option>').join('') +
     '</select></div>' +
     '<div class="field"><label>File *</label><input type="file" name="file" required></div>' +
     '<div class="field"><label>Note</label><input name="note"></div>' +

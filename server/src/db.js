@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS equipment_documents (
   unitType TEXT NOT NULL CHECK (unitType IN ('truck', 'trailer')),
   unitId INTEGER NOT NULL,
   unitNumber TEXT NOT NULL,
-  docType TEXT NOT NULL CHECK (docType IN ('cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'other')),
+  docType TEXT NOT NULL CHECK (docType IN ('cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'permit_nm', 'permit_ky', 'permit_ct', 'permit_ny_hut', 'other')),
   note TEXT,
   fileId INTEGER NOT NULL REFERENCES files(id),
   expiryDate TEXT,
@@ -627,6 +627,45 @@ export function openDb(dataDir) {
   unitId INTEGER NOT NULL,
   unitNumber TEXT NOT NULL,
   docType TEXT NOT NULL CHECK (docType IN ('cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'other')),
+  note TEXT,
+  fileId INTEGER NOT NULL REFERENCES files(id),
+  expiryDate TEXT,
+  issuedDate TEXT,
+  createdAt TEXT NOT NULL
+)`);
+      db.exec(
+        'INSERT INTO equipment_documents_new (id, unitType, unitId, unitNumber, docType, note, fileId, expiryDate, issuedDate, createdAt) SELECT id, unitType, unitId, unitNumber, docType, note, fileId, expiryDate, issuedDate, createdAt FROM equipment_documents',
+      );
+      db.exec('DROP TABLE equipment_documents');
+      db.exec('ALTER TABLE equipment_documents_new RENAME TO equipment_documents');
+      db.exec('COMMIT');
+    } catch (e) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // already rolled back
+      }
+      throw e;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+  // Migrate equipment_documents again: widen the docType CHECK for the
+  // state permit types (NM / KY / CT permits + NY HUT, owner 2026-11-18).
+  // Rebuild when the new types are missing from the table definition.
+  const eqTable2 = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'equipment_documents'")
+    .get();
+  if (eqTable2 && !eqTable2.sql.includes('permit_nm')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.exec(`CREATE TABLE equipment_documents_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  unitType TEXT NOT NULL CHECK (unitType IN ('truck', 'trailer')),
+  unitId INTEGER NOT NULL,
+  unitNumber TEXT NOT NULL,
+  docType TEXT NOT NULL CHECK (docType IN ('cab_card', 'registration', 'insurance', 'annual_inspection', 'ifta', 'title', 'permit', 'permit_nm', 'permit_ky', 'permit_ct', 'permit_ny_hut', 'other')),
   note TEXT,
   fileId INTEGER NOT NULL REFERENCES files(id),
   expiryDate TEXT,
