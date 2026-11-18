@@ -4426,6 +4426,70 @@ async function backfillUnitPlates() {
   } catch (e) { console.error('unitplate failed:', e.message); }
 }
 
+// One-off v2 (2026-11-17): the first backfill read NO plates — the old
+// plate pattern slid into the next label on "LICENSE PLATE NUMBER:"
+// cards and failed its own digit check. detectVehicleInfo now tries
+// the labelled forms in order with space-free captures. This pass
+// re-runs the read with the fixed patterns; when a card still yields
+// no plate it logs the card's PLATE/LICENCE text lines verbatim so the
+// exact printed format is on record. Trailer 5302's plate (PG46309)
+// was read off its cab card by eye on 2026-11-16 and is on record; if
+// the reader still misses it, it is set from that record.
+async function backfillUnitPlates2() {
+  try {
+    const marker = 'unit-plate-backfill-2026-11-17-v2';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('unitplate2: ' + m);
+    const docs = db.prepare(
+      "SELECT e.unitType, e.unitId, e.unitNumber, f.storedFilename FROM equipment_documents e JOIN files f ON f.id = e.fileId WHERE e.docType = 'cab_card'"
+    ).all();
+    for (const d of docs) {
+      const table = d.unitType === 'truck' ? 'trucks' : 'trailers';
+      const unit = db.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(d.unitId);
+      if (!unit) { log(d.unitNumber + ': unit row missing — skipped'); continue; }
+      const filePath = path.join(UPLOADS_DIR, d.storedFilename);
+      const found = await detectVehicleForFile(filePath);
+      const sets = [];
+      const vals = [];
+      const filled = [];
+      for (const key of ['year', 'make', 'model', 'vin', 'plate']) {
+        if (found[key] != null && (unit[key] == null || unit[key] === '')) {
+          sets.push(key + ' = ?');
+          vals.push(found[key]);
+          filled.push(key + '=' + found[key]);
+        }
+      }
+      if (sets.length) {
+        db.prepare('UPDATE ' + table + ' SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals, d.unitId);
+        log(d.unitNumber + ': filled ' + filled.join(', '));
+      } else {
+        log(d.unitNumber + ': nothing new read (plate on unit: ' + (unit.plate || '—') + ')');
+      }
+      const fresh = db.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(d.unitId);
+      if (!fresh.plate) {
+        try {
+          const text = await extractFileText(fs.readFileSync(filePath));
+          const ctx = String(text).split(/\r?\n/).map(s => s.trim()).filter(s => /plate|licen[cs]e/i.test(s)).slice(0, 6);
+          if (ctx.length) for (const line of ctx) log('CTX ' + d.unitNumber + ' | ' + line.slice(0, 140));
+          else log('CTX ' + d.unitNumber + ' | no PLATE/LICENCE line in extracted text (len ' + String(text).length + ')');
+        } catch (e) { log('CTX ' + d.unitNumber + ' | text read failed: ' + e.message); }
+      }
+    }
+    const t5302 = db.prepare("SELECT * FROM trailers WHERE unitNumber = '5302'").get();
+    if (t5302 && !t5302.plate) {
+      db.prepare("UPDATE trailers SET plate = 'PG46309' WHERE id = ?").run(t5302.id);
+      log('5302: plate set to PG46309 from the value read off its cab card on 2026-11-16');
+    }
+    for (const t of db.prepare('SELECT unitNumber, year, make, model, plate, vin FROM trucks ORDER BY unitNumber').all()) {
+      log('TRUCK ' + JSON.stringify(t));
+    }
+    for (const t of db.prepare('SELECT unitNumber, year, make, kind, plate, vin FROM trailers ORDER BY unitNumber').all()) {
+      log('TRAILER ' + JSON.stringify(t));
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+  } catch (e) { console.error('unitplate2 failed:', e.message); }
+}
+
 // Adjudication (2026-11-16): corrections verified by READING the rate
 // confirmation documents themselves (the automatic reader had taken
 // load WEIGHTS — "41545.67L" — for rates on the Armstrong PDFs, and
@@ -7520,10 +7584,21 @@ function detectVehicleInfo(text) {
     const known = VEHICLE_MODELS.find(mdl => hay.includes(mdl));
     if (known) out.model = modelDisplay(known);
   }
-  const plateM = flat.match(/(?:plate|lic(?:ense)?\s*(?:no\.?|number|#)?)\s*[:#]?\s*([A-Z0-9][A-Z0-9 \-]{3,11})/i);
-  if (plateM) {
-    const p = plateM[1].trim().replace(/\s+/g, ' ');
-    if (/[0-9]/.test(p) && p.length <= 10) out.plate = p;
+  // Plate: try the labelled forms in order. The capture may not contain
+  // spaces — a space means the match slid into the next label (the old
+  // single pattern captured "PLATE NUMBER" / "NUMBER" off a card reading
+  // "LICENSE PLATE NUMBER: PG46309" and then failed the digit check, so
+  // no plate was ever read).
+  const platePatterns = [
+    /\blicen[cs]e\s+plate\s*(?:no\.?|number|#)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{3,9})/i,
+    /\bplate\s*(?:no\.?|number|#)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{3,9})/i,
+    /\blicen[cs]e\s*(?:no\.?|number|#)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{3,9})/i,
+  ];
+  for (const re of platePatterns) {
+    const m = flat.match(re);
+    if (!m) continue;
+    const p = m[1].trim().toUpperCase();
+    if (/[0-9]/.test(p) && p.length >= 4 && p.length <= 10 && !/^(NUMBER|PLATE|LICENSE|STATE|CLASS)$/.test(p)) { out.plate = p; break; }
   }
   return out;
 }
@@ -7845,7 +7920,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
