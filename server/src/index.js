@@ -1409,6 +1409,181 @@ driver.get('/relay/transactions', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Nearby fuel stations for the driver app (build 31, owner, 2026-11-18).
+// Build 30's app raced the public Overpass instances directly from the
+// phone; on the owner's phone that race fails outright (his network /
+// carrier path to those instances never answers — the Fuel tab reached
+// its error state with zero pins near Wytheville, VA, where a Pilot
+// sits 0.2 km away). The lookup therefore runs HERE: the app asks this
+// endpoint first and only falls back to its own direct Overpass race
+// (then to its on-disk cache) when this endpoint cannot answer.
+//
+// Same two passes the app used to run, same station shape the app
+// renders: a generic fuel pass over 30 km plus a dedicated Pilot /
+// Flying J brand pass over 100 km, each racing every Overpass endpoint
+// in parallel. A pass counts an answer only when it is HTTP 200 with an
+// elements array and NO "runtime error" remark (Overpass reports a
+// server-side timeout as HTTP 200 + empty elements + that remark), and
+// the race takes the first NON-EMPTY answer — an empty-but-valid answer
+// from a fast mirror with a partial database must not beat real data
+// from a slower one. Results are cached in memory for 15 minutes keyed
+// by coordinates rounded to 2 decimals (~1 km grid), so a fleet's
+// worth of drivers at the same truck stop costs one lookup.
+// ---------------------------------------------------------------------------
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.nro.at/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+];
+const FUEL_STATION_CACHE_MS = 15 * 60 * 1000;
+const fuelStationCache = new Map();
+
+function haversineKm(aLat, aLng, bLat, bLng) {
+  const R = 6371;
+  const p1 = (aLat * Math.PI) / 180;
+  const p2 = (bLat * Math.PI) / 180;
+  const dp = ((bLat - aLat) * Math.PI) / 180;
+  const dl = ((bLng - aLng) * Math.PI) / 180;
+  const x = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+function overpassOnce(endpoint, query, timeoutMs) {
+  return (async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'LXLDriverServer/1.0 (Lubana Xpress LLC fuel station lookup)',
+        },
+        body: `data=${encodeURIComponent(query)}`,
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+      const json = await res.json().catch(() => null);
+      if (typeof json?.remark === 'string' && /runtime error|timed out/i.test(json.remark)) {
+        throw new Error('Overpass runtime error (server-side timeout)');
+      }
+      if (!json || !Array.isArray(json.elements)) throw new Error('Overpass bad shape');
+      return json.elements;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+}
+
+// Race every endpoint; resolve with the first NON-EMPTY element list.
+// Empty lists are collected, not raced: only when every endpoint has
+// answered (or failed) does an all-empty outcome resolve as [] — and
+// when every endpoint failed, reject with the last error seen.
+function overpassRace(query, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = 0;
+    let sawEmptySuccess = false;
+    let lastError = new Error('all Overpass endpoints failed');
+    for (const ep of OVERPASS_ENDPOINTS) {
+      overpassOnce(ep, query, timeoutMs).then(
+        (elements) => {
+          if (elements.length) return resolve(elements);
+          sawEmptySuccess = true;
+          settled += 1;
+          if (settled === OVERPASS_ENDPOINTS.length) resolve([]);
+        },
+        (e) => {
+          lastError = e instanceof Error ? e : new Error(String(e));
+          settled += 1;
+          if (settled === OVERPASS_ENDPOINTS.length) {
+            if (sawEmptySuccess) resolve([]);
+            else reject(lastError);
+          }
+        },
+      );
+    }
+  });
+}
+
+function fuelElementsToStations(elements, center, into) {
+  for (const e of elements) {
+    const lat = e.lat ?? e.center?.lat;
+    const lon = e.lon ?? e.center?.lon;
+    if (typeof lat !== 'number' || typeof lon !== 'number') continue;
+    const brand = e.tags?.brand ?? null;
+    const name = brand ?? e.tags?.name ?? 'Fuel station';
+    const key = `${e.type}/${e.id}`;
+    if (into.has(key)) continue;
+    // The same plaza is often mapped twice (a node AND its building
+    // outline) — keep one pin per name at effectively the same spot.
+    const dupe = [...into.values()].some(
+      (s) => s.name === name && Math.abs(s.lat - lat) < 0.0005 && Math.abs(s.lng - lon) < 0.0005,
+    );
+    if (dupe) continue;
+    into.set(key, {
+      id: key,
+      name,
+      brand,
+      lat,
+      lng: lon,
+      isPilot: /pilot|flying\s*j/i.test(`${brand ?? ''} ${e.tags?.name ?? ''}`),
+      distanceKm: Math.round(haversineKm(center.lat, center.lng, lat, lon) * 100) / 100,
+    });
+  }
+}
+
+driver.get('/fuel-stations', async (req, res) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    Math.abs(lat) > 90 ||
+    Math.abs(lng) > 180
+  ) {
+    return err(res, 400, 'Numeric lat and lng query parameters are required.');
+  }
+  const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  const hit = fuelStationCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < FUEL_STATION_CACHE_MS) {
+    return res.json({ ...hit.payload, cached: true });
+  }
+  const center = { lat, lng };
+  const genericQ = `[out:json][timeout:25];nwr["amenity"="fuel"](around:30000,${lat},${lng});out center 150;`;
+  const pilotQ = `[out:json][timeout:50];(nwr["amenity"="fuel"]["brand"~"Pilot|Flying J",i](around:100000,${lat},${lng});nwr["amenity"="fuel"]["name"~"Pilot|Flying J",i](around:100000,${lat},${lng}););out center 80;`;
+  const results = await Promise.allSettled([
+    overpassRace(genericQ, 25000),
+    overpassRace(pilotQ, 45000),
+  ]);
+  const merged = new Map();
+  let okPasses = 0;
+  let lastError = null;
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      okPasses += 1;
+      fuelElementsToStations(r.value, center, merged);
+    } else {
+      lastError = r.reason;
+    }
+  }
+  if (!okPasses) {
+    console.error(
+      `Fuel stations: Overpass lookup failed at ${cacheKey}: ${lastError?.message ?? 'unknown error'}`,
+    );
+    return err(res, 502, 'The station lookup did not answer. Try again in a moment.');
+  }
+  const stations = [...merged.values()].sort((a, b) => a.distanceKm - b.distanceKm);
+  const payload = {
+    center,
+    stations,
+    pilots: stations.filter((s) => s.isPilot).length,
+  };
+  fuelStationCache.set(cacheKey, { at: Date.now(), payload });
+  return res.json({ ...payload, cached: false });
+});
+
+// ---------------------------------------------------------------------------
 // One-time Relay fuel codes — "Fuel B" (owner, 2026-11-18): the driver
 // taps "Fuel Here" at a station inside the LXL app; the server asks
 // Relay to issue a one-time fuel code for that driver and returns it
