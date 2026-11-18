@@ -1109,6 +1109,8 @@ body.loads-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .ud-tile-name { font-weight: 800; font-size: 15px; }
 .ud-file { color: #aeb9cc; font-size: 12.5px; margin-top: 4px; word-break: break-all; }
 .ud-count { font-weight: 700; font-size: 13.5px; margin-top: 8px; }
+.ud-plate { font-size: 12.5px; margin-top: 8px; color: #8fa0ba; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700; }
+.ud-plate strong { color: #f2b705; font-size: 14px; letter-spacing: 0.06em; }
 .ud-dates { display: flex; gap: 10px; margin-top: 10px; }
 .ud-dates label { flex: 1; font-size: 11px; font-weight: 700; color: #8fa0ba; text-transform: uppercase; letter-spacing: 0.04em; }
 .ud-dates input[type="date"] { display: block; width: 100%; margin-top: 4px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.16); color: #e7edf7; border-radius: 8px; padding: 6px 8px; font-size: 12.5px; color-scheme: dark; }

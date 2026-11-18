@@ -356,6 +356,7 @@ async function viewUnitDocuments(main) {
       '<div class="ud-dates">' +
       '<label>Issued<input type="date" data-issued-input="' + d.id + '" value="' + esc(d.issuedDate || '') + '"></label>' +
       '<label>Expires<input type="date" data-exp-input="' + d.id + '" value="' + esc(d.expiryDate || '') + '"></label></div>' +
+      (d.docType === 'cab_card' ? '<div class="ud-plate">Plate <strong>' + esc(unit.plate || '— not read yet') + '</strong></div>' : '') +
       '<div class="ud-acts"><button class="btn btn-ghost btn-sm" type="button" data-unit-doc-view="' + d.id + '">View</button>' +
       '<button class="btn btn-ghost btn-sm" type="button" data-tile-pick="' + d.docType + '">Replace</button>' +
       '<button class="btn btn-danger btn-sm" type="button" data-unit-doc-del="' + d.id + '">Delete</button></div></div>';
