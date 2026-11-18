@@ -4532,6 +4532,48 @@ async function dumpCabCardPlateContext() {
   } catch (e) { console.error('unitplate3 failed:', e.message); }
 }
 
+// One-off (2026-11-17): plates verified MANUALLY at the owner's request
+// by reading the actual cab card documents in the portal. The cards
+// label the field "APPORTIONED LICENSE PLATE NO." — 1301: 3988293,
+// 1302: 4020482, 5302: PG46309 (already set in v2, matches the card).
+// 5302's card also shows Year 2012, Make WAB (Wabash) — filled here
+// where empty. Trailer 531 has NO cab card on file (insurance +
+// annual inspection only), so there is no plate to read for it.
+// Fills only EMPTY fields; never overwrites.
+async function setVerifiedPlates() {
+  try {
+    const marker = 'unit-plates-manual-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const log = (m) => console.log('unitplate4: ' + m);
+    const setIfEmpty = (table, unitNumber, fields) => {
+      const unit = db.prepare('SELECT * FROM ' + table + ' WHERE unitNumber = ?').get(unitNumber);
+      if (!unit) { log(unitNumber + ': unit row missing'); return; }
+      const sets = [];
+      const vals = [];
+      const done = [];
+      for (const [key, val] of Object.entries(fields)) {
+        if (unit[key] == null || unit[key] === '') { sets.push(key + ' = ?'); vals.push(val); done.push(key + '=' + val); }
+      }
+      if (sets.length) {
+        db.prepare('UPDATE ' + table + ' SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals, unit.id);
+        log(unitNumber + ': set ' + done.join(', ') + ' (read off its cab card)');
+      } else {
+        log(unitNumber + ': fields already filled — untouched');
+      }
+    };
+    setIfEmpty('trucks', '1301', { plate: '3988293' });
+    setIfEmpty('trucks', '1302', { plate: '4020482' });
+    setIfEmpty('trailers', '5302', { year: 2012, make: 'Wabash' });
+    for (const t of db.prepare('SELECT unitNumber, year, make, model, plate, vin FROM trucks ORDER BY unitNumber').all()) {
+      log('TRUCK ' + JSON.stringify(t));
+    }
+    for (const t of db.prepare('SELECT unitNumber, year, make, kind, plate, vin FROM trailers ORDER BY unitNumber').all()) {
+      log('TRAILER ' + JSON.stringify(t));
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+  } catch (e) { console.error('unitplate4 failed:', e.message); }
+}
+
 // Adjudication (2026-11-16): corrections verified by READING the rate
 // confirmation documents themselves (the automatic reader had taken
 // load WEIGHTS — "41545.67L" — for rates on the Armstrong PDFs, and
@@ -7962,7 +8004,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); await setVerifiedPlates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
