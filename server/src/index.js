@@ -4358,6 +4358,27 @@ async function fetchRc528772() {
   } catch (e) { console.error('rcfetch failed:', e.message); }
 }
 
+// One-off (owner, 2026-11-17): write the street addresses read off the
+// LXL-528772 rate confirmation onto the load — pickup US Beverage
+// Packers LLC, 1 Arizona Way, Keasbey NJ 08832; delivery HT Hackney
+// Opp, 601 Highway 52 E, Opp AL 36467. Pins are cleared so they
+// re-derive from the full street addresses.
+async function fixRc528772Addresses() {
+  try {
+    const marker = 'fix-rc-528772-addresses-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const before = db.prepare('SELECT id, pickupLocation, pickupWarehouse, deliveryLocation, deliveryWarehouse FROM loads WHERE reference = ?').get('LXL-528772');
+    console.log('rcaddr: before = ' + JSON.stringify(before));
+    if (before) {
+      db.prepare('UPDATE loads SET pickupLocation = ?, pickupWarehouse = ?, deliveryLocation = ?, deliveryWarehouse = ?, pickupLat = NULL, pickupLng = NULL, deliveryLat = NULL, deliveryLng = NULL WHERE id = ?')
+        .run('1 Arizona Way, Keasbey, NJ 08832', 'US Beverage Packers LLC', '601 Highway 52 E, Opp, AL 36467', 'HT Hackney Opp', before.id);
+      const after = db.prepare('SELECT id, pickupLocation, pickupWarehouse, deliveryLocation, deliveryWarehouse FROM loads WHERE id = ?').get(before.id);
+      console.log('rcaddr: after = ' + JSON.stringify(after));
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+  } catch (e) { console.error('rcaddr failed:', e.message); }
+}
+
 // Adjudication (2026-11-16): corrections verified by READING the rate
 // confirmation documents themselves (the automatic reader had taken
 // load WEIGHTS — "41545.67L" — for rates on the Armstrong PDFs, and
@@ -7777,7 +7798,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
