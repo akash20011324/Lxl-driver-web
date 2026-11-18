@@ -203,6 +203,9 @@ function serializeLoad(l) {
     truckUnit: unitNumberOf('trucks', l.truckId, l.driverId),
     trailerUnit: unitNumberOf('trailers', l.trailerId, l.driverId),
     progress: loadProgress(l),
+    // Road miles for the trip (portal fills this in lazily); the app's
+    // My Loads ledger needs it for miles + $0.65/mi pay per load.
+    miles: l.miles ?? null,
   };
 }
 
@@ -7969,7 +7972,7 @@ app.get('/files/:id', auth, (req, res) => {
   // The stored mimeType can be generic (e.g. from an email attachment), so
   // prefer the type implied by the file extension when it is known.
   const ext = path.extname(file.storedFilename).toLowerCase();
-  const extType = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.txt': 'text/plain' }[ext];
+  const extType = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.txt': 'text/plain', '.m4a': 'audio/mp4', '.mp4': 'audio/mp4', '.aac': 'audio/aac', '.mp3': 'audio/mpeg' }[ext];
   const type = extType || (file.mimeType && file.mimeType !== 'application/octet-stream' ? file.mimeType : 'application/octet-stream');
   res.type(type);
   res.set('Content-Disposition', (req.query.download === '1' ? 'attachment' : 'inline') + '; filename="' + String(file.originalFilename || file.storedFilename).replace(/"/g, '') + '"');
