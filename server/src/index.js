@@ -6431,6 +6431,45 @@ function validDatePart(s) {
   const dt = new Date(y, mo - 1, d);
   return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
 }
+// One-off (2026-11-18, build-26 fix round): the two IEL loads LXL-2996825
+// and LXL-2999658 pre-date adjudication round 3 (its createFor skipped them
+// because the loads already existed), so while round 3 corrected their
+// rate_confirmations rows and a later job fixed their pickup cities, their
+// loads.pickupAt / deliveryAt / completedAt were never repaired — the
+// driver app grouped them under a wrong month (they rendered as a
+// "December" statement in My Loads). Set the load dates from the same
+// document values round 3 put on the RC rows (2996825: Laurel MS pickup
+// 2026-06-13, delivery 2026-06-15; 2999658: pickup 2026-06-16, delivery
+// 2026-06-18). The pre-fix values are logged first so the stored format
+// is visible in the boot log, and any OTHER load whose stored dates do
+// not start with a valid ISO date part is logged (not touched).
+// Marker-guarded; runs once. If neither load exists yet, the marker is
+// NOT written, so it retries on the next boot.
+async function fixIelLoadDates() {
+  try {
+    db.prepare('CREATE TABLE IF NOT EXISTS one_off_jobs (name TEXT PRIMARY KEY, doneAt TEXT)').run();
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get('iel-load-dates-fix-2026-11-18')) return;
+    const fixes = [
+      { reference: 'LXL-2996825', pickupAt: '2026-06-13T09:00:00', deliveryAt: '2026-06-15T17:00:00' },
+      { reference: 'LXL-2999658', pickupAt: '2026-06-16T09:00:00', deliveryAt: '2026-06-18T17:00:00' },
+    ];
+    let found = 0;
+    for (const f of fixes) {
+      const load = db.prepare('SELECT id, pickupAt, deliveryAt, completedAt, status FROM loads WHERE reference = ?').get(f.reference);
+      if (!load) { console.log('iel-load-dates-fix: load not found (yet)', f.reference); continue; }
+      found++;
+      console.log('iel-load-dates-fix: before', f.reference, JSON.stringify({ pickupAt: load.pickupAt, deliveryAt: load.deliveryAt, completedAt: load.completedAt, status: load.status }));
+      db.prepare('UPDATE loads SET pickupAt = ?, deliveryAt = ?, completedAt = ? WHERE id = ?')
+        .run(f.pickupAt, f.deliveryAt, load.status === 'completed' ? f.deliveryAt : load.completedAt, load.id);
+      console.log('iel-load-dates-fix: after', f.reference, JSON.stringify({ pickupAt: f.pickupAt, deliveryAt: f.deliveryAt }));
+    }
+    if (!found) return; // write the marker only once the loads were seen
+    const odd = db.prepare('SELECT reference, pickupAt, deliveryAt, completedAt FROM loads').all()
+      .filter((l) => !validDatePart(l.pickupAt) || !validDatePart(l.deliveryAt) || (l.completedAt && !validDatePart(l.completedAt)));
+    for (const l of odd) console.log('iel-load-dates-fix: non-ISO load dates (left untouched)', JSON.stringify(l));
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run('iel-load-dates-fix-2026-11-18', new Date().toISOString());
+  } catch (e) { console.error('iel-load-dates-fix failed', e); }
+}
 function repairImportedLoadData() {
   // One-time cleanup for loads the bulk import created with a garbage date or
   // a street fragment in the city name. Only touches import-created loads.
@@ -8022,7 +8061,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); await setVerifiedPlates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixIelLoadDates(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); await setVerifiedPlates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
