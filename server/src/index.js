@@ -1409,36 +1409,48 @@ driver.get('/relay/transactions', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Nearby fuel stations for the driver app (build 31, owner, 2026-11-18).
-// Build 30's app raced the public Overpass instances directly from the
-// phone; on the owner's phone that race fails outright (his network /
-// carrier path to those instances never answers — the Fuel tab reached
-// its error state with zero pins near Wytheville, VA, where a Pilot
-// sits 0.2 km away). The lookup therefore runs HERE: the app asks this
-// endpoint first and only falls back to its own direct Overpass race
-// (then to its on-disk cache) when this endpoint cannot answer.
+// Nearby Pilot / Flying J stations for the driver app (build 33, owner,
+// 2026-11-18). LXL fuels ONLY at Pilot / Flying J (Relay codes work
+// there and nowhere else), so the map shows those stops and no others.
 //
-// Same two passes the app used to run, same station shape the app
-// renders: a generic fuel pass over 30 km plus a dedicated Pilot /
-// Flying J brand pass over 100 km, each racing every Overpass endpoint
-// in parallel. A pass counts an answer only when it is HTTP 200 with an
-// elements array and NO "runtime error" remark (Overpass reports a
-// server-side timeout as HTTP 200 + empty elements + that remark), and
-// the race takes the first NON-EMPTY answer — an empty-but-valid answer
-// from a fast mirror with a partial database must not beat real data
-// from a slower one. Results are cached in memory for 15 minutes keyed
-// by coordinates rounded to 2 decimals (~1 km grid), so a fleet's
-// worth of drivers at the same truck stop costs one lookup.
+// Builds 30–32 looked stations up LIVE from the public OpenStreetMap
+// Overpass mirrors at request time. That is not a viable production
+// dependency: the mirrors are routinely at capacity (overpass-api.de
+// 502s), block datacenter IPs (overpass.openstreetmap.fr answered 403
+// "only available to white-listed usages"), or take 30–60 s — while
+// the app gives up at ~15 s, so on the owner's phone the Fuel map sat
+// on a black "Finding fuel stops near you…" spinner forever.
+//
+// The endpoint therefore answers from the server's OWN dataset:
+// pilot-stations.json, a one-time OpenStreetMap pull of every Pilot /
+// Flying J fuel stop in North America ({name, brand, lat, lng}),
+// loaded once at boot. The answer is computed in-process — no network
+// call in the request path — and returns in well under a second:
+// every dataset stop within 100 km of the driver, nearest first.
+// Refreshing the dataset is a maintenance task (re-run the pull and
+// redeploy), never a runtime dependency.
 // ---------------------------------------------------------------------------
-const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.openstreetmap.fr/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.nro.at/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-];
-const FUEL_STATION_CACHE_MS = 15 * 60 * 1000;
-const fuelStationCache = new Map();
+const PILOT_STATIONS = (() => {
+  try {
+    const file = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'pilot-stations.json',
+    );
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const list = (Array.isArray(parsed) ? parsed : []).filter(
+      (s) =>
+        s &&
+        typeof s.lat === 'number' &&
+        typeof s.lng === 'number' &&
+        typeof s.name === 'string',
+    );
+    console.log(`Pilot/Flying J dataset loaded: ${list.length} stations`);
+    return list;
+  } catch (e) {
+    console.error(`Pilot/Flying J dataset failed to load: ${e.message}`);
+    return [];
+  }
+})();
 
 function haversineKm(aLat, aLng, bLat, bLng) {
   const R = 6371;
@@ -1450,86 +1462,7 @@ function haversineKm(aLat, aLng, bLat, bLng) {
   return 2 * R * Math.asin(Math.sqrt(x));
 }
 
-function overpassOnce(endpoint, query, timeoutMs) {
-  return (async () => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'LXLDriverServer/1.0 (Lubana Xpress LLC fuel station lookup)',
-        },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: ctrl.signal,
-      });
-      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
-      const json = await res.json().catch(() => null);
-      if (typeof json?.remark === 'string' && /runtime error|timed out/i.test(json.remark)) {
-        throw new Error('Overpass runtime error (server-side timeout)');
-      }
-      if (!json || !Array.isArray(json.elements)) throw new Error('Overpass bad shape');
-      return json.elements;
-    } finally {
-      clearTimeout(timer);
-    }
-  })();
-}
-
-// Try every endpoint IN ORDER and take the first NON-EMPTY element
-// list. Sequential, not a parallel race: the public mirrors' fair-use
-// policies allow only a couple of concurrent requests per IP, and a
-// five-way parallel burst of the same heavy query gets queued or
-// dropped wholesale (measured 2026-11-18 — the burst failed on every
-// endpoint while the same query answered fine one endpoint at a time).
-// Empty lists are collected, not accepted early: only when every
-// endpoint has answered empty does the lookup resolve as [] — and when
-// every endpoint failed, reject with the last error seen.
-async function overpassRace(query, timeoutMs) {
-  let sawEmptySuccess = false;
-  let lastError = new Error('all Overpass endpoints failed');
-  for (const ep of OVERPASS_ENDPOINTS) {
-    try {
-      const elements = await overpassOnce(ep, query, timeoutMs);
-      if (elements.length) return elements;
-      sawEmptySuccess = true;
-    } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e));
-    }
-  }
-  if (sawEmptySuccess) return [];
-  throw lastError;
-}
-
-function fuelElementsToStations(elements, center, into) {
-  for (const e of elements) {
-    const lat = e.lat ?? e.center?.lat;
-    const lon = e.lon ?? e.center?.lon;
-    if (typeof lat !== 'number' || typeof lon !== 'number') continue;
-    const brand = e.tags?.brand ?? null;
-    const name = brand ?? e.tags?.name ?? 'Fuel station';
-    const key = `${e.type}/${e.id}`;
-    if (into.has(key)) continue;
-    // The same plaza is often mapped twice (a node AND its building
-    // outline) — keep one pin per name at effectively the same spot.
-    const dupe = [...into.values()].some(
-      (s) => s.name === name && Math.abs(s.lat - lat) < 0.0005 && Math.abs(s.lng - lon) < 0.0005,
-    );
-    if (dupe) continue;
-    into.set(key, {
-      id: key,
-      name,
-      brand,
-      lat,
-      lng: lon,
-      isPilot: /pilot|flying\s*j/i.test(`${brand ?? ''} ${e.tags?.name ?? ''}`),
-      distanceKm: Math.round(haversineKm(center.lat, center.lng, lat, lon) * 100) / 100,
-    });
-  }
-}
-
-driver.get('/fuel-stations', async (req, res) => {
+driver.get('/fuel-stations', (req, res) => {
   const lat = Number(req.query.lat);
   const lng = Number(req.query.lng);
   if (
@@ -1540,107 +1473,121 @@ driver.get('/fuel-stations', async (req, res) => {
   ) {
     return err(res, 400, 'Numeric lat and lng query parameters are required.');
   }
-  const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)}`;
-  const hit = fuelStationCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < FUEL_STATION_CACHE_MS) {
-    return res.json({ ...hit.payload, cached: true });
-  }
   const center = { lat, lng };
-  const genericQ = `[out:json][timeout:20];nwr["amenity"="fuel"](around:30000,${lat},${lng});out center 150;`;
-  // The Pilot pass is NODES ONLY: Pilot/Flying J truck stops are mapped
-  // as nodes in OSM, and the node+way version of this 100 km regex query
-  // times out on the public mirrors (measured 2026-11-18: nodes-only
-  // answered in ~24 s where the nwr version never answered at all). It
-  // runs only after the generic pass settles — never concurrently.
-  const pilotQ = `[out:json][timeout:35];(node["brand"~"Pilot|Flying J",i](around:100000,${lat},${lng});node["amenity"="fuel"]["name"~"Pilot|Flying J",i](around:100000,${lat},${lng}););out center 80;`;
-  const wrap = (p) => p.then((v) => ({ ok: true, v }), (e) => ({ ok: false, e }));
-  const merged = new Map();
-  let okPasses = 0;
-  let lastError = null;
-  const g = await wrap(overpassRace(genericQ, 22000));
-  if (g.ok) {
-    okPasses += 1;
-    fuelElementsToStations(g.v, center, merged);
-  } else {
-    lastError = g.e;
+  const stations = [];
+  for (let i = 0; i < PILOT_STATIONS.length; i += 1) {
+    const s = PILOT_STATIONS[i];
+    const d = haversineKm(lat, lng, s.lat, s.lng);
+    if (d > 100) continue;
+    stations.push({
+      id: `pilot/${i}`,
+      name: s.name,
+      brand: s.brand ?? null,
+      lat: s.lat,
+      lng: s.lng,
+      isPilot: true,
+      distanceKm: Math.round(d * 100) / 100,
+    });
   }
-  // The Pilot pass only ADDS Pilot/Flying J stops in the 30–100 km band
-  // (anything closer is already in the generic pass, which covers every
-  // fuel stop within 30 km). When the generic pass already found a
-  // Pilot, answer now instead of holding the driver hostage to the slow
-  // pass — give it a 3 s grace to merge, then respond either way.
-  const hasPilot = [...merged.values()].some((s) => s.isPilot);
-  const p =
-    !g.ok || !hasPilot
-      ? await wrap(overpassRace(pilotQ, 38000))
-      : await Promise.race([
-          wrap(overpassRace(pilotQ, 38000)),
-          new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
-        ]);
-  if (p?.ok) {
-    okPasses += 1;
-    fuelElementsToStations(p.v, center, merged);
-  } else if (p && !p.ok && !lastError) {
-    lastError = p.e;
-  }
-  if (!okPasses) {
-    console.error(
-      `Fuel stations: Overpass lookup failed at ${cacheKey}: ${lastError?.message ?? 'unknown error'}`,
-    );
-    return err(res, 502, 'The station lookup did not answer. Try again in a moment.');
-  }
-  const stations = [...merged.values()].sort((a, b) => a.distanceKm - b.distanceKm);
-  const payload = {
-    center,
-    stations,
-    pilots: stations.filter((s) => s.isPilot).length,
-  };
-  fuelStationCache.set(cacheKey, { at: Date.now(), payload });
-  return res.json({ ...payload, cached: false });
+  stations.sort((a, b) => a.distanceKm - b.distanceKm);
+  return res.json({ center, stations, pilots: stations.length, cached: false });
 });
 
 // ---------------------------------------------------------------------------
 // One-time Relay fuel codes — "Fuel B" (owner, 2026-11-18): the driver
-// taps "Fuel Here" at a station inside the LXL app; the server asks
-// Relay to issue a one-time fuel code for that driver and returns it
-// for display, so the driver never leaves LXL for the Relay app or
-// Safari. Mike Masteller (Relay) confirmed the full-permission
-// production key may issue one-time RelayCodes through the API.
+// taps "Fuel Here" at a Pilot / Flying J inside the LXL app; the
+// server asks Relay to issue a one-time fuel code for that driver and
+// returns it for display, so the driver never leaves LXL for the
+// Relay app or Safari.
 //
-// The call follows Relay's TMS Fuel API family — the same base URL and
-// the same raw-key Authorization header as the transaction sync above —
-// POSTing to the fuel-codes collection with the driver's Integration_ID
-// (users.relay_driver_id) and, when the client knows it, the station's
-// fuel_merchant_location_id. A driver with no Relay ID on file gets a
-// clear 409 relay_not_linked; the server NEVER guesses an ID. Issuance
-// is audit-logged (driver, station, time — the code itself is never
-// stored or logged, and the API key never appears anywhere).
+// VERIFIED CONTRACT (build 33, 2026-11-18 — Relay's official TMS Fuel
+// OpenAPI spec, tmsfuel.yaml at docs.relaypayments.com, live-tested
+// against Relay STAGING; builds 30–32 guessed a different shape and
+// every issuance failed):
+//   POST {RELAY_API_BASE}/api/integrations/fuelcodes/
+//   Authorization: the raw API key as the ENTIRE header (as the sync).
+//   Body: { driver_id: "<dr_…>", type: "fuel",
+//           constraint_amount: "700" }   // a STRING, and required
+//   driver_id is Relay's EXTERNAL driver id (dr_…), NOT the 16-digit
+//   Integration_ID we store in users.relay_driver_id — sending the
+//   integration id returns 400 "invalid driver id". The dr_ id is
+//   resolved at issuance time from GET /api/integrations/drivers/
+//   (entries carry both id and integration_id), cached in memory,
+//   with a fallback to the driver.id retained in a stored Relay
+//   transaction's raw payload. No location_id is sent — LXL has no
+//   Relay location IDs, and omitting it keeps the code valid at any
+//   Pilot / Flying J.
+//   Response: HTTP 200, the OneTimeCode object at top level; the code
+//   is its `code` field. The schema has NO expires_at — the app shows
+//   an expiry only when one is provided, so none is returned.
+// A driver with no Relay ID on file gets a clear 409 relay_not_linked;
+// an unresolvable driver gets 502 relay_driver_unresolved — the
+// server NEVER guesses an ID. Relay errors are logged server-side
+// with their HTTP status and message (never the key, never an issued
+// code) and surfaced honestly to the app. Issuance is audit-logged
+// (driver, station, time — the code itself is never stored or
+// logged, and the API key never appears anywhere).
 // ---------------------------------------------------------------------------
-const RELAY_FUEL_CODES_URL = RELAY_API_BASE + '/api/fuel/fuel-codes/';
+const RELAY_FUEL_CODES_URL = RELAY_API_BASE + '/api/integrations/fuelcodes/';
+const RELAY_DRIVERS_URL = RELAY_API_BASE + '/api/integrations/drivers/';
+// $700 cap per code — covers a full fill (the owner's largest recent
+// fill was ~$614). Sent as a string: the schema requires that type.
+const RELAY_FUEL_CODE_CONSTRAINT = '700';
 
-// Relay's create-code response field names are read tolerantly: the
-// first string/number value under a key that mentions a code
-// (fuel_code / relay_fuel_code / relay_code / code), searching the top
-// level and one nested level (a wrapping object such as "data").
-function relayFindCodeField(data, patterns) {
-  if (!data || typeof data !== 'object') return null;
-  const scopes = [data];
-  for (const key of ['data', 'result', 'fuel_code']) {
-    const nested = data[key];
-    if (nested && typeof nested === 'object') scopes.push(nested);
-  }
-  for (const scope of scopes) {
-    for (const pattern of patterns) {
-      for (const [key, value] of Object.entries(scope)) {
-        if (
-          key.toLowerCase().includes(pattern) &&
-          (typeof value === 'string' || typeof value === 'number')
-        ) {
-          const v = String(value).trim();
-          if (v) return v;
+// integration_id (16-digit, stored on the user) -> Relay external
+// driver id (dr_…). Resolved lazily and cached for the life of the
+// process; a miss re-checks Relay rather than trusting a stale map.
+const relayDriverIdCache = new Map();
+
+async function resolveRelayDriverId(apiKey, integrationId) {
+  const cached = relayDriverIdCache.get(integrationId);
+  if (cached) return cached;
+  // Primary: Relay's own driver directory.
+  try {
+    const resp = await fetch(RELAY_DRIVERS_URL, {
+      headers: { Authorization: apiKey },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (resp.ok) {
+      const list = await resp.json().catch(() => null);
+      if (Array.isArray(list)) {
+        for (const entry of list) {
+          const ext = relayText(entry?.id);
+          const integ = relayText(entry?.integration_id);
+          if (ext && integ) relayDriverIdCache.set(integ, ext);
         }
+        const hit = relayDriverIdCache.get(integrationId);
+        if (hit) return hit;
+        console.error(
+          `Relay fuel code: driver directory answered but has no entry for integration_id ${integrationId}`,
+        );
+      } else {
+        console.error('Relay fuel code: driver directory returned an unexpected shape');
+      }
+    } else {
+      console.error(`Relay fuel code: driver directory answered HTTP ${resp.status}`);
+    }
+  } catch (e) {
+    console.error(`Relay fuel code: driver directory request failed: ${e?.message || 'unknown error'}`);
+  }
+  // Fallback: the driver's own imported transactions retain Relay's
+  // full payload, whose driver object carries the same dr_ id.
+  try {
+    const row = db
+      .prepare(
+        'SELECT raw FROM relay_transactions WHERE driver_integration_id = ? AND raw IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1',
+      )
+      .get(integrationId);
+    if (row?.raw) {
+      const raw = JSON.parse(row.raw);
+      const ext = relayText(raw?.driver?.id);
+      if (ext) {
+        relayDriverIdCache.set(integrationId, ext);
+        return ext;
       }
     }
+  } catch (e) {
+    console.error(`Relay fuel code: transaction fallback failed: ${e?.message || 'unknown error'}`);
   }
   return null;
 }
@@ -1655,25 +1602,42 @@ driver.post('/relay/fuel-code', async (req, res) => {
   }
   const apiKey = process.env.RELAY_API_KEY;
   if (!apiKey) return err(res, 503, 'Relay is not configured on the server yet.');
+  // Recorded in the audit log only — the Relay call itself takes no
+  // location (see the contract note above).
   const locationId = relayText(req.body?.fuel_merchant_location_id);
-  const payload = { integration_id: relayId };
-  if (locationId) payload.fuel_merchant_location_id = locationId;
+  const driverId = await resolveRelayDriverId(apiKey, relayId);
+  if (!driverId) {
+    console.error(
+      `Relay fuel code: could not resolve a Relay driver id for driver ${req.user.id} (integration_id ${relayId})`,
+    );
+    return res.status(502).json({
+      error: 'relay_driver_unresolved',
+      message:
+        'Your Relay driver account could not be matched yet. Try again in a moment, or let dispatch know.',
+    });
+  }
   let data = null;
   let status = 0;
   try {
     const resp = await fetch(RELAY_FUEL_CODES_URL, {
       method: 'POST',
       headers: { Authorization: apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        driver_id: driverId,
+        type: 'fuel',
+        constraint_amount: RELAY_FUEL_CODE_CONSTRAINT,
+      }),
       signal: AbortSignal.timeout(30000),
     });
     status = resp.status;
     data = await resp.json().catch(() => null);
     if (!resp.ok) {
+      const relayMsg =
+        relayText(data?.message) || relayText(data?.error) || relayText(data?.detail);
       console.error(
-        `Relay fuel code: Relay API answered HTTP ${status} for driver ${req.user.id}`,
+        `Relay fuel code: Relay API answered HTTP ${status} for driver ${req.user.id}` +
+          (relayMsg ? `: ${relayMsg}` : ''),
       );
-      const relayMsg = relayText(data?.message) || relayText(data?.error);
       return err(
         res,
         502,
@@ -1682,32 +1646,31 @@ driver.post('/relay/fuel-code', async (req, res) => {
           : 'Relay could not issue a fuel code right now. Try again in a moment.',
       );
     }
-  } catch {
-    console.error(`Relay fuel code: request to Relay failed for driver ${req.user.id}`);
+  } catch (e) {
+    console.error(
+      `Relay fuel code: request to Relay failed for driver ${req.user.id}: ${e?.message || 'unknown error'}`,
+    );
     return err(
       res,
       502,
       'Could not reach Relay to issue a fuel code. Check your signal and try again.',
     );
   }
-  const code = relayFindCodeField(data, ['fuel_code', 'relay_code', 'code']);
+  // The OneTimeCode object is at the top level; the code is `code`.
+  const code =
+    data && (typeof data.code === 'string' || typeof data.code === 'number')
+      ? String(data.code).trim()
+      : null;
   if (!code) {
     console.error(
       `Relay fuel code: HTTP ${status} response carried no code for driver ${req.user.id}`,
     );
     return err(res, 502, 'Relay answered but sent no fuel code. Try again in a moment.');
   }
-  const expiresAt = relayFindCodeField(data, [
-    'expires_at',
-    'expiration',
-    'expiry',
-    'valid_until',
-    'expires',
-  ]);
   const reference =
     data && (typeof data.id === 'string' || typeof data.id === 'number')
       ? String(data.id)
-      : relayText(data?.transaction_id);
+      : null;
   try {
     db.prepare(
       'INSERT INTO relay_fuel_code_log (driver_id, driver_integration_id, fuel_merchant_location_id, relay_reference, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -1718,7 +1681,9 @@ driver.post('/relay/fuel-code', async (req, res) => {
   console.log(
     `Relay fuel code issued for driver ${req.user.id}${locationId ? ` at location ${locationId}` : ''}`,
   );
-  res.json({ code, expiresAt: expiresAt ?? null });
+  // No expires_at exists in Relay's schema — the app renders an
+  // expiry only when one is provided.
+  res.json({ code, expiresAt: null });
 });
 
 app.use('/api/driver', driver);
