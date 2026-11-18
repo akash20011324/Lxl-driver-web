@@ -4296,6 +4296,27 @@ async function removeCancelledScotlynnLoad() {
   } catch (e) { console.error('remove cancelled load failed:', e.message); }
 }
 
+// One-off (owner, 2026-11-17): the driver app shows only city/state for
+// LXL-528772 — no street address. Dump the load row and the full RC text
+// to the boot log so the exact street addresses can be read off the RC
+// document itself and written back onto the load.
+async function dumpRc528772() {
+  try {
+    const marker = 'dump-rc-528772-2026-11-17';
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get(marker)) return;
+    const load = db.prepare('SELECT id, reference, pickupLocation, pickupWarehouse, deliveryLocation, deliveryWarehouse, stops FROM loads WHERE reference LIKE ?').get('%528772');
+    console.log('rcdump: load = ' + JSON.stringify(load));
+    const rc = db.prepare('SELECT r.id, r.reference, f.storedFilename, f.originalFilename FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId WHERE r.reference LIKE ?').get('%528772');
+    console.log('rcdump: rc = ' + JSON.stringify(rc));
+    if (rc && rc.storedFilename) {
+      const buf = fs.readFileSync(path.join(UPLOADS_DIR, rc.storedFilename));
+      const text = cleanRateText(await pdfTextFromBuffer(buf));
+      console.log('rcdump: RC TEXT BEGIN\n' + text.slice(0, 6000) + '\nrcdump: RC TEXT END');
+    }
+    db.prepare('INSERT INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run(marker, new Date().toISOString());
+  } catch (e) { console.error('rcdump failed:', e.message); }
+}
+
 // Adjudication (2026-11-16): corrections verified by READING the rate
 // confirmation documents themselves (the automatic reader had taken
 // load WEIGHTS — "41545.67L" — for rates on the Armstrong PDFs, and
@@ -7715,7 +7736,7 @@ app.listen(PORT, () => {
   console.log(`LXL Driver API listening on http://localhost:${PORT} (data: ${DATA_DIR})`);
   backfillRateConDetails();
   repairImportedLoadData();
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await backfillDocDates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await backfillDocDates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
