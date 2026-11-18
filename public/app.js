@@ -1676,9 +1676,11 @@ async function viewDrivers(main) {
       '<div><span>PHONE</span><strong>' + esc(fmtPhone(d.phone)) + '</strong></div>' +
       '<div><span>TRUCK</span><strong>' + esc(truckNo) + '</strong></div>' +
       '<div><span>TRAILER</span><strong>' + esc(trailerNo) + '</strong></div>' +
+      '<div><span>RELAY ID</span><strong>' + esc(d.relayDriverId || 'Not linked') + '</strong></div>' +
       '</div>' +
       '<div class="dc-actions">' +
       '<button class="btn btn-blue btn-sm" data-driver-docs="' + d.id + '" data-driver-name="' + esc(d.name) + '">Documents</button> ' +
+      '<button class="btn btn-ghost btn-sm" data-relay-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '" data-relay-id="' + esc(d.relayDriverId || '') + '">Relay ID</button> ' +
       '<button class="btn btn-ghost btn-sm" data-toggle-driver="' + d.id + '" data-active="' + inactive + '">' +
       (inactive ? 'Activate' : 'Deactivate') + '</button> ' +
       '<button class="btn btn-ghost btn-sm" data-reset-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Reset password</button> ' +
@@ -1746,6 +1748,18 @@ async function viewDrivers(main) {
     try {
       await api('/api/admin/drivers/' + id, { method: 'DELETE' });
       toast('Driver deleted.', 'ok');
+      renderAdminView('drivers');
+    } catch (err) { showError(err); }
+  }));
+  main.querySelectorAll('[data-relay-driver]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.relayDriver;
+    const name = btn.dataset.driverName || 'this driver';
+    const current = btn.dataset.relayId || '';
+    const value = prompt('Relay Driver ID for ' + name + ' — the 16-digit ID from the Relay portal (Drivers → profile → Settings). Leave empty to unlink:', current);
+    if (value === null) return;
+    try {
+      await api('/api/admin/drivers/' + id + '/relay-id', { method: 'POST', body: JSON.stringify({ relayDriverId: value.trim() }) });
+      toast(value.trim() ? ('Relay ID saved for ' + name + '.') : ('Relay ID removed for ' + name + '.'), 'ok');
       renderAdminView('drivers');
     } catch (err) { showError(err); }
   }));

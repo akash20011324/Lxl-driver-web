@@ -344,6 +344,18 @@ CREATE TABLE IF NOT EXISTS relay_transactions (
 );
 CREATE INDEX IF NOT EXISTS idx_relay_tx_created ON relay_transactions (created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_relay_tx_driver ON relay_transactions (driver_integration_id);
+-- One row per one-time fuel code issued through the driver app
+-- (POST /api/driver/relay/fuel-code). Audit only: the code itself is
+-- NEVER stored — just who it was issued to, for which station, when,
+-- and Relay's own reference when the response carries one.
+CREATE TABLE IF NOT EXISTS relay_fuel_code_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  driver_id INTEGER REFERENCES users(id),
+  driver_integration_id TEXT,
+  fuel_merchant_location_id TEXT,
+  relay_reference TEXT,
+  created_at TEXT NOT NULL
+);
 `;
 
 export function openDb(dataDir) {

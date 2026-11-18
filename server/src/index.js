@@ -55,6 +55,7 @@ function publicUser(u) {
     name: u.name,
     email: u.email,
     phone: u.phone ?? null,
+    relayDriverId: u.relay_driver_id ?? null,
     photoUrl: u.photoUrl ?? null,
     emergencyContact: u.emergencyContact ?? null,
     active: !!u.active,
@@ -1407,6 +1408,128 @@ driver.get('/relay/transactions', (req, res) => {
   res.json(rows.map(serializeRelayTransaction));
 });
 
+// ---------------------------------------------------------------------------
+// One-time Relay fuel codes — "Fuel B" (owner, 2026-11-18): the driver
+// taps "Fuel Here" at a station inside the LXL app; the server asks
+// Relay to issue a one-time fuel code for that driver and returns it
+// for display, so the driver never leaves LXL for the Relay app or
+// Safari. Mike Masteller (Relay) confirmed the full-permission
+// production key may issue one-time RelayCodes through the API.
+//
+// The call follows Relay's TMS Fuel API family — the same base URL and
+// the same raw-key Authorization header as the transaction sync above —
+// POSTing to the fuel-codes collection with the driver's Integration_ID
+// (users.relay_driver_id) and, when the client knows it, the station's
+// fuel_merchant_location_id. A driver with no Relay ID on file gets a
+// clear 409 relay_not_linked; the server NEVER guesses an ID. Issuance
+// is audit-logged (driver, station, time — the code itself is never
+// stored or logged, and the API key never appears anywhere).
+// ---------------------------------------------------------------------------
+const RELAY_FUEL_CODES_URL = RELAY_API_BASE + '/api/fuel/fuel-codes/';
+
+// Relay's create-code response field names are read tolerantly: the
+// first string/number value under a key that mentions a code
+// (fuel_code / relay_fuel_code / relay_code / code), searching the top
+// level and one nested level (a wrapping object such as "data").
+function relayFindCodeField(data, patterns) {
+  if (!data || typeof data !== 'object') return null;
+  const scopes = [data];
+  for (const key of ['data', 'result', 'fuel_code']) {
+    const nested = data[key];
+    if (nested && typeof nested === 'object') scopes.push(nested);
+  }
+  for (const scope of scopes) {
+    for (const pattern of patterns) {
+      for (const [key, value] of Object.entries(scope)) {
+        if (
+          key.toLowerCase().includes(pattern) &&
+          (typeof value === 'string' || typeof value === 'number')
+        ) {
+          const v = String(value).trim();
+          if (v) return v;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+driver.post('/relay/fuel-code', async (req, res) => {
+  const relayId = relayText(req.user.relay_driver_id);
+  if (!relayId) {
+    return res.status(409).json({
+      error: 'relay_not_linked',
+      message: "Your Relay account isn't linked yet — dispatch is setting it up.",
+    });
+  }
+  const apiKey = process.env.RELAY_API_KEY;
+  if (!apiKey) return err(res, 503, 'Relay is not configured on the server yet.');
+  const locationId = relayText(req.body?.fuel_merchant_location_id);
+  const payload = { integration_id: relayId };
+  if (locationId) payload.fuel_merchant_location_id = locationId;
+  let data = null;
+  let status = 0;
+  try {
+    const resp = await fetch(RELAY_FUEL_CODES_URL, {
+      method: 'POST',
+      headers: { Authorization: apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30000),
+    });
+    status = resp.status;
+    data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      console.error(
+        `Relay fuel code: Relay API answered HTTP ${status} for driver ${req.user.id}`,
+      );
+      const relayMsg = relayText(data?.message) || relayText(data?.error);
+      return err(
+        res,
+        502,
+        relayMsg
+          ? `Relay said: ${relayMsg}`
+          : 'Relay could not issue a fuel code right now. Try again in a moment.',
+      );
+    }
+  } catch {
+    console.error(`Relay fuel code: request to Relay failed for driver ${req.user.id}`);
+    return err(
+      res,
+      502,
+      'Could not reach Relay to issue a fuel code. Check your signal and try again.',
+    );
+  }
+  const code = relayFindCodeField(data, ['fuel_code', 'relay_code', 'code']);
+  if (!code) {
+    console.error(
+      `Relay fuel code: HTTP ${status} response carried no code for driver ${req.user.id}`,
+    );
+    return err(res, 502, 'Relay answered but sent no fuel code. Try again in a moment.');
+  }
+  const expiresAt = relayFindCodeField(data, [
+    'expires_at',
+    'expiration',
+    'expiry',
+    'valid_until',
+    'expires',
+  ]);
+  const reference =
+    data && (typeof data.id === 'string' || typeof data.id === 'number')
+      ? String(data.id)
+      : relayText(data?.transaction_id);
+  try {
+    db.prepare(
+      'INSERT INTO relay_fuel_code_log (driver_id, driver_integration_id, fuel_merchant_location_id, relay_reference, created_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(req.user.id, relayId, locationId, reference, now());
+  } catch (e) {
+    console.error('Relay fuel code: audit log insert failed', e);
+  }
+  console.log(
+    `Relay fuel code issued for driver ${req.user.id}${locationId ? ` at location ${locationId}` : ''}`,
+  );
+  res.json({ code, expiresAt: expiresAt ?? null });
+});
+
 app.use('/api/driver', driver);
 
 // ---------------------------------------------------------------------------
@@ -1601,6 +1724,22 @@ admin.post('/drivers/:id/password', (req, res) => {
     db.prepare('DELETE FROM sessions WHERE userId = ?').run(driverUser.id);
   });
   res.json({ ok: true });
+});
+
+// Set or clear a driver's Relay Driver ID (the TMS Fuel API's
+// Integration_ID, a 16-digit number from the Relay portal). Dispatch
+// links the driver here so his Relay transactions match him in the app
+// and the server can issue him one-time fuel codes. An empty value
+// unlinks. Admin only (this whole router is admin-gated).
+admin.post('/drivers/:id/relay-id', (req, res) => {
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.id);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  const raw = req.body?.relayDriverId;
+  const value = raw === null || raw === undefined ? '' : String(raw).trim();
+  if (value && !/^[0-9A-Za-z-]{6,32}$/.test(value))
+    return err(res, 400, 'That Relay Driver ID looks invalid');
+  db.prepare('UPDATE users SET relay_driver_id = ? WHERE id = ?').run(value || null, driverUser.id);
+  res.json({ ok: true, relayDriverId: value || null });
 });
 
 admin.get('/trucks', (_req, res) => {
