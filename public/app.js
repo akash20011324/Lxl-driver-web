@@ -1677,10 +1677,13 @@ async function viewDrivers(main) {
       '<div><span>TRUCK</span><strong>' + esc(truckNo) + '</strong></div>' +
       '<div><span>TRAILER</span><strong>' + esc(trailerNo) + '</strong></div>' +
       '<div><span>RELAY ID</span><strong>' + esc(d.relayDriverId || 'Not linked') + '</strong></div>' +
+      '<div><span>START CODE</span><strong>' + esc(d.relayStartCode || 'Not set') + '</strong></div>' +
       '</div>' +
       '<div class="dc-actions">' +
       '<button class="btn btn-blue btn-sm" data-driver-docs="' + d.id + '" data-driver-name="' + esc(d.name) + '">Documents</button> ' +
       '<button class="btn btn-ghost btn-sm" data-relay-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '" data-relay-id="' + esc(d.relayDriverId || '') + '">Relay ID</button> ' +
+      '<button class="btn btn-ghost btn-sm" data-relay-start="' + d.id + '" data-driver-name="' + esc(d.name) + '" data-start-code="' + esc(d.relayStartCode || '') + '">Start code</button> ' +
+      '<button class="btn btn-ghost btn-sm" data-relay-codes="' + d.id + '" data-driver-name="' + esc(d.name) + '">Fuel codes</button> ' +
       '<button class="btn btn-ghost btn-sm" data-toggle-driver="' + d.id + '" data-active="' + inactive + '">' +
       (inactive ? 'Activate' : 'Deactivate') + '</button> ' +
       '<button class="btn btn-ghost btn-sm" data-reset-driver="' + d.id + '" data-driver-name="' + esc(d.name) + '">Reset password</button> ' +
@@ -1789,6 +1792,124 @@ async function viewDrivers(main) {
         renderAdminView('drivers');
       } catch (err) { showError(err); }
     });
+  }));
+  main.querySelectorAll('[data-relay-start]').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.dataset.relayStart;
+    const name = btn.dataset.driverName || 'this driver';
+    const current = btn.dataset.startCode || '';
+    // Same in-page dialog pattern as the Relay ID modal above —
+    // never window.prompt() (silently swallowed in some clients).
+    const old = document.getElementById('relayStartModal');
+    if (old) old.remove();
+    const modal = document.createElement('div');
+    modal.id = 'relayStartModal';
+    modal.className = 'docs-modal-backdrop';
+    modal.innerHTML = '<div class="docs-modal" style="max-width:440px"><div class="docs-modal-head"><strong>Relay Start Code — ' + esc(name) + '</strong>' +
+      '<button class="btn btn-ghost btn-sm" id="relayStartClose" type="button">✕</button></div>' +
+      '<p class="small muted">The short number from the driver’s Relay text message — he enters it at the pump BEFORE the fuel code. The app shows it as Step 1. Leave empty to clear.</p>' +
+      '<div class="field"><label for="relayStartInput">Relay Start Code</label>' +
+      '<input id="relayStartInput" inputmode="numeric" autocomplete="off" value="' + esc(current) + '"></div>' +
+      '<div class="form-actions"><button class="btn btn-blue" id="relayStartSave" type="button">Save</button>' +
+      '<button class="btn btn-ghost" id="relayStartCancel" type="button">Cancel</button></div></div>';
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    document.getElementById('relayStartClose').addEventListener('click', close);
+    document.getElementById('relayStartCancel').addEventListener('click', close);
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    const input = document.getElementById('relayStartInput');
+    input.focus();
+    input.select();
+    document.getElementById('relayStartSave').addEventListener('click', async () => {
+      const value = input.value.trim();
+      try {
+        await api('/api/admin/drivers/' + id + '/relay-start-code', { method: 'POST', body: JSON.stringify({ relayStartCode: value }) });
+        toast(value ? ('Start code saved for ' + name + '.') : ('Start code cleared for ' + name + '.'), 'ok');
+        close();
+        renderAdminView('drivers');
+      } catch (err) { showError(err); }
+    });
+  }));
+  main.querySelectorAll('[data-relay-codes]').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.dataset.relayCodes;
+    const name = btn.dataset.driverName || 'this driver';
+    // Active Relay fuel codes for this driver (build 34): lists the
+    // codes Relay is holding today via GET /api/admin/relay/fuel-codes
+    // and cancels through the admin cancel endpoint. Same in-page
+    // docs-modal pattern as Relay ID / Start code — the confirm is
+    // inline in the row, never window.confirm() (silently swallowed
+    // in some clients).
+    const old = document.getElementById('relayCodesModal');
+    if (old) old.remove();
+    const modal = document.createElement('div');
+    modal.id = 'relayCodesModal';
+    modal.className = 'docs-modal-backdrop';
+    modal.innerHTML = '<div class="docs-modal" style="max-width:520px"><div class="docs-modal-head"><strong>Active Relay fuel codes — ' + esc(name) + '</strong>' +
+      '<button class="btn btn-ghost btn-sm" id="relayCodesClose" type="button">✕</button></div>' +
+      '<p class="small muted">Codes Relay is holding for this driver today (active or locked). Cancelling kills the code at Relay — it can’t be used at the pump after.</p>' +
+      '<div id="relayCodesError"></div><div id="relayCodesBody"><p class="small muted">Loading…</p></div>' +
+      '<div class="form-actions"><button class="btn btn-ghost" id="relayCodesDone" type="button">Close</button></div></div>';
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    document.getElementById('relayCodesClose').addEventListener('click', close);
+    document.getElementById('relayCodesDone').addEventListener('click', close);
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    const body = document.getElementById('relayCodesBody');
+    const errorBox = document.getElementById('relayCodesError');
+    const groupCode = (code) => {
+      const digits = String(code || '').replace(/\D/g, '');
+      if (!digits) return esc(code || '');
+      const parts = [];
+      for (let i = 0; i < digits.length; i += 4) parts.push(digits.slice(i, i + 4));
+      return esc(parts.join('-'));
+    };
+    const loadCodes = async () => {
+      body.innerHTML = '<p class="small muted">Loading…</p>';
+      let codes;
+      try {
+        codes = await api('/api/admin/relay/fuel-codes?user_id=' + encodeURIComponent(id));
+      } catch (err) {
+        body.innerHTML = '<p class="small" style="color:#FF9C9C">' + esc(err.message || 'Could not load fuel codes.') + '</p>';
+        return;
+      }
+      if (!codes || !codes.length) {
+        body.innerHTML = '<p class="small muted">No active fuel codes for this driver today.</p>';
+        return;
+      }
+      body.innerHTML = codes.map((c) =>
+        '<div data-code-row="' + esc(c.code_id) + '" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid rgba(255,255,255,0.08)">' +
+        '<div style="flex:1;min-width:0"><div style="font-weight:800;font-size:16px;letter-spacing:1px">' + groupCode(c.code) + '</div>' +
+        '<div class="small muted">' +
+        (c.constraint_amount ? ('Up to $' + esc(c.constraint_amount)) : 'Fuel code') +
+        (c.status ? (' · ' + esc(c.status)) : '') +
+        (c.created_at ? (' · ' + esc(fmtShortTime(c.created_at))) : '') +
+        '</div></div>' +
+        '<button class="btn btn-danger btn-sm" type="button" data-cancel-relay-code="' + esc(c.code_id) + '">Cancel code</button>' +
+        '</div>').join('');
+      body.querySelectorAll('[data-cancel-relay-code]').forEach(cb => cb.addEventListener('click', () => {
+        const codeId = cb.dataset.cancelRelayCode;
+        const row = cb.closest('[data-code-row]');
+        if (!row) return;
+        row.innerHTML = '<div style="flex:1"><strong>Cancel this code?</strong><div class="small muted">It can’t be used after.</div></div>' +
+          '<button class="btn btn-ghost btn-sm" type="button" data-rc-keep="1">Keep code</button>' +
+          '<button class="btn btn-danger btn-sm" type="button" data-rc-yes="1">Yes, cancel</button>';
+        row.querySelector('[data-rc-keep]').addEventListener('click', () => { void loadCodes(); });
+        row.querySelector('[data-rc-yes]').addEventListener('click', async (ev) => {
+          ev.target.disabled = true;
+          try {
+            await api('/api/admin/relay/fuel-codes/cancel', { method: 'POST', body: JSON.stringify({ code_id: codeId }) });
+            errorBox.innerHTML = '';
+            toast('Fuel code cancelled at Relay.', 'ok');
+            void loadCodes();
+          } catch (err) {
+            // Relay's refusal, verbatim — the server passes its
+            // message straight through.
+            errorBox.innerHTML = '<p class="small" style="color:#FF9C9C">' + esc(err.message || 'Relay could not cancel that code.') + '</p>';
+            void loadCodes();
+          }
+        });
+      }));
+    };
+    void loadCodes();
   }));
   main.querySelectorAll('[data-reset-driver]').forEach(btn => btn.addEventListener('click', async () => {
     const id = btn.dataset.resetDriver;
