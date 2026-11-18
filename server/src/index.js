@@ -909,7 +909,7 @@ driver.get('/documents', (req, res) => {
   res.json(rows.map(serializeDocument));
 });
 
-const DOC_KINDS = ['pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture'];
+const DOC_KINDS = ['pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture', 'load_picture'];
 
 // Read the total off a receipt before it is uploaded: PDFs via pdf.js
 // text, images via on-device-style OCR (tesseract.js). The file is
@@ -1006,6 +1006,7 @@ driver.post('/documents', upload.single('file'), (req, res) => {
     receipt: 'a receipt',
     unit_picture: 'a unit picture',
     seal_picture: 'a seal picture',
+    load_picture: 'a load picture',
     driver_doc: 'a document',
   };
   notifyAdmins(

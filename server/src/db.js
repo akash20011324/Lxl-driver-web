@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE TABLE IF NOT EXISTS documents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL CHECK (kind IN ('pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture')),
+  kind TEXT NOT NULL CHECK (kind IN ('pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture', 'load_picture')),
   loadId INTEGER REFERENCES loads(id),
   category TEXT,
   label TEXT,
@@ -540,6 +540,44 @@ export function openDb(dataDir) {
       db.exec(`CREATE TABLE documents_new (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL CHECK (kind IN ('pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture')),
+  loadId INTEGER REFERENCES loads(id),
+  category TEXT,
+  label TEXT,
+  amountCents INTEGER,
+  fileId INTEGER NOT NULL REFERENCES files(id),
+  driverId INTEGER NOT NULL REFERENCES users(id),
+  createdAt TEXT NOT NULL
+)`);
+      db.exec(
+        'INSERT INTO documents_new (id, kind, loadId, category, label, amountCents, fileId, driverId, createdAt) SELECT id, kind, loadId, category, label, amountCents, fileId, driverId, createdAt FROM documents',
+      );
+      db.exec('DROP TABLE documents');
+      db.exec('ALTER TABLE documents_new RENAME TO documents');
+      db.exec('COMMIT');
+    } catch (e) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // already rolled back
+      }
+      throw e;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+  // Migrate databases created before load pictures: widen the documents
+  // kind CHECK to allow 'load_picture' (owner, 2026-11-17). Same table
+  // rebuild as the unit/seal migration above.
+  const docTable2 = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'")
+    .get();
+  if (docTable2 && !docTable2.sql.includes('load_picture')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.exec(`CREATE TABLE documents_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK (kind IN ('pickup_bol', 'delivery_bol', 'fuel_receipt', 'receipt', 'driver_doc', 'unit_picture', 'seal_picture', 'load_picture')),
   loadId INTEGER REFERENCES loads(id),
   category TEXT,
   label TEXT,

@@ -2528,10 +2528,11 @@ async function viewDocuments(main) {
     pickup: { kinds: ['pickup_bol'], label: 'Pickup BOLs', empty: 'No pickup BOLs yet' },
     unit: { kinds: ['unit_picture'], label: 'Unit Pictures', empty: 'No unit pictures yet' },
     seal: { kinds: ['seal_picture'], label: 'Seal Pictures', empty: 'No seal pictures yet' },
+    load: { kinds: ['load_picture'], label: 'Load Pictures', empty: 'No load pictures yet' },
     fuel: { kinds: ['fuel_receipt', 'receipt'], label: 'Fuel Receipts', empty: 'No fuel receipts yet' },
     delivery: { kinds: ['delivery_bol'], label: 'Delivery BOL', empty: 'No delivery BOL yet' },
   };
-  const TYPE_ORDER = ['pickup', 'unit', 'seal', 'fuel', 'delivery'];
+  const TYPE_ORDER = ['pickup', 'unit', 'seal', 'load', 'fuel', 'delivery'];
   const docList = (Array.isArray(docs) ? docs : []).filter(d => d.loadId != null && TYPE_ORDER.some(t => KINDS[t].kinds.includes(d.kind)));
   const loadList = (Array.isArray(loads) ? loads : []).filter(l => l && l.reference);
   const byLoad = new Map();
