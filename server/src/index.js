@@ -7684,6 +7684,21 @@ function detectVehicleInfo(text) {
     const p = m[1].trim().toUpperCase();
     if (/[0-9]/.test(p) && p.length >= 4 && p.length <= 10 && !/^(NUMBER|PLATE|LICENSE|STATE|CLASS)$/.test(p)) { out.plate = p; break; }
   }
+  // Indiana IRP cab cards extract column-flattened: every label prints
+  // in one block and every value in another, so the plate is nowhere
+  // near its "APPORTIONED LICENSE PLATE NO." label. In the values block
+  // the order is fixed — VIN, ZIP+4, PLATE, then "UNLADEN WEIGHT" —
+  // verified against the extracted text of the 1301/1302/5302 cards
+  // (unitplate3 diagnostic, 2026-11-17). Use it as a fallback whenever
+  // a VIN was read but no labelled plate matched.
+  if (!out.plate && out.vin) {
+    const vi = upper.indexOf(out.vin);
+    if (vi >= 0) {
+      const win = upper.slice(vi, vi + 220);
+      const m = win.match(/\b\d{5}-\d{4}\s+([A-Z0-9][A-Z0-9\-]{3,9})\s+UNLADEN\b/);
+      if (m && /[0-9]/.test(m[1])) out.plate = m[1];
+    }
+  }
   return out;
 }
 async function detectVehicleForFile(filePath) {
