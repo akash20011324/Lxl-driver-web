@@ -3384,6 +3384,25 @@ admin.post('/loads/:id/edit', (req, res) => {
   if (clean(pickupLocation) && clean(pickupLocation) !== load.pickupLocation) {
     db.prepare('UPDATE loads SET pickupLat = NULL, pickupLng = NULL WHERE id = ?').run(load.id);
   }
+  // Date & time edits (owner bug report, 2026-11-19: "I edit the
+  // load's times and it keeps putting the old time"). The form sends
+  // new pickup/delivery date-times — top-level fields, and inside
+  // the stops payload — but this endpoint never wrote those columns,
+  // so every time edit was silently dropped and the load kept its
+  // original times. Persist them exactly as sent (the form's ISO
+  // strings — the same values the create endpoint stores), with a
+  // multi-stop payload's first pickup / last delivery winning, and
+  // the timezones the form sends riding along.
+  const validTs = (v) => (v && Number.isFinite(Date.parse(String(v))) ? String(v) : null);
+  const newPickupAt = validTs(stops ? stops.pickups[0].at : (req.body || {}).pickupAt);
+  const newDeliveryAt = validTs(stops ? stops.deliveries[stops.deliveries.length - 1].at : (req.body || {}).deliveryAt);
+  const newPickupTz = (req.body || {}).pickupTimezone ? String(req.body.pickupTimezone) : null;
+  const newDeliveryTz = (req.body || {}).deliveryTimezone ? String(req.body.deliveryTimezone) : null;
+  if (newPickupAt || newDeliveryAt || newPickupTz || newDeliveryTz) {
+    db.prepare(
+      'UPDATE loads SET pickupAt = COALESCE(?, pickupAt), deliveryAt = COALESCE(?, deliveryAt), pickupTimezone = COALESCE(?, pickupTimezone), deliveryTimezone = COALESCE(?, deliveryTimezone) WHERE id = ?',
+    ).run(newPickupAt, newDeliveryAt, newPickupTz, newDeliveryTz, load.id);
+  }
   if (reassignTo !== null) {
     db.prepare('UPDATE loads SET driverId = ? WHERE id = ?').run(reassignTo, load.id);
   }
@@ -7246,7 +7265,7 @@ admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
       useLoadId = auto.load.id;
     }
     const rc = await createRateCon({ loadId: useLoadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, fileBuffer, fileName, mimeType });
-    res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
+    res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadUnassigned: !!auto.unassigned, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
   } catch (e) {
     if (req.file) {
       try {
@@ -7283,7 +7302,7 @@ function cleanCityName(city) {
   let c = String(city || '').trim().replace(/\s+/g, ' ');
   // Drop lead-in label words the address regex can swallow ("Delivery
   // Lansdale", "to Valdosta", "Pickup Chicago").
-  const leadWords = new Set(['PICKUP', 'DELIVERY', 'ORIGIN', 'DESTINATION', 'FROM', 'TO', 'AT', 'PU', 'DL', 'SHIP', 'SHIPPING', 'RECEIVING', 'CONSIGNEE', 'SHIPPER']);
+  const leadWords = new Set(['PICKUP', 'DELIVERY', 'ORIGIN', 'DESTINATION', 'FROM', 'TO', 'AT', 'PU', 'DL', 'SHIP', 'SHIPPING', 'RECEIVING', 'CONSIGNEE', 'SHIPPER', 'AM', 'PM']);
   const tokens = c.split(' ');
   while (tokens.length > 1 && leadWords.has(tokens[0].toUpperCase().replace(/[^A-Z]/g, ''))) tokens.shift();
   c = tokens.join(' ');
@@ -7498,6 +7517,201 @@ function extractRcPlaces(text, subject) {
     .filter((p) => { const k = p.city + '|' + p.state; if (seen.has(k)) return false; seen.add(k); return true; })
     .map(({ city, state, zip }) => ({ city, state, zip }));
 }
+// --- Full stop details from an RC (owner, 2026-11-19): a load the
+// system creates from a rate confirmation must be COMPLETE — facility
+// name, street address, city/state/ZIP, the stop's reference/pickup
+// number and its appointment time — not just city and state. Every
+// piece is read from the stop's own block in the document (the text
+// immediately around the anchored city match), never from letterhead,
+// and any piece that is not plainly there stays null, never guessed.
+const RC_STREET_AT_RE = /(\d{1,6}\s+(?:[A-Za-z0-9.'-]+\s+){0,4}?(?:STREET|ST|AVENUE|AVE|BOULEVARD|BLVD|ROAD|RD|DRIVE|DR|LANE|LN|COURT|CT|HIGHWAY|HWY|PARKWAY|PKWY|CIRCLE|CIR|PLACE|PL|TRAIL|TRL|WAY|LOOP))\b/y;
+const RC_STOP_LABEL_RE = /(PICK[\s-]?UP|PICK|STOP\s*\d+|DELIVER(?:Y|ING)?|DROP[\s-]?OFF|ORIGIN|DESTINATION|SHIPPER|RECEIVER|CONSIGNEE|UNLOAD(?:ING)?)/gi;
+function cleanRcFacility(raw) {
+  let s = String(raw || '').replace(/\s+/g, ' ').trim();
+  // Strip stacked section labels / stop numbers the window may start
+  // with ("Stop 1 - Pick Up", "PICK 1", "Shipper").
+  for (let i = 0; i < 4; i++) {
+    const next = s
+      .replace(/^(?:STOP\s*\d+|PICK[\s-]?UP|PICK|DELIVER(?:Y|ING)?|DROP[\s-]?OFF|ORIGIN|DESTINATION|SHIPPER|RECEIVER|CONSIGNEE|UNLOAD(?:ING)?)\b[\s\-–—:.#]*\s*/i, '')
+      .replace(/^\d{1,2}\b[\s\-–—:.#]*\s*/, '');
+    if (next === s) break;
+    s = next;
+  }
+  s = s.replace(/[\s,;:\-–—]+$/, '').trim();
+  if (!s || s.length < 2 || s.length > 60) return null;
+  if (s.split(' ').length > 7) return null;
+  if (/\d{1,2}\/\d{1,2}\//.test(s) || s.includes('@')) return null;
+  if (/phone|contact|notes?|appointment|scheduling|special|reqs?|instructions/i.test(s)) return null;
+  if (!/[A-Za-z]{2,}/.test(s)) return null;
+  return s;
+}
+function rcTimeToHHMM(h, m, ap) {
+  let hh = Number(h);
+  const mm = Number(m);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || mm > 59) return null;
+  if (ap) {
+    const up = String(ap).toUpperCase();
+    if (up === 'PM' && hh < 12) hh += 12;
+    if (up === 'AM' && hh === 12) hh = 0;
+  }
+  if (hh > 23) return null;
+  return String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+}
+function rcPlaceOccurrences(text, place) {
+  // Every occurrence of this stop's city/state(/ZIP) in the document.
+  // (scanRcPlaces dedupes to the first mention — often the header —
+  // so occurrences are found directly here.)
+  if (!text || !place || !place.city || !place.state) return [];
+  const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const idxs = new Set();
+  const pats = [];
+  if (place.zip) pats.push(new RegExp(esc(place.city) + ',?\\s+' + esc(place.state) + '\\s+' + esc(place.zip), 'gi'));
+  pats.push(new RegExp(esc(place.city) + ',\\s*' + esc(place.state) + '\\b', 'gi'));
+  for (const re of pats) {
+    let m;
+    while ((m = re.exec(text))) idxs.add(m.index);
+  }
+  return [...idxs].sort((a, b) => a - b);
+}
+function rcDateTokens(text) {
+  // Every date in the text with its position, ISO-normalized — the
+  // same two formats extractRcDates reads.
+  const out = [];
+  const push = (iso, idx, len) => { if (iso) out.push({ iso, idx, len }); };
+  let m;
+  const re = /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/g;
+  while ((m = re.exec(text))) push(rcNormDate(m[3], m[1], m[2]), m.index, m[0].length);
+  const months = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  const re2 = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})/gi;
+  while ((m = re2.exec(text))) push(rcNormDate(m[3], months[m[1].slice(0, 3).toLowerCase()], m[2]), m.index, m[0].length);
+  return out.sort((a, b) => a.idx - b.idx);
+}
+function extractRcStopDetail(text, place, loadRef, expectedDate, cutIdx) {
+  const out = { street: null, warehouse: null, time: null, number: null };
+  if (!text || !place || !place.city || !place.state) return out;
+  const occ = rcPlaceOccurrences(text, place);
+  if (!occ.length) return out;
+  // Prefer the occurrence immediately preceded by a street address —
+  // that is the stop block; the header/letterhead mention of the same
+  // city has no street in front of it. Street candidates are tried
+  // from the rightmost number backwards: the real street number is
+  // the LAST number before the city, and a looser scan would swallow
+  // the stop number + facility name into the "street" ("PICK 1
+  // NEWCOLD 904 EDWARDS DR" -> street must be "904 EDWARDS DR").
+  let chosen = occ[0];
+  let street = null;
+  let streetStart = -1;
+  for (const idx of occ) {
+    const winFrom = Math.max(0, idx - 220);
+    let found = null;
+    for (let pos = idx - 1; pos >= winFrom; pos--) {
+      if (!/\d/.test(text[pos]) || (pos > 0 && !/\s/.test(text[pos - 1]))) continue;
+      RC_STREET_AT_RE.lastIndex = pos;
+      const mm = RC_STREET_AT_RE.exec(text);
+      if (mm && pos + mm[0].length <= idx && idx - (pos + mm[0].length) <= 4) {
+        found = { street: mm[1].replace(/\s+/g, ' ').trim(), start: pos };
+        break;
+      }
+    }
+    if (found) {
+      chosen = idx;
+      street = found.street;
+      streetStart = found.start;
+      break;
+    }
+  }
+  if (street) {
+    out.street = street;
+    // Facility name: the text between the stop's section label and
+    // the street number.
+    const before = text.slice(Math.max(0, streetStart - 100), streetStart);
+    RC_STOP_LABEL_RE.lastIndex = 0;
+    let lm;
+    let labelEnd = -1;
+    while ((lm = RC_STOP_LABEL_RE.exec(before))) labelEnd = lm.index + lm[0].length;
+    if (labelEnd >= 0) out.warehouse = cleanRcFacility(before.slice(labelEnd));
+  }
+  // Appointment time + the stop's reference number sit in the stop
+  // block, just after the address — and never past the OTHER stop's
+  // address, so a close-together delivery block can't leak its time
+  // or number into the pickup (or the reverse).
+  let afterEnd = chosen + 420;
+  if (cutIdx && cutIdx > chosen && cutIdx < afterEnd) afterEnd = cutIdx;
+  const after = text.slice(chosen, afterEnd);
+  const afterFull = text.slice(chosen, chosen + 420);
+  // Appointment time, strongest signal first:
+  // 1. Anchored to the stop's OWN date — brokers print the stop as
+  //    "Date: 11/19/2026 Time: 2:00 PM", "11/19/2026 @ 14:00" or
+  //    "11/19/2026 2:00 PM". The time must follow that date within a
+  //    few characters (an optional "Time:"/"Appt:" label between),
+  //    so a neighbouring "Shipping/Receiving Hours: 08:00-16:00"
+  //    range can never win. This search runs on the UNCUT window:
+  //    the anchor date makes the other stop's time unreachable (its
+  //    date differs, or precedes this window), while the cut itself
+  //    can land mid-time when the other stop's city capture starts
+  //    early ("...2:00 PM Consignee Delivery Pendleton, IN").
+  if (expectedDate) {
+    for (const tok of rcDateTokens(afterFull)) {
+      if (tok.iso !== expectedDate) continue;
+      const tail = afterFull.slice(tok.idx + tok.len, tok.idx + tok.len + 30);
+      const dm = /^[^0-9A-Za-z]{0,4}(?:at\s+|time\s*[:\-]?\s*|appt\.?\s*[:\-]?\s*)?(\d{1,2}):(\d{2})\s*(AM|PM)?/i.exec(tail);
+      if (dm) { out.time = rcTimeToHHMM(dm[1], dm[2], dm[3]); break; }
+    }
+  }
+  // 2. Behind an appointment label. A window ("2:00 PM - 3:00 PM",
+  //    "14:00 - 15:00") yields its START — the lazy span lands on
+  //    the first time after the label. FCFS stops print no
+  //    appointment time ("Appointment Time:" left blank) and keep
+  //    the defaults.
+  if (!out.time) {
+    const tm = /(?:appointment|appt\.?|date\/time|sched(?:uled)?)\D{0,30}?(\d{1,2}):(\d{2})\s*(AM|PM)?/i.exec(after)
+      || /\b(?:pickup|delivery)?\s*time\s*[:\-]\s*(\d{1,2}):(\d{2})\s*(AM|PM)?/i.exec(after)
+      || /\d{1,2}\/\d{1,2}\/\d{2,4}\s*@\s*(\d{1,2}):(\d{2})\s*(AM|PM)?/.exec(after);
+    if (tm) out.time = rcTimeToHHMM(tm[1], tm[2], tm[3]);
+  }
+  const bareRef = loadRef ? String(loadRef).toUpperCase().replace(/^LXL-/, '') : null;
+  const numRes = [
+    /\bref(?:erence)?\s*#\s*([A-Z0-9][A-Z0-9-]{2,24})/i,
+    /\b(?:facility|shipper|pickup|delivery|consignee|receiver)\s+ref(?:erence)?\s*(?:#|no\.?|number)\s*:?\s*([A-Z0-9][A-Z0-9-]{2,24})/i,
+    /\bappt(?:ointment)?\s+notes?\s*[:#]\s*([A-Z0-9][A-Z0-9-]{2,24})/i,
+    /\b(?:pickup|delivery)\s*(?:#|no\.?|number)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{2,24})/i,
+  ];
+  for (const re of numRes) {
+    const nm = re.exec(after);
+    // A real stop number carries a digit; pure-letter captures are
+    // regex bleed from words like "Reference" itself.
+    if (nm && nm[1] && /\d/.test(nm[1]) && (!bareRef || nm[1].toUpperCase() !== bareRef)) {
+      out.number = nm[1].toUpperCase();
+      break;
+    }
+  }
+  return out;
+}
+// The load fields an RC's stop blocks provide: full street address
+// when the document prints one (else city/state/ZIP, as before), the
+// facility name, the stop's reference number, and its appointment
+// time (else the long-standing 09:00 pickup / 17:00 delivery
+// defaults).
+function rcStopLoadFields(f) {
+  const p = f.places[0];
+  const d = f.places[f.places.length - 1];
+  const pd = f.pickupDetail || {};
+  const dd = f.deliveryDetail || {};
+  const loc = (place, det) => (det.street
+    ? `${det.street}, ${place.city}, ${place.state}${place.zip ? ' ' + place.zip : ''}`
+    : `${place.city}, ${place.state}${place.zip ? ' ' + place.zip : ''}`);
+  return {
+    pickupLocation: loc(p, pd),
+    pickupWarehouse: pd.warehouse || null,
+    pickupNumber: pd.number || null,
+    pickupTime: pd.time || '09:00',
+    deliveryLocation: loc(d, dd),
+    deliveryWarehouse: dd.warehouse || null,
+    deliveryNumber: dd.number || null,
+    deliveryTime: dd.time || '17:00',
+  };
+}
+
 function extractRcLoadFields(text, subject) {
   const all = `${subject || ''}\n${text || ''}`;
   const lxl = all.match(/LXL[-\s]?(\d{4,})/i);
@@ -7517,14 +7731,31 @@ function extractRcLoadFields(text, subject) {
   }
   const truck = all.match(/(?:truck|tractor)\s*(?:#|no\.?|number|unit)?\s*[:#]?\s*(\d{3,5})\b/i);
   const trailer = all.match(/trailer\s*(?:#|no\.?|number|unit)?\s*[:#]?\s*(\d{3,5})\b/i);
+  const places = extractRcPlaces(text || '', subject || '');
+  const dates = extractRcDates(text || '');
+  // Full stop details (facility, street, appointment time, stop
+  // reference number) for the first pickup and the last delivery.
+  // Each stop's search window ends where the other stop's address
+  // begins, and its time is anchored to its own date (the first
+  // date for the pickup, the last for the delivery — the same
+  // pairing the load dates have always used).
+  let pickupDetail = null;
+  let deliveryDetail = null;
+  if (text && places.length >= 2) {
+    const dOcc = rcPlaceOccurrences(text, places[places.length - 1]);
+    pickupDetail = extractRcStopDetail(text, places[0], loadRef, dates[0], dOcc.length ? dOcc[0] : 0);
+    deliveryDetail = extractRcStopDetail(text, places[places.length - 1], loadRef, dates[dates.length - 1] || dates[0], 0);
+  }
   return {
     lxlRef: lxl ? 'LXL-' + lxl[1] : null,
     loadRef,
     truckNo: truck ? truck[1] : null,
     trailerNo: trailer ? trailer[1] : null,
     driverHint: /\bakash/i.test(all) ? 'akash' : /\barsh/i.test(all) ? 'arsh' : null,
-    places: extractRcPlaces(text || '', subject || ''),
-    dates: extractRcDates(text || ''),
+    places,
+    dates,
+    pickupDetail,
+    deliveryDetail,
   };
 }
 function resolveImportedDriverId(f) {
@@ -7704,7 +7935,11 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
             if (f.lxlRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.lxlRef);
             if (!load && ref) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(lxlLoadRef(ref));
             if (!load && ref) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(ref);
-            if (!load) {
+            if (!load || !load.driverId) {
+              // No load — or the load is still UNASSIGNED (created
+              // from an RC with no driver/truck on it): documents
+              // require a driver, so its BOLs wait until an admin
+              // assigns the load.
               counts.bolsUnmatched += 1;
               if (counts.bolsUnmatchedSubjects.length < 10) counts.bolsUnmatchedSubjects.push(subject);
               continue;
@@ -7792,19 +8027,30 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
               if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.loadRef);
               if (!load && (f.lxlRef || f.loadRef) && f.places.length >= 2 && f.dates.length >= 1) {
                 const driverId = resolveImportedDriverId(f);
-                if (driverId) {
-                  const p = f.places[0];
-                  const d = f.places[f.places.length - 1];
-                  const pDate = f.dates[0];
-                  const dDate = f.dates[f.dates.length - 1] || f.dates[0];
-                  const id = db.prepare(
-                    "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
-                  ).run(lxlLoadRef(f.lxlRef || f.loadRef), driverId,
-                    `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
-                    `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
-                    'Imported from a rate confirmation email', `${dDate}T17:00:00`, now()).lastInsertRowid;
-                  load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
-                  counts.loadsCreated += 1;
+                const pDate = f.dates[0];
+                const dDate = f.dates[f.dates.length - 1] || f.dates[0];
+                const sf = rcStopLoadFields(f);
+                const id = db.prepare(
+                  "INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, deliveryNumber, notes, status, completedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+                ).run(lxlLoadRef(f.lxlRef || f.loadRef), driverId,
+                  sf.pickupLocation, sf.pickupWarehouse, `${pDate}T${sf.pickupTime}:00`, 'America/Indiana/Indianapolis', sf.pickupNumber,
+                  sf.deliveryLocation, sf.deliveryWarehouse, `${dDate}T${sf.deliveryTime}:00`, 'America/Indiana/Indianapolis', sf.deliveryNumber,
+                  'Imported from a rate confirmation email', `${dDate}T${sf.deliveryTime}:00`, now()).lastInsertRowid;
+                load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
+                counts.loadsCreated += 1;
+                if (!driverId) {
+                  // Owner's auto-assign rule (2026-11-19): no driver
+                  // name and no truck/trailer number on the RC — the
+                  // load is created UNASSIGNED and the admins get a
+                  // bell notification to assign it by hand.
+                  counts.loadsUnassigned = (counts.loadsUnassigned || 0) + 1;
+                  notifyAdmins(
+                    'load_needs_assignment',
+                    'Load needs a driver',
+                    `${load.reference} · ${load.pickupLocation} → ${load.deliveryLocation} — created from a rate confirmation with no driver or truck number on it. Assign a driver.`,
+                    'loads',
+                    load.id,
+                  );
                 }
               }
               if (load) {
@@ -7850,11 +8096,13 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
 // Add-RC auto-load (owner, 2026-11-16): when a dispatcher picks a rate
 // confirmation from email (or uploads the file) without choosing a
 // load, the system creates the load FROM the rate confirmation —
-// LXL- reference from the broker load number, pickup/delivery city +
-// state from the RC's pickup/delivery sections, driver from the name
-// / truck / trailer on the RC — as an ACTIVE load, and files the RC
-// on it. If a load with that reference already exists, the RC simply
-// attaches to it.
+// LXL- reference from the broker load number, full pickup/delivery
+// addresses from the RC's pickup/delivery sections, driver from the
+// name / truck / trailer on the RC — as an ACTIVE load, and files the
+// RC on it. If a load with that reference already exists, the RC
+// simply attaches to it. Auto-assign rule (owner, 2026-11-19): if
+// the RC names no driver and no truck/trailer number, the load is
+// created UNASSIGNED and the admins are notified to assign it.
 async function findOrCreateLoadFromRc(fileBuffer, subject) {
   const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
   const dup = db.prepare('SELECT * FROM rate_confirmations WHERE fileHash = ?').get(fileHash);
@@ -7869,20 +8117,31 @@ async function findOrCreateLoadFromRc(fileBuffer, subject) {
   if (f.places.length < 2 || f.dates.length < 1)
     throw Object.assign(new Error(`Load ${ref} is new, but its pickup/delivery cities or dates could not be read from the rate confirmation — add the load manually, then attach this RC to it.`), { status: 400 });
   const driverId = resolveImportedDriverId(f);
-  if (!driverId)
-    throw Object.assign(new Error(`Load ${ref} is new, but no driver name or truck/trailer number could be read from the rate confirmation — add the load manually, then attach this RC to it.`), { status: 400 });
-  const p = f.places[0];
-  const d = f.places[f.places.length - 1];
   const pDate = f.dates[0];
   const dDate = f.dates[f.dates.length - 1] || f.dates[0];
+  const sf = rcStopLoadFields(f);
   const id = db.prepare(
-    "INSERT INTO loads (reference, driverId, pickupLocation, pickupAt, pickupTimezone, deliveryLocation, deliveryAt, deliveryTimezone, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
-  ).run(ref, driverId, `${p.city}, ${p.state}${p.zip ? ' ' + p.zip : ''}`, `${pDate}T09:00:00`, 'America/Indiana/Indianapolis',
-    `${d.city}, ${d.state}${d.zip ? ' ' + d.zip : ''}`, `${dDate}T17:00:00`, 'America/Indiana/Indianapolis',
+    "INSERT INTO loads (reference, driverId, pickupLocation, pickupWarehouse, pickupAt, pickupTimezone, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryAt, deliveryTimezone, deliveryNumber, notes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+  ).run(ref, driverId, sf.pickupLocation, sf.pickupWarehouse, `${pDate}T${sf.pickupTime}:00`, 'America/Indiana/Indianapolis', sf.pickupNumber,
+    sf.deliveryLocation, sf.deliveryWarehouse, `${dDate}T${sf.deliveryTime}:00`, 'America/Indiana/Indianapolis', sf.deliveryNumber,
     'Created from a rate confirmation', now()).lastInsertRowid;
   load = db.prepare('SELECT * FROM loads WHERE id = ?').get(id);
-  notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${load.reference}: ${load.pickupLocation} → ${load.deliveryLocation}.`).catch(() => {});
-  return { load, created: true };
+  if (driverId) {
+    notifyDriver(db, driverId, 'load_assigned', 'New load assigned', `Load ${load.reference}: ${load.pickupLocation} → ${load.deliveryLocation}.`).catch(() => {});
+  } else {
+    // Owner's auto-assign rule (2026-11-19): no driver name and no
+    // truck/trailer number on the RC — the load is still created,
+    // left UNASSIGNED, and the admins get a bell notification to
+    // assign it by hand. Never guess a driver.
+    notifyAdmins(
+      'load_needs_assignment',
+      'Load needs a driver',
+      `${load.reference} · ${load.pickupLocation} → ${load.deliveryLocation} — created from a rate confirmation with no driver or truck number on it. Assign a driver.`,
+      'loads',
+      load.id,
+    );
+  }
+  return { load, created: true, unassigned: !driverId };
 }
 
 admin.post('/rate-confirmations/from-outlook', async (req, res) => {
@@ -7908,7 +8167,7 @@ admin.post('/rate-confirmations/from-outlook', async (req, res) => {
       useLoadId = auto.load.id;
     }
     const rc = await createRateCon({ loadId: useLoadId, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
-    res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
+    res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadUnassigned: !!auto.unassigned, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
     console.error('rate-con from outlook failed', e);

@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS trailers (
 CREATE TABLE IF NOT EXISTS loads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   reference TEXT NOT NULL,
-  driverId INTEGER NOT NULL REFERENCES users(id),
+  driverId INTEGER REFERENCES users(id),
   pickupLocation TEXT NOT NULL,
   pickupWarehouse TEXT,
   pickupAt TEXT NOT NULL,
@@ -578,6 +578,44 @@ export function openDb(dataDir) {
   }
   if (!loadColumns.some((c) => c.name === 'deliveryLng')) {
     db.exec('ALTER TABLE loads ADD COLUMN deliveryLng REAL');
+  }
+  // Migrate databases created before the RC auto-assign rule (owner,
+  // 2026-11-19): a load created from a rate confirmation that names
+  // no driver and no truck/trailer number must exist UNASSIGNED
+  // until an admin assigns it, so loads.driverId becomes nullable.
+  // SQLite cannot drop a NOT NULL in place — rebuild the table from
+  // its stored definition with only that constraint relaxed (the
+  // documents rebuild pattern above).
+  try {
+    const loadsTable = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'loads'")
+      .get();
+    if (loadsTable && /driverId INTEGER NOT NULL/.test(loadsTable.sql)) {
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.exec('BEGIN IMMEDIATE');
+        db.exec(
+          loadsTable.sql
+            .replace(/CREATE TABLE(?: IF NOT EXISTS)?\s+loads\b/, 'CREATE TABLE loads_new')
+            .replace(/driverId INTEGER NOT NULL/, 'driverId INTEGER'),
+        );
+        db.exec('INSERT INTO loads_new SELECT * FROM loads');
+        db.exec('DROP TABLE loads');
+        db.exec('ALTER TABLE loads_new RENAME TO loads');
+        db.exec('COMMIT');
+      } catch (e) {
+        try {
+          db.exec('ROLLBACK');
+        } catch {
+          // already rolled back
+        }
+        throw e;
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
+  } catch (e) {
+    console.error('loads driverId-nullable migration failed', e);
   }
   // Migrate databases created before sender names: record who sent each
   // message (the admin's name — Akash, Ali, …) so the driver sees who is
