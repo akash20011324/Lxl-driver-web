@@ -8,6 +8,23 @@ import { now } from './db.js';
 const expo = new Expo();
 
 /**
+ * Clear a driver's stored push token after Expo reports it as
+ * DeviceNotRegistered (app uninstalled or token rotated). Guarded by the
+ * token value so a fresh token registered in the meantime is never
+ * wiped. Never throws.
+ */
+function clearDeadPushToken(db, driverId, token) {
+  try {
+    const res = db.prepare('UPDATE users SET pushToken = NULL WHERE id = ? AND pushToken = ?').run(driverId, token);
+    if (res.changes) {
+      console.log('[push] driver ' + driverId + ' token reported DeviceNotRegistered — cleared stored push token');
+    }
+  } catch (err) {
+    console.error('[push] failed to clear dead push token:', err.message);
+  }
+}
+
+/**
  * Record a notification for a driver and, if they have a valid Expo push
  * token, send the push. Never throws — push delivery must not break the
  * request that triggered it.
@@ -45,6 +62,12 @@ export async function notifyDriver(db, driverId, type, title, body) {
     for (const chunk of chunks) {
       const tickets = await expo.sendPushNotificationsAsync(chunk);
       console.log('[push] tickets for driver ' + driverId + ': ' + JSON.stringify(tickets));
+      // A DeviceNotRegistered ticket means this token is dead — clear it
+      // so the driver's next registration starts from a clean slate
+      // instead of every future push going to a dead address.
+      if ((tickets || []).some(t => t && t.status === 'error' && t.details && t.details.error === 'DeviceNotRegistered')) {
+        clearDeadPushToken(db, driverId, token);
+      }
       const ids = (tickets || []).filter(t => t && t.status === 'ok' && t.id).map(t => t.id);
       if (ids.length) {
         // Delivery receipts land a few seconds later; log any APNs-level
@@ -54,6 +77,11 @@ export async function notifyDriver(db, driverId, type, title, body) {
           try {
             const receipts = await expo.getPushNotificationReceiptsAsync(ids);
             console.log('[push] receipts for driver ' + driverId + ': ' + JSON.stringify(receipts));
+            // Same dead-token cleanup at the receipt level: APNs can
+            // accept the send and only report DeviceNotRegistered here.
+            if (Object.values(receipts || {}).some(r => r && r.status === 'error' && r.details && r.details.error === 'DeviceNotRegistered')) {
+              clearDeadPushToken(db, driverId, token);
+            }
           } catch (e) {
             console.error('[push] receipt check failed:', e.message);
           }
