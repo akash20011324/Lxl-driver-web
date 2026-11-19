@@ -862,10 +862,68 @@ function timeAgo(iso) {
   return d + (d === 1 ? ' day ago' : ' days ago');
 }
 
+/* Pop-up notifications on this computer (owner, 2026-11-19): desktop
+   popups only fire after the browser grants permission, and the grant
+   button used to live hidden inside the bell panel — so popups silently
+   never happened. Show a slim bar at the top of the admin area until the
+   permission is settled. */
+function removeNotifBanner() {
+  const b = document.getElementById('notifBanner');
+  if (b) b.remove();
+}
+
+function maybeShowNotifBanner() {
+  try {
+    if (!state.user || state.user.role !== 'admin') return;
+    if (!('Notification' in window)) return;
+    const perm = Notification.permission;
+    if (perm === 'granted') { removeNotifBanner(); return; }
+    let dismissed = null;
+    try { dismissed = localStorage.getItem('lxl_notif_banner_hide'); } catch { /* ignore */ }
+    if (dismissed === perm) { removeNotifBanner(); return; }
+    if (document.getElementById('notifBanner')) return;
+    const bar = document.createElement('div');
+    bar.id = 'notifBanner';
+    bar.className = 'notif-banner';
+    if (perm === 'denied') {
+      bar.innerHTML = '<span>Pop-up notifications are blocked in this browser — click the lock icon in the address bar and set Notifications to Allow.</span>';
+    } else {
+      bar.innerHTML = '<span>Get a pop-up on this computer for every driver message, upload and request — even while you are on another tab.</span>' +
+        '<button type="button" class="notif-banner-btn" id="notifBannerOn">Turn on pop-ups</button>';
+    }
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'notif-banner-x';
+    x.setAttribute('aria-label', 'Dismiss');
+    x.textContent = '×';
+    bar.appendChild(x);
+    document.body.appendChild(bar);
+    x.addEventListener('click', () => {
+      try { localStorage.setItem('lxl_notif_banner_hide', Notification.permission); } catch { /* ignore */ }
+      removeNotifBanner();
+    });
+    const on = document.getElementById('notifBannerOn');
+    if (on) on.addEventListener('click', async () => {
+      try { await Notification.requestPermission(); } catch { /* ignore */ }
+      if (Notification.permission === 'granted') {
+        try { localStorage.removeItem('lxl_notif_banner_hide'); } catch { /* ignore */ }
+        removeNotifBanner();
+        try {
+          const t = new Notification('LXL Portal', { body: 'Pop-ups are on — new driver activity will appear here.', tag: 'lxl-notif-on' });
+          t.onclick = () => { window.focus(); t.close(); };
+        } catch { /* ignore */ }
+      } else {
+        maybeShowNotifBanner();
+      }
+    });
+  } catch { /* banner is best-effort */ }
+}
+
 function startAdminNotifier() {
   if (state.bellTimer) clearInterval(state.bellTimer);
   state.bellTimer = setInterval(pollAdminNotifications, 15000);
   pollAdminNotifications();
+  maybeShowNotifBanner();
   if (!state.bellClickBound) {
     state.bellClickBound = true;
     document.addEventListener('click', (e) => {
