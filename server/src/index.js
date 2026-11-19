@@ -5510,6 +5510,48 @@ async function verifyRateConStates() {
   }
 }
 
+// One-time correction (owner, 2026-11-19): the ATS rate confirmation
+// LXL-217990 was parsed reversed at manual upload — stored as NJ -> GA
+// with delivery 2026-11-18, but the document itself says pickup
+// BOSTIK INC., Conyers, GA on 2026-11-19 and delivery DAVCO SUPPLY,
+// Burlington, NJ on 2026-11-20. The linked load is already correct;
+// only the RC row (and its file's display name) is fixed here. Runs
+// once; the marker row in one_off_jobs keeps later boots from
+// redoing it.
+async function fixAtsRc217990() {
+  try {
+    db.prepare('CREATE TABLE IF NOT EXISTS one_off_jobs (name TEXT PRIMARY KEY, doneAt TEXT)').run();
+    if (db.prepare('SELECT name FROM one_off_jobs WHERE name = ?').get('rc-ats-217990-fix-2026-11-19')) return;
+    const rows = db.prepare(
+      `SELECT r.id, r.reference, r.pickupState, r.deliveryState, r.deliveryDate, r.fileId, f.originalFilename
+       FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId
+       WHERE r.reference = 'LXL-217990' OR r.reference = '217990'`,
+    ).all();
+    if (!rows.length) {
+      console.log('rc ats fix: RC LXL-217990 not found — nothing to correct');
+    }
+    for (const row of rows) {
+      if (row.pickupState === 'GA' && row.deliveryState === 'NJ' && row.deliveryDate === '2026-11-20') {
+        console.log(`rc ats fix: RC ${row.id} already correct`);
+      } else {
+        db.prepare('UPDATE rate_confirmations SET pickupState = ?, deliveryState = ?, deliveryDate = ? WHERE id = ?')
+          .run('GA', 'NJ', '2026-11-20', row.id);
+        console.log(`rc ats fix: RC ${row.id} set GA->NJ, delivery 2026-11-20`);
+      }
+      // The stored file's DISPLAY name embeds the wrong route/dates
+      // (LXL-217990_NJ-GA_2026-11-19_to_2026-11-18...): fix the display
+      // name only — storedFilename and the file on disk never change.
+      if (row.fileId && row.originalFilename && row.originalFilename.startsWith('LXL-217990_NJ-GA_2026-11-19_to_2026-11-18')) {
+        db.prepare('UPDATE files SET originalFilename = ? WHERE id = ?')
+          .run('LXL-217990_GA-NJ_2026-11-19_to_2026-11-20.pdf', row.fileId);
+      }
+    }
+    db.prepare('INSERT OR REPLACE INTO one_off_jobs (name, doneAt) VALUES (?, ?)').run('rc-ats-217990-fix-2026-11-19', now());
+  } catch (e) {
+    console.error('rc ats fix failed', e);
+  }
+}
+
 // One-time repair: a few rate confirmations imported before the
 // date validation carry impossible stored dates ("365-24-07T...").
 // Re-read those documents and restore real pickup/delivery dates
@@ -10335,7 +10377,7 @@ app.listen(PORT, () => {
   setInterval(() => {
     maybeRunDailyRcImport();
   }, RC_DAILY_IMPORT_CHECK_MS);
-  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixIelLoadDates(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); await setVerifiedPlates(); })();
+  void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixIelLoadDates(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); await setVerifiedPlates(); await fixAtsRc217990(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
   try { db.prepare("UPDATE loads SET deliveryLat = NULL, deliveryLng = NULL, pickupLat = NULL, pickupLng = NULL WHERE status = 'active'").run(); } catch { /* columns may not exist on first boot */ }
