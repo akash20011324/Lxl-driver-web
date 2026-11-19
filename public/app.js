@@ -804,6 +804,43 @@ function renderAdminShell() {
    on whatever device the admin is using. */
 let bellData = null;
 
+/* Notification sound (owner, 2026-11-19): a chime rings whenever a new
+   notification lands, so an admin with the portal open on a PC hears a
+   driver message or upload the moment it arrives. Browsers only allow
+   audio after a user gesture, so the context unlocks on the first
+   click or keypress; the bell panel footer has a Sound on/off toggle. */
+let notifAudioCtx = null;
+function bellSoundOn() {
+  try { return localStorage.getItem('lxl_bell_sound') !== 'off'; } catch { return true; }
+}
+function unlockNotifAudio() {
+  try {
+    if (!notifAudioCtx) notifAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (notifAudioCtx.state === 'suspended') notifAudioCtx.resume();
+  } catch { /* audio is best-effort */ }
+}
+function playNotifChime() {
+  if (!bellSoundOn()) return;
+  try {
+    unlockNotifAudio();
+    if (!notifAudioCtx || notifAudioCtx.state !== 'running') return;
+    const t0 = notifAudioCtx.currentTime;
+    [[1318.5, 0], [1760, 0.14]].forEach(([freq, off]) => {
+      const osc = notifAudioCtx.createOscillator();
+      const gain = notifAudioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t0 + off);
+      gain.gain.exponentialRampToValueAtTime(0.22, t0 + off + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + off + 0.5);
+      osc.connect(gain);
+      gain.connect(notifAudioCtx.destination);
+      osc.start(t0 + off);
+      osc.stop(t0 + off + 0.55);
+    });
+  } catch { /* audio is best-effort */ }
+}
+
 function timeAgo(iso) {
   const t = Date.parse(iso);
   if (!t) return '';
@@ -828,6 +865,8 @@ function startAdminNotifier() {
       if (!panel || panel.hidden) return;
       if (!e.target.closest('.bell-wrap')) panel.hidden = true;
     });
+    document.addEventListener('pointerdown', unlockNotifAudio);
+    document.addEventListener('keydown', unlockNotifAudio);
   }
 }
 
@@ -853,6 +892,7 @@ async function pollAdminNotifications() {
     state.lastNotifId = maxId;
   } else if (maxId > state.lastNotifId) {
     const fresh = items.filter(i => i.id > state.lastNotifId).sort((a, b) => a.id - b.id);
+    if (fresh.length) playNotifChime();
     for (const n of fresh) maybeDesktopNotify(n);
     state.lastNotifId = maxId;
   }
@@ -886,11 +926,11 @@ function renderBellPanel() {
   if (!panel) return;
   const items = bellData && Array.isArray(bellData.items) ? bellData.items : [];
   const dotColor = { message: 'gold', document: 'blue', request: 'green', ratecon: 'blue', load: 'gold' };
-  let foot = '';
+  let foot = '<button class="bell-enable" id="bellSound" type="button">Notification sound: ' + (bellSoundOn() ? 'On' : 'Off') + '</button>';
   if ('Notification' in window && Notification.permission === 'default') {
-    foot = '<button class="bell-enable" id="bellEnable" type="button">Turn on desktop notifications</button>';
+    foot += '<button class="bell-enable" id="bellEnable" type="button">Turn on desktop notifications</button>';
   } else if ('Notification' in window && Notification.permission === 'denied') {
-    foot = '<div class="bell-note">Desktop notifications are blocked in this browser.</div>';
+    foot += '<div class="bell-note">Desktop notifications are blocked in this browser.</div>';
   }
   panel.innerHTML = '<div class="bell-head">Notifications</div>' +
     (items.length ? items.map(n =>
@@ -907,6 +947,12 @@ function renderBellPanel() {
   const en = document.getElementById('bellEnable');
   if (en) en.addEventListener('click', async () => {
     try { await Notification.requestPermission(); } catch { /* ignore */ }
+    renderBellPanel();
+  });
+  const sb = document.getElementById('bellSound');
+  if (sb) sb.addEventListener('click', () => {
+    try { localStorage.setItem('lxl_bell_sound', bellSoundOn() ? 'off' : 'on'); } catch { /* ignore */ }
+    if (bellSoundOn()) playNotifChime();
     renderBellPanel();
   });
 }
