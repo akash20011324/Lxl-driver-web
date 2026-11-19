@@ -4830,7 +4830,7 @@ async function viewRateCons(main) {
       '<span class="rc-route">' + esc(r.pickupState) + ' → ' + esc(r.deliveryState) + '</span>' +
       '<span class="rc-dates">' + fmtDateOnly(r.pickupDate) + ' → ' + fmtDateOnly(r.deliveryDate) + '</span>' +
       '<span class="rc-file">' + esc(r.filename || '') + '</span>' +
-      '<span class="rc-rate">' + fmtMoney(r.rateCents) + '</span>' +
+      '<span class="rc-rate"><button type="button" class="rc-rate-btn" data-rc-rate="' + r.id + '" title="Click to correct the amount">' + (r.rateCents != null ? fmtMoney(r.rateCents) : 'Add amount') + '</button></span>' +
       '<span class="rc-btns"><button class="btn btn-ghost btn-sm" data-rc-view="' + r.id + '">View</button> ' +
       '<button class="btn btn-ghost btn-sm" data-rc-dl="' + r.id + '">Download</button> ' +
       '<button class="btn btn-danger btn-sm" data-rc-del="' + r.id + '">Delete</button></span></div>').join('') +
@@ -4850,6 +4850,27 @@ async function viewRateCons(main) {
     document.getElementById('rcLoad').addEventListener('change', updatePreview);
     document.getElementById('rcFile').addEventListener('change', updatePreview);
     updatePreview();
+    // Amount box (owner, 2026-11-19): when a file is picked, read its
+    // rate on the server and pre-fill the box BEFORE uploading — the
+    // admin can correct it, and the box value is what gets saved.
+    const rcAmountEl = document.getElementById('rcAmount');
+    const rcAmountHint = document.getElementById('rcAmountHint');
+    document.getElementById('rcFile').addEventListener('change', async () => {
+      if (rcAmountEl) rcAmountEl.value = '';
+      if (rcAmountHint) rcAmountHint.style.display = 'none';
+      const fEl = document.getElementById('rcFile');
+      const file = fEl && fEl.files && fEl.files[0];
+      if (!file) return;
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const det = await api('/api/admin/rate-confirmations/detect', { method: 'POST', body: fd });
+        if (det && det.rateCents != null && rcAmountEl) {
+          rcAmountEl.value = (Number(det.rateCents) / 100).toFixed(2);
+          if (rcAmountHint) rcAmountHint.style.display = '';
+        }
+      } catch { /* detection is best-effort — the box stays empty for manual entry */ }
+    });
     rcForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const loadId = document.getElementById('rcLoad').value;
@@ -4859,6 +4880,11 @@ async function viewRateCons(main) {
           res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId, subject: state.rcOutlook.subject }) });
         } else {
           const fd = new FormData(rcForm);
+          const amtVal = rcAmountEl ? rcAmountEl.value.trim() : '';
+          if (amtVal !== '') {
+            const dollars = parseFloat(amtVal);
+            if (Number.isFinite(dollars) && dollars >= 0) fd.set('rateCents', String(Math.round(dollars * 100)));
+          }
           res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
         }
         const saved = (res && (res.filename || (res.rateConfirmation && res.rateConfirmation.filename))) || '';
@@ -5017,6 +5043,43 @@ async function viewRateCons(main) {
     try { await api('/api/admin/rate-confirmations/' + b.dataset.rcDel, { method: 'DELETE' }); toast('Rate confirmation deleted.', 'ok'); renderAdminView('ratecons'); }
     catch (err) { showError(err); }
   }));
+  // Click an amount to correct it inline (owner, 2026-11-19). Saving
+  // PATCHes just the rate; the header totals and the per-driver folder
+  // booked sums read rateCents live, so the re-render shows them.
+  const openRateEditor = (b) => {
+    const r = list.find(x => String(x.id) === b.dataset.rcRate);
+    if (!r) return;
+    const cell = b.closest('.rc-rate');
+    if (!cell || cell.dataset.editing) return;
+    cell.dataset.editing = '1';
+    const original = cell.innerHTML;
+    const restore = () => {
+      cell.innerHTML = original;
+      delete cell.dataset.editing;
+      const nb = cell.querySelector('[data-rc-rate]');
+      if (nb) nb.addEventListener('click', () => openRateEditor(nb));
+    };
+    cell.innerHTML = '<input type="number" class="rc-rate-input" min="0" step="0.01" placeholder="0.00" value="' + (r.rateCents != null ? (Number(r.rateCents) / 100).toFixed(2) : '') + '">' +
+      ' <button type="button" class="btn btn-sm" data-rc-rate-save>Save</button>' +
+      ' <button type="button" class="btn btn-ghost btn-sm" data-rc-rate-cancel>Cancel</button>';
+    const input = cell.querySelector('.rc-rate-input');
+    if (input) { input.focus(); input.select(); }
+    cell.querySelector('[data-rc-rate-cancel]').addEventListener('click', restore);
+    if (input) input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') restore();
+      if (ev.key === 'Enter') { ev.preventDefault(); cell.querySelector('[data-rc-rate-save]').click(); }
+    });
+    cell.querySelector('[data-rc-rate-save]').addEventListener('click', async () => {
+      const dollars = input ? parseFloat(input.value) : NaN;
+      if (!Number.isFinite(dollars) || dollars < 0) { toast('Enter a valid amount first.', 'error'); return; }
+      try {
+        await api('/api/admin/rate-confirmations/' + r.id, { method: 'PATCH', body: JSON.stringify({ rateCents: Math.round(dollars * 100) }) });
+        toast('Amount saved.', 'ok');
+        renderAdminView('ratecons');
+      } catch (err) { showError(err); restore(); }
+    });
+  };
+  main.querySelectorAll('[data-rc-rate]').forEach(b => b.addEventListener('click', () => openRateEditor(b)));
   // + Add RC: the upload + Outlook boxes live behind this button.
   const rcAddBtn = document.getElementById('rcAddBtn');
   const rcAddWrap = document.getElementById('rcAddWrap');

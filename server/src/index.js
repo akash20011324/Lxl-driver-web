@@ -7876,6 +7876,41 @@ admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
   }
 });
 
+// Read the rate off an RC file WITHOUT saving anything, so the upload
+// form can show the detected amount in an editable box before the
+// admin commits (owner, 2026-11-19). Uses the exact same extraction
+// as createRateCon — labeled rate lines only, never weights or page
+// totals. Persists nothing: no RC row, no load, no file row.
+admin.post('/rate-confirmations/detect', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return err(res, 400, 'No file uploaded');
+    const fileBuffer = fs.readFileSync(req.file.path);
+    try { fs.unlinkSync(req.file.path); } catch {}
+    const detected = await extractRateConDetails(fileBuffer);
+    res.json({ rateCents: detected.rateCents ?? null });
+  } catch (e) {
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} }
+    if (e.status) return err(res, e.status, e.message);
+    throw e;
+  }
+});
+
+// Correct the amount on an existing rate confirmation (owner,
+// 2026-11-19). Only rateCents changes; the booked totals and the
+// per-driver folder sums read it live, so they follow on re-render.
+admin.patch('/rate-confirmations/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM rate_confirmations WHERE id = ?').get(req.params.id);
+  if (!row) return err(res, 404, 'Rate confirmation not found');
+  const rateCents = req.body ? req.body.rateCents : undefined;
+  if (typeof rateCents !== 'number' || !Number.isFinite(rateCents) || rateCents < 0 || rateCents > 100000000)
+    return err(res, 400, 'Amount must be a number of cents between 0 and 100000000');
+  db.prepare('UPDATE rate_confirmations SET rateCents = ? WHERE id = ?').run(Math.round(rateCents), row.id);
+  const updated = db
+    .prepare('SELECT r.*, f.originalFilename, f.mimeType FROM rate_confirmations r LEFT JOIN files f ON f.id = r.fileId WHERE r.id = ?')
+    .get(row.id);
+  res.json(serializeRateCon(updated));
+});
+
 // Pull the RC file from the signed-in admin's own Outlook mailbox instead
 // of uploading it: pick the email, pick the attachment, pick the load.
 // --- Bulk rate-confirmation import helpers ---------------------------------

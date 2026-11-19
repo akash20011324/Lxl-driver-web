@@ -283,6 +283,9 @@ body.rc-bg .sidebar button:hover { background: rgba(255, 255, 255, 0.08); }
 .rc-broker { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .rc-btns, .rc-rate, .rc-chip, .rc-ref, .rc-route, .rc-dates { flex: none; }
 .rc-rate { color: var(--gold); font-weight: 800; font-size: 18px; margin-left: auto; white-space: nowrap; }
+.rc-rate-btn { background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.rc-rate-btn:hover { text-decoration: underline; }
+.rc-rate-input { width: 110px; display: inline-block; padding: 6px 8px; }
 .rc-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* ---------- notification bell (top bar) ---------- */
