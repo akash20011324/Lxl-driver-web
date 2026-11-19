@@ -3170,7 +3170,9 @@ async function viewDocuments(main) {
       const t = await api('/api/admin/outlook/thread?conversationId=' + encodeURIComponent(conversationId));
       const files = [...selected].map(id => docById.get(id)).filter(Boolean);
       body.innerHTML = '<button class="btn btn-ghost btn-sm" id="docsThreadBack">← All conversations</button>' +
-        '<p class="small" style="margin-top:10px">To: <strong>' + esc(t.toName || '') + '</strong> &lt;' + esc(t.toEmail || '') + '&gt;<br>' +
+        '<p class="small" style="margin-top:10px">To: ' + ((t.recipients && t.recipients.length)
+          ? t.recipients.map(r => '<strong>' + esc(r.name || '') + '</strong> &lt;' + esc(r.email || '') + '&gt;').join(', ')
+          : '<strong>' + esc(t.toName || '') + '</strong> &lt;' + esc(t.toEmail || '') + '&gt;') + '<br>' +
         '<span class="muted">' + esc(t.subject || '') + '</span></p>' +
         '<div class="thread-list">' + (t.messages || []).map(m =>
           '<div class="thread-msg' + (m.mine ? ' mine' : '') + '"><div><strong>' + esc(m.fromName || '') + '</strong> ' +
@@ -3190,7 +3192,9 @@ async function viewDocuments(main) {
             method: 'POST',
             body: JSON.stringify({ conversationId, body: document.getElementById('docsSendText').value, documentIds: [...selected] }),
           });
-          toast('Sent to ' + (t.toName || 'the broker') + ' with ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '.', 'ok');
+          toast('Sent to ' + ((t.recipients && t.recipients.length > 1)
+            ? (t.recipients[0].name || t.recipients[0].email) + ' and ' + (t.recipients.length - 1) + ' other' + (t.recipients.length === 2 ? '' : 's')
+            : (t.toName || 'the broker')) + ' with ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '.', 'ok');
           selected.clear();
           main.querySelectorAll('[data-doc-check]').forEach(x => { x.checked = false; });
           updateSendBar();

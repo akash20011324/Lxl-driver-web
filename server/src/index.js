@@ -9007,6 +9007,29 @@ function conversationContact(messages, ownEmail) {
   return first ? { name: first.name || first.address || '', email: first.address || '' } : { name: '', email: '' };
 }
 
+function conversationRecipients(messages, ownEmails) {
+  // Everyone in the conversation chain except the mailbox owner: every
+  // sender and every To/Cc recipient across ALL messages in the thread,
+  // deduped by address. Senders come first (newest sender first — the
+  // primary contact), then the remaining recipients in thread order.
+  // The owner sends to all of them, not just the last person who wrote.
+  const own = new Set((ownEmails || []).filter(Boolean).map((e) => String(e).toLowerCase()));
+  const seen = new Map();
+  const add = (ea) => {
+    if (!ea || !ea.address) return;
+    const key = String(ea.address).toLowerCase();
+    if (own.has(key) || seen.has(key)) return;
+    seen.set(key, { name: ea.name || ea.address, email: ea.address });
+  };
+  const sorted = [...messages].sort((a, b) => new Date(b.receivedDateTime || 0) - new Date(a.receivedDateTime || 0));
+  for (const m of sorted) add(m.from && m.from.emailAddress);
+  for (const m of sorted) {
+    for (const r of m.toRecipients || []) add(r && r.emailAddress);
+    for (const r of m.ccRecipients || []) add(r && r.emailAddress);
+  }
+  return [...seen.values()];
+}
+
 admin.get('/outlook/conversations', async (req, res) => {
   try {
     const user = getUserById(req.user.id);
@@ -9052,16 +9075,18 @@ admin.get('/outlook/thread', async (req, res) => {
     const q = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
     const data = await outlookGraph(
       accessToken,
-      `/me/messages?${q({ $filter: `conversationId eq '${conversationId.replace(/'/g, "''")}'`, $top: '50', $select: 'id,subject,from,receivedDateTime,body,bodyPreview' })}`,
+      `/me/messages?${q({ $filter: `conversationId eq '${conversationId.replace(/'/g, "''")}'`, $top: '50', $select: 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,bodyPreview' })}`,
     );
     const msgs = [...(data.value || [])].sort((a, b) => new Date(a.receivedDateTime || 0) - new Date(b.receivedDateTime || 0));
     const contact = conversationContact(msgs, user.outlookEmail);
+    const recipients = conversationRecipients(msgs, [user.outlookEmail, user.email]);
     const own = (user.outlookEmail || '').toLowerCase();
     res.json({
       conversationId,
       subject: (msgs[0] && msgs[0].subject) || '(no subject)',
       toName: contact.name,
       toEmail: contact.email,
+      recipients,
       messages: msgs.map((m) => ({
         id: m.id,
         fromName: (m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || '',
@@ -9178,10 +9203,14 @@ admin.post('/outlook/send-documents', async (req, res) => {
     // the newest message in the thread is picked client-side instead.
     const latest = await outlookGraph(
       readToken,
-      `/me/messages?${q({ $filter: `conversationId eq '${String(conversationId).replace(/'/g, "''")}'`, $top: '50', $select: 'id,receivedDateTime' })}`,
+      `/me/messages?${q({ $filter: `conversationId eq '${String(conversationId).replace(/'/g, "''")}'`, $top: '50', $select: 'id,receivedDateTime,from,toRecipients,ccRecipients' })}`,
     );
-    const lastMsg = (latest.value || []).slice().sort((a, b) => new Date(b.receivedDateTime) - new Date(a.receivedDateTime))[0];
+    const threadMsgs = latest.value || [];
+    const lastMsg = threadMsgs.slice().sort((a, b) => new Date(b.receivedDateTime) - new Date(a.receivedDateTime))[0];
     if (!lastMsg) return err(res, 404, 'That conversation could not be found');
+    // The email goes to EVERYONE in the conversation chain, not just
+    // the last person who wrote (owner's rule, 2026-11-19).
+    const recipients = conversationRecipients(threadMsgs, [user.outlookEmail, user.email]);
     sendToken = await outlookSendAccessToken(user);
     // Build the reply as a draft first: files over 3 MB can only be
     // attached through upload sessions, which exist on drafts. Then
@@ -9198,6 +9227,15 @@ admin.post('/outlook/send-documents', async (req, res) => {
     await outlookGraphReq(sendToken, 'PATCH', `/me/messages/${encodeURIComponent(draftId)}`, {
       body: { contentType: 'html', content: `<!-- lxl-portal-sent --><p>${escHtml}</p>` + (sigHtml || '<br>') + existing },
     });
+    // createReply alone would address only the newest message's sender;
+    // widen the draft to every participant in the chain. If this fails
+    // the whole send fails (the draft is cleaned up below) rather than
+    // silently emailing one person.
+    if (recipients.length) {
+      await outlookGraphReq(sendToken, 'PATCH', `/me/messages/${encodeURIComponent(draftId)}`, {
+        toRecipients: recipients.map((r) => ({ emailAddress: { address: r.email, name: r.name } })),
+      });
+    }
     for (const d of docs) {
       await attachFileToDraft(sendToken, draftId, d);
     }
