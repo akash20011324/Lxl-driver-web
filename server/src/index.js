@@ -8529,21 +8529,55 @@ function extractSignatureHtml(html) {
   return block.length > 40 ? block : null;
 }
 
-// The admin's signature: the stored copy once captured; on first use,
-// capture it from their recent sent mail (newest first) and store it.
+// Portal-sent mail carries the signature the portal appended, not the
+// one Outlook currently uses, so it must never count as sync evidence.
+// Three tells: the stamp the portal now embeds in its own sends; the
+// appended signature div sitting directly against the note's </p>
+// (Outlook always wraps its own text in divs before the signature);
+// and an extracted block that contains the stored signature verbatim.
+function isPortalSentBody(html) {
+  if (!html) return false;
+  if (html.includes('lxl-portal-sent')) return true;
+  const own = String(html).split('divRplyFwdMsg')[0];
+  const markers = ['id="ms-outlook-mobile-signature"', "id='ms-outlook-mobile-signature'", 'id="Signature"', 'id="x_Signature"'];
+  for (const mk of markers) {
+    const i = own.indexOf(mk);
+    if (i === -1) continue;
+    const start = own.lastIndexOf('<div', i);
+    return start > 0 && own.slice(Math.max(0, start - 4), start) === '</p>';
+  }
+  return false;
+}
+
+// The admin's signature, AUTO-SYNCED from Outlook (owner, 2026-11-19):
+// on every send, re-read the sender's newest sent mail and mirror the
+// signature Outlook is currently putting on their emails, so changing
+// the signature in Outlook updates the portal by itself — nobody has to
+// ask for a re-sync. Portal-sent messages are skipped as evidence: they
+// carry a stamped marker, and an unstamped older one is recognised
+// because its extracted block contains the stored signature verbatim
+// (the portal appended it) instead of being a fresh capture of it.
 async function getUserSignatureHtml(user, readToken) {
-  if (user.emailSignatureHtml) return user.emailSignatureHtml;
+  const stored = user.emailSignatureHtml || null;
   try {
-    const data = await outlookGraph(readToken, '/me/mailFolders/sentitems/messages?$top=10&$select=body');
-    for (const msg of data.value || []) {
-      const sig = extractSignatureHtml(msg.body && msg.body.content);
-      if (sig) {
+    const data = await outlookGraph(readToken, '/me/mailFolders/sentitems/messages?$top=10&$select=body,receivedDateTime');
+    const msgs = (data.value || []).slice().sort((a, b) => new Date(b.receivedDateTime) - new Date(a.receivedDateTime));
+    for (const msg of msgs) {
+      const html = msg.body && msg.body.content;
+      if (!html || isPortalSentBody(html)) continue;
+      const sig = extractSignatureHtml(html);
+      if (!sig) continue;
+      if (!stored) {
         db.prepare('UPDATE users SET emailSignatureHtml = ? WHERE id = ?').run(sig, user.id);
         return sig;
       }
+      if (sig === stored) return stored;
+      if (sig.includes(stored)) continue;
+      db.prepare('UPDATE users SET emailSignatureHtml = ? WHERE id = ?').run(sig, user.id);
+      return sig;
     }
-  } catch { /* the signature is optional — send without it */ }
-  return null;
+  } catch { /* the signature is optional — fall back to the stored copy */ }
+  return stored;
 }
 
 admin.post('/outlook/send-documents', async (req, res) => {
@@ -8590,7 +8624,7 @@ admin.post('/outlook/send-documents', async (req, res) => {
     // place Outlook itself puts it (before the quoted thread).
     const sigHtml = await getUserSignatureHtml(user, readToken);
     await outlookGraphReq(sendToken, 'PATCH', `/me/messages/${encodeURIComponent(draftId)}`, {
-      body: { contentType: 'html', content: `<p>${escHtml}</p>` + (sigHtml || '<br>') + existing },
+      body: { contentType: 'html', content: `<!-- lxl-portal-sent --><p>${escHtml}</p>` + (sigHtml || '<br>') + existing },
     });
     for (const d of docs) {
       await attachFileToDraft(sendToken, draftId, d);
