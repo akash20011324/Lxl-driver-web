@@ -872,15 +872,19 @@ function removeNotifBanner() {
   if (b) b.remove();
 }
 
+/* Dismissal is session-only on purpose: a stored dismissal once hid
+   this bar permanently in a browser profile even though pop-ups were
+   never turned on. The bar returns on the next page load until the
+   permission is actually granted — which is the point of the bar. */
+let notifBannerDismissed = false;
+
 function maybeShowNotifBanner() {
   try {
     if (!state.user || state.user.role !== 'admin') return;
     if (!('Notification' in window)) return;
     const perm = Notification.permission;
     if (perm === 'granted') { removeNotifBanner(); return; }
-    let dismissed = null;
-    try { dismissed = localStorage.getItem('lxl_notif_banner_hide'); } catch { /* ignore */ }
-    if (dismissed === perm) { removeNotifBanner(); return; }
+    if (notifBannerDismissed) return;
     if (document.getElementById('notifBanner')) return;
     const bar = document.createElement('div');
     bar.id = 'notifBanner';
@@ -899,14 +903,13 @@ function maybeShowNotifBanner() {
     bar.appendChild(x);
     document.body.appendChild(bar);
     x.addEventListener('click', () => {
-      try { localStorage.setItem('lxl_notif_banner_hide', Notification.permission); } catch { /* ignore */ }
+      notifBannerDismissed = true;
       removeNotifBanner();
     });
     const on = document.getElementById('notifBannerOn');
     if (on) on.addEventListener('click', async () => {
       try { await Notification.requestPermission(); } catch { /* ignore */ }
       if (Notification.permission === 'granted') {
-        try { localStorage.removeItem('lxl_notif_banner_hide'); } catch { /* ignore */ }
         removeNotifBanner();
         try {
           const t = new Notification('LXL Portal', { body: 'Pop-ups are on — new driver activity will appear here.', tag: 'lxl-notif-on' });
