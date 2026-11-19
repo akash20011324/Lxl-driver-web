@@ -367,6 +367,52 @@ CREATE TABLE IF NOT EXISTS relay_fuel_code_cancellations (
   relay_reference TEXT,
   created_at TEXT NOT NULL
 );
+-- Deadhead legs (owner, 2026-11-19): the empty run between one load's
+-- delivery and the same driver's next pickup counts in the driver's
+-- miles and pay. Legs are computed once (OSRM road miles, straight-line
+-- estimate as fallback) and cached here per load pair; miles = -1
+-- marks a pair whose route could not be resolved, mirroring loads.miles.
+CREATE TABLE IF NOT EXISTS deadhead_legs (
+  fromLoadId INTEGER NOT NULL REFERENCES loads(id),
+  toLoadId INTEGER NOT NULL REFERENCES loads(id),
+  miles REAL,
+  createdAt TEXT NOT NULL,
+  PRIMARY KEY (fromLoadId, toLoadId)
+);
+-- Payroll trips (owner, 2026-11-19): a driver uploads a photo of his
+-- paper trip sheet with the numbers HE says are right (total miles,
+-- total fuel, expenses); dispatch answers with a final statement file
+-- (PDF or picture) carrying the admin's numbers. Status flow:
+-- received -> statement_uploaded (driver must approve or reject;
+-- rejection requires his reason) -> approved -> paid. A rejection
+-- sends the trip back to received-with-statement-replaced when the
+-- admin uploads a corrected statement (statement_uploaded again).
+-- Money is stored in cents, miles as REAL, like the loads table.
+CREATE TABLE IF NOT EXISTS payroll_trips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  driverId INTEGER NOT NULL REFERENCES users(id),
+  label TEXT,
+  periodStart TEXT,
+  periodEnd TEXT,
+  sheetFileId INTEGER REFERENCES files(id),
+  driverMiles REAL,
+  driverFuelCents INTEGER,
+  driverExpensesCents INTEGER,
+  statementFileId INTEGER REFERENCES files(id),
+  stmtMiles REAL,
+  stmtFuelCents INTEGER,
+  stmtExpensesCents INTEGER,
+  additionsCents INTEGER,
+  deductionsCents INTEGER,
+  netPayCents INTEGER,
+  status TEXT NOT NULL DEFAULT 'received' CHECK (status IN ('received', 'statement_uploaded', 'approved', 'rejected', 'paid')),
+  rejectReason TEXT,
+  createdAt TEXT NOT NULL,
+  statementAt TEXT,
+  decidedAt TEXT,
+  paidAt TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_payroll_trips_driver ON payroll_trips (driverId, createdAt DESC, id DESC);
 `;
 
 export function openDb(dataDir) {
@@ -468,6 +514,18 @@ export function openDb(dataDir) {
   }
   if (!columns.some((c) => c.name === 'chatWallpaperFileId')) {
     db.exec('ALTER TABLE users ADD COLUMN chatWallpaperFileId INTEGER REFERENCES files(id)');
+  }
+  // Driver bank details for payroll (owner, 2026-11-19): where dispatch
+  // sends the driver's pay — routing + account, shown in his portal
+  // Payroll folder and editable by admins only.
+  if (!columns.some((c) => c.name === 'bankName')) {
+    db.exec('ALTER TABLE users ADD COLUMN bankName TEXT');
+  }
+  if (!columns.some((c) => c.name === 'bankRouting')) {
+    db.exec('ALTER TABLE users ADD COLUMN bankRouting TEXT');
+  }
+  if (!columns.some((c) => c.name === 'bankAccount')) {
+    db.exec('ALTER TABLE users ADD COLUMN bankAccount TEXT');
   }
   if (!columns.some((c) => c.name === 'adminKind')) {
     db.exec("ALTER TABLE users ADD COLUMN adminKind TEXT DEFAULT 'dispatcher'");

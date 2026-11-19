@@ -6,7 +6,7 @@
 // Refresh persistence (owner's ask, 2026-11-16): remember which section
 // the user was in, so refreshing the page lands back on that section
 // instead of the Dashboard. Kept per browser in localStorage.
-const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'driverDocs', 'admins', 'equipment', 'loads', 'documents', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons', 'maintenance', 'cashflow'];
+const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'driverDocs', 'admins', 'equipment', 'loads', 'documents', 'payroll', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons', 'maintenance', 'cashflow'];
 function savedAdminView() {
   try {
     const v = localStorage.getItem('lxl_admin_view');
@@ -57,6 +57,13 @@ const state = {
   mapMarkers: [],
   expandedLoads: {},
   expandedPaperwork: {},
+  // Per-driver folder navigation (owner, 2026-11-19): Loads, Documents
+  // and Payroll open to a list of driver folders; null = the folder
+  // list, a driver id (or 'unassigned' on Loads) = that driver's page.
+  loadsFolder: null,
+  docsFolder: null,
+  payrollFolder: null,
+  payrollStatementDraft: null,
 };
 let timers = [];
 
@@ -774,6 +781,7 @@ const ADMIN_VIEWS = [
   ['equipment', 'Trucks & Trailers'],
   ['loads', 'Loads'],
   ['documents', 'Documents'],
+  ['payroll', 'Payroll'],
   ['requests', 'Requests'],
   ['dispatch', 'Chat'],
   ['locations', 'Tracking'],
@@ -916,6 +924,7 @@ function openNotification(n) {
   if (panel) panel.hidden = true;
   if (!n.view) return;
   if (n.view === 'dispatch' && n.refId) state.dispatchDriverId = n.refId;
+  if (n.view === 'payroll' && n.refId) state._payrollDeepLink = n.refId;
   state.adminView = n.view;
   renderAdminSidebar();
   renderAdminView(n.view);
@@ -1176,6 +1185,23 @@ async function renderAdminView(view) {
   removeCashflowBgLayer();
   document.body.classList.remove('chat-bg');
   removeChatBgLayer();
+  document.body.classList.remove('payroll-bg');
+  removePayrollBgLayer();
+  // Folder navigation resets whenever the section itself changes:
+  // Loads / Documents / Payroll always open on their folder list.
+  if (view !== state._folderView) {
+    state._folderView = view;
+    state.loadsFolder = null;
+    state.docsFolder = null;
+    state.payrollFolder = null;
+    state.payrollStatementDraft = null;
+  }
+  // A payroll bell click carries the driver id: land inside his
+  // folder instead of the folder list.
+  if (view === 'payroll' && state._payrollDeepLink) {
+    state.payrollFolder = state._payrollDeepLink;
+    state._payrollDeepLink = null;
+  }
   const main = document.getElementById('adminMain');
   if (!main) return;
   main.innerHTML = '<p class="muted">Loading…</p>';
@@ -1190,6 +1216,7 @@ async function renderAdminView(view) {
     else if (view === 'equipment') await viewEquipment(main);
     else if (view === 'loads') await viewLoads(main);
     else if (view === 'documents') await viewDocuments(main);
+    else if (view === 'payroll') await viewPayroll(main);
     else if (view === 'unitDocs') await viewUnitDocuments(main);
     else if (view === 'driverDocs') await viewDriverDocuments(main);
     else if (view === 'requests') await viewRequests(main);
@@ -2572,19 +2599,83 @@ function loadCardHtml(l) {
   '</div>';
 }
 
+/* ---------- per-driver folders (owner, 2026-11-19) ---------- */
+/* Loads, Documents and Payroll open to a list of driver folders —
+   never driver tabs or pills swapping one page. A folder opens that
+   driver's own page: the section's existing page, filtered to him,
+   with a back link to the list. Folders derive from the drivers list
+   itself, so every driver has one from his first login. */
+function folderStatHtml(label, value) {
+  return '<span class="folder-stat"><strong>' + esc(value) + '</strong><small>' + esc(label) + '</small></span>';
+}
+function folderCardHtml(key, name, sub, statsHtml) {
+  return '<button class="folder-card" type="button" data-folder="' + esc(key) + '">' +
+    '<span class="folder-name">' + esc(name) + '</span>' +
+    (sub ? '<span class="folder-sub">' + esc(sub) + '</span>' : '') +
+    (statsHtml ? '<span class="folder-stats">' + statsHtml + '</span>' : '') +
+    '</button>';
+}
+function renderFolderList(main, title, sub, cardsHtml, onOpen) {
+  main.innerHTML = '<div class="folder-head"><h2>' + esc(title) + '</h2>' +
+    '<p class="muted">' + esc(sub) + '</p></div>' +
+    (cardsHtml ? '<div class="folder-grid">' + cardsHtml + '</div>' : '<div class="card"><p class="empty">No drivers yet.</p></div>');
+  main.querySelectorAll('[data-folder]').forEach((el) => el.addEventListener('click', () => onOpen(el.dataset.folder)));
+}
+async function driverUnitsById() {
+  const [trucks, trailers] = await Promise.all([
+    api('/api/admin/trucks').catch(() => []),
+    api('/api/admin/trailers').catch(() => []),
+  ]);
+  const map = new Map();
+  for (const t of Array.isArray(trucks) ? trucks : [])
+    if (t && t.driverId) map.set(String(t.driverId), { ...(map.get(String(t.driverId)) || {}), truck: t.unitNumber });
+  for (const t of Array.isArray(trailers) ? trailers : [])
+    if (t && t.driverId) map.set(String(t.driverId), { ...(map.get(String(t.driverId)) || {}), trailer: t.unitNumber });
+  return map;
+}
+function folderUnitsSub(units, driverId) {
+  const u = units.get(String(driverId));
+  if (!u) return '';
+  return [u.truck ? 'Truck ' + u.truck : '', u.trailer ? 'Trailer ' + u.trailer : ''].filter(Boolean).join(' · ');
+}
+
+function renderLoadsFolders(main, loads, drivers) {
+  driverUnitsById().then((units) => {
+    const statsFor = (mine) =>
+      folderStatHtml('Active', mine.filter((l) => l.status !== 'completed' && l.status !== 'cancelled').length) +
+      folderStatHtml('Completed', mine.filter((l) => l.status === 'completed').length) +
+      folderStatHtml('Booked', fmtMoney(mine.reduce((s, l) => s + (l.rateCents || 0), 0)));
+    const cards = drivers.map((d) =>
+      folderCardHtml(d.id, d.name, folderUnitsSub(units, d.id), statsFor(loads.filter((l) => String(l.driverId) === String(d.id)))));
+    const unassigned = loads.filter((l) => !l.driverId);
+    if (unassigned.length)
+      cards.push(folderCardHtml('unassigned', 'Unassigned', 'Loads with no driver yet', statsFor(unassigned)));
+    renderFolderList(main, 'Loads', 'Pick a driver to open his loads.', cards.join(''), (key) => {
+      state.loadsFolder = key;
+      viewLoads(main);
+    });
+  }).catch(() => {});
+}
+
 async function viewLoads(main) {
   state.editingLoadId = null;
   document.body.classList.add('loads-bg'); // reefer dock-row photo + liquid glass (removed on view switch)
   ensureLoadsBgLayer();
   const [loads, drivers] = await Promise.all([api('/api/admin/loads'), api('/api/admin/drivers')]);
   state.driversCache = Array.isArray(drivers) ? drivers : [];
+  if (state.loadsFolder === null) { renderLoadsFolders(main, Array.isArray(loads) ? loads : [], state.driversCache); return; }
   const driverOptions = (sel) =>
     state.driversCache.map((d) => '<option value="' + d.id + '"' + (String(d.id) === String(sel) ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('');
-  const list = Array.isArray(loads) ? loads : [];
+  let list = Array.isArray(loads) ? loads : [];
+  if (state.loadsFolder === 'unassigned') list = list.filter((l) => !l.driverId);
+  else list = list.filter((l) => String(l.driverId) === String(state.loadsFolder));
+  const folderDriver = state.loadsFolder === 'unassigned' ? null : state.driversCache.find((d) => String(d.id) === String(state.loadsFolder));
+  const folderName = state.loadsFolder === 'unassigned' ? 'Unassigned' : folderDriver ? folderDriver.name : 'Driver';
   main.innerHTML = '<div class="loads-page">' +
-    '<div class="loads-head"><h1>Loads</h1><button class="btn" type="button" id="toggleAssignBtn">+ Add load</button></div>' +
+    '<button class="btn btn-ghost btn-sm folder-back" type="button" id="loadsFolderBack">← All drivers</button>' +
+    '<div class="loads-head"><h1>' + esc(folderName) + ' — Loads</h1><button class="btn" type="button" id="toggleAssignBtn">+ Add load</button></div>' +
     '<div class="card" id="assignCard" hidden><h2>Assign load</h2><form id="addLoadForm">' +
-    '<label>Driver<select id="al-driver" required>' + driverOptions() + '</select></label>' +
+    '<label>Driver<select id="al-driver" required>' + driverOptions(state.loadsFolder !== 'unassigned' ? state.loadsFolder : undefined) + '</select></label>' +
     '<label>Reference<input id="al-ref" required placeholder="e.g. LXL-1001"></label>' +
     '<div id="al-pickups"><div class="al-stop-block">' +
     '<label>Pickup location<input id="al-pickup" class="al-s-loc" required placeholder="City, ST or full address"></label>' +
@@ -2607,6 +2698,7 @@ async function viewLoads(main) {
       : '<div class="card"><p class="empty">No loads yet.</p></div>') +
     '</div>';
 
+  document.getElementById('loadsFolderBack').addEventListener('click', () => { state.loadsFolder = null; viewLoads(main); });
   const assignCard = document.getElementById('assignCard');
   const toggleBtn = document.getElementById('toggleAssignBtn');
   const setAssignOpen = (open) => {
@@ -2802,6 +2894,17 @@ function removeDocsBgLayer() {
   const layer = document.getElementById('docsBgLayer');
   if (layer) layer.remove();
 }
+function ensurePayrollBgLayer() {
+  if (!document.getElementById('payrollBgLayer')) {
+    const layer = document.createElement('div');
+    layer.id = 'payrollBgLayer';
+    document.body.prepend(layer);
+  }
+}
+function removePayrollBgLayer() {
+  const layer = document.getElementById('payrollBgLayer');
+  if (layer) layer.remove();
+}
 
 // Click-anywhere-to-compact: registered by viewDocuments, replaced on
 // every visit. It self-guards on #docsPage existing, so it stays inert
@@ -2817,11 +2920,31 @@ function setDocsCompactHandler(fn) {
 async function viewDocuments(main) {
   document.body.classList.add('docs-bg');
   ensureDocsBgLayer();
-  const [docs, loads, outlook] = await Promise.all([
+  const [docs, loads, outlook, folderDrivers] = await Promise.all([
     api('/api/admin/documents'),
     api('/api/admin/loads').catch(() => []),
     api('/api/admin/outlook/status').catch(() => ({ configured: false, connected: false, email: null })),
+    api('/api/admin/drivers').catch(() => []),
   ]);
+  if (state.docsFolder === null) {
+    // Folder list first (owner, 2026-11-19): driver cards only; the
+    // Documents page below opens inside the picked driver's folder.
+    const allLoads = Array.isArray(loads) ? loads : [];
+    const allDocs = Array.isArray(docs) ? docs : [];
+    const units = await driverUnitsById();
+    const cards = (Array.isArray(folderDrivers) ? folderDrivers : []).map((d) => {
+      const mine = allLoads.filter((l) => String(l.driverId) === String(d.id));
+      const mineIds = new Set(mine.map((l) => l.id));
+      const docCount = allDocs.filter((x) => x.loadId != null && mineIds.has(x.loadId)).length;
+      return folderCardHtml(d.id, d.name, folderUnitsSub(units, d.id),
+        folderStatHtml('Loads', mine.length) + folderStatHtml('Documents', docCount));
+    });
+    renderFolderList(main, 'Documents', 'Pick a driver to open his documents.', cards.join(''), (key) => {
+      state.docsFolder = key;
+      viewDocuments(main);
+    });
+    return;
+  }
   const KINDS = {
     pickup: { kinds: ['pickup_bol'], label: 'Pickup BOLs', empty: 'No pickup BOLs yet' },
     unit: { kinds: ['unit_picture'], label: 'Unit Pictures', empty: 'No unit pictures yet' },
@@ -2849,7 +2972,12 @@ async function viewDocuments(main) {
     }
     return 0;
   };
-  const shown = loadList.slice().sort((a, b) => tripTime(b) - tripTime(a));
+  const shownAll = loadList.slice().sort((a, b) => tripTime(b) - tripTime(a));
+  const shown = shownAll.filter((l) => String(l.driverId) === String(state.docsFolder));
+  const folderDriverName = (() => {
+    const d = (Array.isArray(folderDrivers) ? folderDrivers : []).find((x) => String(x.id) === String(state.docsFolder));
+    return d ? d.name : 'Driver';
+  })();
   const docById = new Map(docList.map(d => [d.id, d]));
   const selected = new Set();
   const shortPlace = (a) => (a || '').split(',').pop().replace(/\s*\d{5}(-\d{4})?\s*$/, '').trim();
@@ -2897,7 +3025,8 @@ async function viewDocuments(main) {
   };
 
   main.innerHTML = '<div class="docs-page" id="docsPage">' +
-    '<div class="rc-head"><h1>Documents</h1>' +
+    '<button class="btn btn-ghost btn-sm folder-back" type="button" id="docsFolderBack">← All drivers</button>' +
+    '<div class="rc-head"><h1>' + esc(folderDriverName) + ' — Documents</h1>' +
     '<input id="docsSearch" class="docs-search" type="search" placeholder="Search load # — e.g. 2038499" autocomplete="off"></div>' +
 
     '<p class="docs-quote">“Every mile counts. Every paper proves it.”</p>' +
@@ -2907,6 +3036,7 @@ async function viewDocuments(main) {
     '<button class="btn" id="docsSendOpen">Send to broker</button>' +
     '<button class="btn btn-ghost" id="docsSendClear">Clear</button></div></div>';
 
+  document.getElementById('docsFolderBack').addEventListener('click', () => { state.docsFolder = null; viewDocuments(main); });
   const docsSearch = document.getElementById('docsSearch');
   if (docsSearch) docsSearch.addEventListener('input', () => {
     const q = docsSearch.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -3095,6 +3225,224 @@ async function viewDocuments(main) {
     main.querySelectorAll('[data-doc-check]').forEach(x => { x.checked = false; });
     updateSendBar();
   });
+}
+
+/* ---------- Payroll (admin) ---------- */
+/* Per-driver folders over the money photo — the same picture the
+   driver's app Payroll tab uses. A trip starts as the driver's own
+   sheet ("Trip sheet received"); dispatch answers with a final
+   statement the driver approves or rejects (reason required); only
+   an approved statement can be marked Paid, after he is actually
+   paid outside the app. Completed trips keep BOTH documents open. */
+const PAYROLL_STATUS = {
+  received: { label: 'Trip sheet received', cls: 'gold' },
+  statement_uploaded: { label: 'PENDING — waiting for driver', cls: 'gold' },
+  approved: { label: 'Approved — ready to pay', cls: 'blue' },
+  rejected: { label: 'Rejected by driver', cls: 'red' },
+  paid: { label: 'PAID', cls: 'green' },
+};
+function payrollMoney(v) { return v == null ? '—' : fmtMoney(v); }
+function payrollMiles(v) { return v == null ? '—' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 1 }) + ' mi'; }
+
+async function viewPayroll(main) {
+  document.body.classList.add('payroll-bg');
+  ensurePayrollBgLayer();
+  if (state.payrollFolder === null) {
+    const drivers = await api('/api/admin/payroll/drivers').catch(() => []);
+    const cards = (Array.isArray(drivers) ? drivers : []).map((d) => {
+      const sub = [d.truck && d.truck.unitNumber ? 'Truck ' + d.truck.unitNumber : '', d.trailer && d.trailer.unitNumber ? 'Trailer ' + d.trailer.unitNumber : ''].filter(Boolean).join(' · ');
+      return folderCardHtml(d.id, d.name, sub,
+        folderStatHtml('Pending', d.payroll ? d.payroll.pendingCount : 0) +
+        folderStatHtml('Paid total', fmtMoney(d.payroll ? d.payroll.paidTotalCents : 0)));
+    });
+    renderFolderList(main, 'Payroll', 'Pick a driver to open his payroll folder.', cards.join(''), (key) => {
+      state.payrollFolder = key;
+      state.payrollStatementDraft = null;
+      viewPayroll(main);
+    });
+    return;
+  }
+  await renderPayrollDriver(main);
+}
+
+async function renderPayrollDriver(main) {
+  const driverId = state.payrollFolder;
+  const [drivers, trips] = await Promise.all([
+    api('/api/admin/payroll/drivers').catch(() => []),
+    api('/api/admin/payroll/trips?driverId=' + encodeURIComponent(driverId)).catch(() => []),
+  ]);
+  const me = (Array.isArray(drivers) ? drivers : []).find((d) => String(d.id) === String(driverId));
+  if (!me) { state.payrollFolder = null; viewPayroll(main); return; }
+  const bank = me.bank || {};
+  const tripRows = (Array.isArray(trips) ? trips : []).map((t) => payrollTripHtml(t)).join('');
+  main.innerHTML = '<div class="payroll-page">' +
+    '<button class="btn btn-ghost btn-sm folder-back" type="button" id="payrollFolderBack">← All drivers</button>' +
+    '<div class="payroll-head"><h1>' + esc(me.name) + ' — Payroll</h1>' +
+    '<p class="muted">' + esc([me.truck && me.truck.unitNumber ? 'Truck ' + me.truck.unitNumber : '', me.trailer && me.trailer.unitNumber ? 'Trailer ' + me.trailer.unitNumber : ''].filter(Boolean).join(' · ')) + '</p></div>' +
+    '<div class="card payroll-bank"><h3>Bank details</h3>' +
+    '<div class="payroll-bank-grid">' +
+    '<label>Bank name<input id="pb-bank" value="' + esc(bank.bankName || '') + '" placeholder="e.g. Bank of America"></label>' +
+    '<label>Routing number<input id="pb-routing" value="' + esc(bank.routingNumber || '') + '" inputmode="numeric" autocomplete="off"></label>' +
+    '<label>Account number<input id="pb-account" value="' + esc(bank.accountNumber || '') + '" inputmode="numeric" autocomplete="off"></label>' +
+    '</div><button class="btn btn-sm" type="button" id="pb-save">Save bank details</button></div>' +
+    '<div class="card"><h3>Trips &amp; statements</h3>' +
+    (tripRows || '<p class="empty">No trip sheets yet. When ' + esc(me.name.split(' ')[0]) + ' finishes a trip, his sheet lands here.</p>') +
+    '</div></div>';
+
+  document.getElementById('payrollFolderBack').addEventListener('click', () => {
+    state.payrollFolder = null;
+    state.payrollStatementDraft = null;
+    viewPayroll(main);
+  });
+  document.getElementById('pb-save').addEventListener('click', async () => {
+    try {
+      await api('/api/admin/drivers/' + driverId + '/bank', {
+        method: 'POST',
+        body: JSON.stringify({
+          bankName: document.getElementById('pb-bank').value.trim(),
+          routingNumber: document.getElementById('pb-routing').value.trim(),
+          accountNumber: document.getElementById('pb-account').value.trim(),
+        }),
+      });
+      toast('Bank details saved.', 'ok');
+    } catch (e) { showError(e); }
+  });
+  wirePayrollTrips(main);
+}
+
+function payrollTripHtml(t) {
+  const st = PAYROLL_STATUS[t.status] || { label: t.status, cls: '' };
+  const dn = t.driverNumbers || {};
+  const sn = t.statementNumbers || null;
+  const nums = (n) =>
+    '<div class="payroll-nums">' +
+    '<span><small>Total miles</small><strong>' + payrollMiles(n.totalMiles) + '</strong></span>' +
+    '<span><small>Total fuel</small><strong>' + payrollMoney(n.totalFuelCents) + '</strong></span>' +
+    '<span><small>Expenses</small><strong>' + payrollMoney(n.expensesCents) + '</strong></span>' +
+    (n.netPayCents !== undefined ? '<span><small>Net pay</small><strong>' + payrollMoney(n.netPayCents) + '</strong></span>' : '') +
+    '</div>';
+  const docBtn = (f, label) => f ? '<button class="btn btn-ghost btn-sm" type="button" data-payroll-view="' + f.fileId + '">' + esc(label) + '</button>' : '';
+  let action = '';
+  if (t.status === 'received' || t.status === 'rejected') action = payrollStatementFormHtml(t);
+  if (t.status === 'approved')
+    action = '<div class="payroll-action"><p class="muted">The driver approved this statement. Pay him outside the app, then mark it paid.</p>' +
+      '<button class="btn" type="button" data-payroll-paid="' + t.id + '">Mark paid</button></div>';
+  return '<div class="payroll-trip" data-trip="' + t.id + '">' +
+    '<div class="payroll-trip-head"><div><strong>' + esc(t.label || 'Trip sheet') + '</strong>' +
+    '<div class="muted small">Submitted ' + fmtDate(t.createdAt) + '</div></div>' +
+    '<span class="pill ' + st.cls + '">' + esc(st.label) + '</span></div>' +
+    '<div class="payroll-cols"><div><h4>Driver\u2019s trip sheet</h4>' + nums(dn) +
+    '<div class="payroll-docs">' + docBtn(t.sheet, 'View trip sheet') + '</div></div>' +
+    '<div><h4>Final statement</h4>' + (sn ? nums(sn) : '<p class="muted">Not uploaded yet.</p>') +
+    '<div class="payroll-docs">' + docBtn(t.statement, 'View statement') + '</div></div></div>' +
+    (t.status === 'rejected' && t.rejectReason ? '<p class="payroll-reject"><strong>Driver rejected:</strong> ' + esc(t.rejectReason) + '</p>' : '') +
+    action +
+    '</div>';
+}
+
+/* The staged statement upload: pick a picture or file → it stages
+   (nothing is sent) → click the staged file to view it → the server
+   reads its numbers into the three boxes → adjust → the final
+   "Upload statement" click is the only thing that saves + sends. */
+function payrollStatementFormHtml(t) {
+  const draft = state.payrollStatementDraft && state.payrollStatementDraft.tripId === t.id ? state.payrollStatementDraft : null;
+  const val = (k) => draft && draft[k] != null ? draft[k] : '';
+  return '<div class="payroll-action" data-stmt-form="' + t.id + '">' +
+    '<h4>' + (t.status === 'rejected' ? 'Upload corrected statement' : 'Upload final statement') + '</h4>' +
+    '<div class="payroll-stage-btns">' +
+    '<button class="btn btn-ghost btn-sm" type="button" data-stmt-pick="' + t.id + '">Choose picture / file</button>' +
+    '<span class="muted small">PDF or picture</span></div>' +
+    '<input type="file" accept="image/*,application/pdf" data-stmt-file="' + t.id + '" hidden>' +
+    (draft && draft.fileName
+      ? '<button class="payroll-staged" type="button" data-stmt-view="' + t.id + '">📄 ' + esc(draft.fileName) + ' — tap to view</button>'
+      : '<p class="muted small">No file picked yet — nothing uploads until you press Upload statement.</p>') +
+    '<div class="payroll-nums-edit">' +
+    '<label>Total miles<input type="number" step="0.1" min="0" data-stmt-num="totalMiles" value="' + esc(val('totalMiles')) + '" placeholder="Auto-read"></label>' +
+    '<label>Total fuel $<input type="number" step="0.01" min="0" data-stmt-num="totalFuelDollars" value="' + esc(val('totalFuelDollars')) + '" placeholder="Auto-read"></label>' +
+    '<label>Expenses $<input type="number" step="0.01" min="0" data-stmt-num="expensesDollars" value="' + esc(val('expensesDollars')) + '" placeholder="Auto-read"></label>' +
+    '<label>Additions $<input type="number" step="0.01" min="0" data-stmt-num="additionsDollars" value="' + esc(val('additionsDollars')) + '"></label>' +
+    '<label>Deductions $<input type="number" step="0.01" min="0" data-stmt-num="deductionsDollars" value="' + esc(val('deductionsDollars')) + '"></label>' +
+    '<label>Net pay $<input type="number" step="0.01" min="0" data-stmt-num="netPayDollars" value="' + esc(val('netPayDollars')) + '" placeholder="Miles × $0.65"></label>' +
+    '</div>' +
+    '<button class="btn" type="button" data-stmt-send="' + t.id + '">Upload statement — send to driver for approval</button>' +
+    '</div>';
+}
+
+function wirePayrollTrips(main) {
+  main.querySelectorAll('[data-payroll-view]').forEach((b) => b.addEventListener('click', () => {
+    window.open('/files/' + b.dataset.payrollView, '_blank');
+  }));
+  main.querySelectorAll('[data-payroll-paid]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/payroll/trips/' + b.dataset.payrollPaid + '/mark-paid', { method: 'POST', body: '{}' });
+      toast('Marked paid. The driver got the notification.', 'ok');
+      renderPayrollDriver(main);
+    } catch (e) { showError(e); }
+  }));
+  main.querySelectorAll('[data-stmt-pick]').forEach((b) => b.addEventListener('click', () => {
+    const input = main.querySelector('[data-stmt-file="' + b.dataset.stmtPick + '"]');
+    if (input) input.click();
+  }));
+  main.querySelectorAll('[data-stmt-file]').forEach((input) => input.addEventListener('change', async () => {
+    const tripId = input.dataset.stmtFile;
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const prev = state.payrollStatementDraft && state.payrollStatementDraft.tripId === Number(tripId) ? state.payrollStatementDraft : {};
+    const draft = { ...prev, tripId: Number(tripId), file, fileName: file.name, objectUrl: URL.createObjectURL(file) };
+    state.payrollStatementDraft = draft;
+    renderPayrollDriver(main);
+    // Read the staged file's numbers into the three boxes (the admin
+    // can still adjust every one before sending).
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const det = await api('/api/admin/payroll/trips/' + tripId + '/statement-detect', { method: 'POST', body: fd });
+      if (state.payrollStatementDraft === draft && det) {
+        if (det.totalMiles != null && draft.totalMiles == null) draft.totalMiles = det.totalMiles;
+        if (det.totalFuelCents != null && draft.totalFuelDollars == null) draft.totalFuelDollars = (det.totalFuelCents / 100).toFixed(2);
+        if (det.expensesCents != null && draft.expensesDollars == null) draft.expensesDollars = (det.expensesCents / 100).toFixed(2);
+        renderPayrollDriver(main);
+      }
+    } catch { /* detection is a helper only — the boxes stay typable */ }
+  }));
+  main.querySelectorAll('[data-stmt-view]').forEach((b) => b.addEventListener('click', () => {
+    const draft = state.payrollStatementDraft;
+    if (draft && draft.objectUrl) window.open(draft.objectUrl, '_blank');
+  }));
+  main.querySelectorAll('[data-stmt-form]').forEach((form) => {
+    // Keep typed numbers in the draft so a re-render never loses them.
+    form.querySelectorAll('[data-stmt-num]').forEach((input) => input.addEventListener('input', () => {
+      const tripId = Number(form.dataset.stmtForm);
+      if (!state.payrollStatementDraft || state.payrollStatementDraft.tripId !== tripId)
+        state.payrollStatementDraft = { tripId };
+      const v = input.value === '' ? null : Number(input.value);
+      state.payrollStatementDraft[input.dataset.stmtNum] = Number.isFinite(v) ? v : null;
+    }));
+  });
+  main.querySelectorAll('[data-stmt-send]').forEach((b) => b.addEventListener('click', async () => {
+    const tripId = b.dataset.stmtSend;
+    const draft = state.payrollStatementDraft;
+    if (!draft || draft.tripId !== Number(tripId) || !draft.file) {
+      toast('Pick the statement file first — it stages above, then press Upload statement.', 'error');
+      return;
+    }
+    const num = (k) => draft[k] != null && draft[k] !== '' ? Number(draft[k]) : null;
+    const cents = (k) => { const n = num(k); return n == null ? null : Math.round(n * 100); };
+    try {
+      const fd = new FormData();
+      fd.append('file', draft.file);
+      const miles = num('totalMiles'); if (miles != null) fd.append('totalMiles', String(miles));
+      const fuel = cents('totalFuelDollars'); if (fuel != null) fd.append('totalFuelCents', String(fuel));
+      const exp = cents('expensesDollars'); if (exp != null) fd.append('expensesCents', String(exp));
+      const add = cents('additionsDollars'); if (add != null) fd.append('additionsCents', String(add));
+      const ded = cents('deductionsDollars'); if (ded != null) fd.append('deductionsCents', String(ded));
+      const net = cents('netPayDollars'); if (net != null) fd.append('netPayCents', String(net));
+      await api('/api/admin/payroll/trips/' + tripId + '/statement', { method: 'POST', body: fd });
+      state.payrollStatementDraft = null;
+      toast('Statement sent to the driver for approval.', 'ok');
+      renderPayrollDriver(main);
+    } catch (e) { showError(e); }
+  }));
 }
 
 /* ---------- Requests ---------- */

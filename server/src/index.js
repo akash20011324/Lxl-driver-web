@@ -691,6 +691,20 @@ driver.get('/loads/history', (req, res) => {
   res.json(rows.map(serializeLoad));
 });
 
+// My Loads statement (owner, 2026-11-19): completed loads grouped by
+// month, in strict pickup order, with the deadhead legs between loads
+// shown and counted in the month miles and pay. The page layout in the
+// app is unchanged — this payload carries the same rows plus the
+// deadhead entries and the updated totals.
+driver.get('/loads/statement', async (req, res) => {
+  try {
+    res.json(await buildDriverStatement(req.user.id));
+  } catch (e) {
+    console.error('driver statement failed', e);
+    return err(res, 500, 'Could not build the statement');
+  }
+});
+
 driver.post('/loads/:id/complete', async (req, res) => {
   try {
     const load = db.prepare('SELECT * FROM loads WHERE id = ? AND driverId = ?').get(req.params.id, req.user.id);
@@ -788,6 +802,7 @@ driver.get('/trailers/available', (req, res) => {
 driver.post('/trailers/change', (req, res) => {
   const { trailerId } = req.body || {};
   if (!trailerId) return err(res, 400, 'trailerId is required');
+  const hadTrailer = db.prepare('SELECT id FROM trailers WHERE driverId = ?').get(req.user.id);
   let result;
   try {
     result = withTransaction(db, () => {
@@ -806,11 +821,20 @@ driver.post('/trailers/change', (req, res) => {
     return err(res, 500, e.message);
   }
   if (result.error) return err(res, result.status, result.error);
+  // Dispatch sees trailer changes in the bell too (owner, 2026-11-19:
+  // notifications for everything, both ways).
+  if (result.trailer && result.trailer.unitNumber && (!hadTrailer || hadTrailer.id !== Number(trailerId))) {
+    notifyAdmins('trailer', `${req.user.name} changed trailer`, `Now on trailer ${result.trailer.unitNumber}`, 'equipment', null);
+  }
   res.json(result.trailer);
 });
 
 driver.post('/trailers/release', (req, res) => {
+  const before = db.prepare('SELECT * FROM trailers WHERE driverId = ?').get(req.user.id);
   db.prepare('UPDATE trailers SET driverId = NULL WHERE driverId = ?').run(req.user.id);
+  if (before) {
+    notifyAdmins('trailer', `${req.user.name} released a trailer`, `Trailer ${before.unitNumber} is unassigned`, 'equipment', null);
+  }
   res.json({ ok: true });
 });
 
@@ -1086,6 +1110,180 @@ driver.delete('/documents/:id', (req, res) => {
     }
   }
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Payroll (owner, 2026-11-19)
+// ---------------------------------------------------------------------------
+// Two systems that never mix: My Loads is the SYSTEM's math from the
+// loads; a payroll trip sheet is the DRIVER's own numbers — what he
+// says his miles, fuel and expenses were (the photo auto-read is only
+// a starting point, he corrects it before submitting). Dispatch
+// answers with a final statement; the driver approves or rejects it
+// (a rejection needs his reason); only an approved statement can be
+// marked paid, after dispatch actually pays him outside the app.
+function serializePayrollTrip(t) {
+  if (!t) return null;
+  const fileInfo = (fileId) => {
+    if (!fileId) return null;
+    const f = db.prepare('SELECT * FROM files WHERE id = ?').get(fileId);
+    if (!f) return null;
+    return { fileId: f.id, filename: f.originalFilename, mimeType: f.mimeType, url: `/files/${f.id}` };
+  };
+  return {
+    id: t.id,
+    driverId: t.driverId,
+    driverName: getDriverName(t.driverId),
+    label: t.label ?? null,
+    periodStart: t.periodStart ?? null,
+    periodEnd: t.periodEnd ?? null,
+    sheet: fileInfo(t.sheetFileId),
+    driverNumbers: {
+      totalMiles: t.driverMiles ?? null,
+      totalFuelCents: t.driverFuelCents ?? null,
+      expensesCents: t.driverExpensesCents ?? null,
+    },
+    statement: fileInfo(t.statementFileId),
+    statementNumbers: t.statementFileId
+      ? {
+          totalMiles: t.stmtMiles ?? null,
+          totalFuelCents: t.stmtFuelCents ?? null,
+          expensesCents: t.stmtExpensesCents ?? null,
+          additionsCents: t.additionsCents ?? null,
+          deductionsCents: t.deductionsCents ?? null,
+          netPayCents: t.netPayCents ?? null,
+        }
+      : null,
+    status: t.status,
+    rejectReason: t.rejectReason ?? null,
+    createdAt: t.createdAt,
+    statementAt: t.statementAt ?? null,
+    decidedAt: t.decidedAt ?? null,
+    paidAt: t.paidAt ?? null,
+  };
+}
+
+// Best-effort read of a trip sheet / statement's headline numbers from
+// its text (PDF text layer or OCR, via extractFileText). Whoever
+// submits always sees these numbers and can correct them before
+// anything is final — a miss just leaves the box blank for typing.
+function detectTripSheetNumbers(text) {
+  const out = { totalMiles: null, totalFuelCents: null, expensesCents: null };
+  if (!text) return out;
+  const t = String(text);
+  const num = (s) => {
+    const n = Number(String(s).replace(/,/g, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+  let m = t.match(/total\s*miles?\s*[:\-]?\s*([\d,]+(?:\.\d+)?)/i);
+  if (!m) m = t.match(/([\d,]+(?:\.\d+)?)\s*(?:total\s*)?miles/i);
+  if (m) out.totalMiles = num(m[1]);
+  const moneyAfter = (rx) => {
+    const mm = t.match(rx);
+    if (!mm) return null;
+    const n = num(mm[1]);
+    return n == null ? null : Math.round(n * 100);
+  };
+  out.totalFuelCents =
+    moneyAfter(/total\s*fuel\s*[:\-]?\s*\$\s*([\d,]+(?:\.\d{1,2})?)/i) ??
+    moneyAfter(/fuel\s*total\s*[:\-]?\s*\$\s*([\d,]+(?:\.\d{1,2})?)/i) ??
+    moneyAfter(/fuel\s*[:\-]\s*\$\s*([\d,]+(?:\.\d{1,2})?)/i);
+  out.expensesCents =
+    moneyAfter(/total\s*expenses?\s*[:\-]?\s*\$\s*([\d,]+(?:\.\d{1,2})?)/i) ??
+    moneyAfter(/expenses?\s*[:\-]\s*\$\s*([\d,]+(?:\.\d{1,2})?)/i);
+  return out;
+}
+
+async function readTripSheetNumbers(buf) {
+  try {
+    const text = await extractFileText(buf);
+    return detectTripSheetNumbers(text);
+  } catch (e) {
+    console.error('trip sheet read failed', e);
+    return { totalMiles: null, totalFuelCents: null, expensesCents: null };
+  }
+}
+
+const payrollNum = (v) => {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+// Auto-read a sheet photo before it is submitted: the app shows the
+// detected miles / fuel / expenses and the driver corrects them.
+// Nothing is stored here.
+driver.post('/payroll/read-sheet', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.json({ totalMiles: null, totalFuelCents: null, expensesCents: null });
+  try {
+    const buf = fs.readFileSync(req.file.path);
+    res.json(await readTripSheetNumbers(buf));
+  } catch (e) {
+    console.error('read-sheet failed', e);
+    res.json({ totalMiles: null, totalFuelCents: null, expensesCents: null });
+  } finally {
+    try { fs.unlinkSync(req.file.path); } catch { /* already gone */ }
+  }
+});
+
+// The driver submits his trip sheet: the photo plus HIS numbers.
+driver.post('/payroll/trips', upload.single('file'), (req, res) => {
+  if (!req.file) return err(res, 400, 'file is required');
+  const { label, periodStart, periodEnd, totalMiles, totalFuelCents, expensesCents } = req.body || {};
+  const fileId = insertFileRow(req.file, 'payroll_sheet', null, req.user.id);
+  const id = db
+    .prepare(
+      `INSERT INTO payroll_trips (driverId, label, periodStart, periodEnd, sheetFileId, driverMiles, driverFuelCents, driverExpensesCents, status, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'received', ?)`,
+    )
+    .run(
+      req.user.id,
+      label ? String(label).slice(0, 120) : null,
+      periodStart ?? null,
+      periodEnd ?? null,
+      fileId,
+      payrollNum(totalMiles),
+      payrollNum(totalFuelCents),
+      payrollNum(expensesCents),
+      now(),
+    ).lastInsertRowid;
+  notifyAdmins('payroll', `${req.user.name} submitted a trip sheet`, label ? String(label) : 'Payroll', 'payroll', req.user.id);
+  res.status(201).json(serializePayrollTrip(db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(id)));
+});
+
+driver.get('/payroll/trips', (req, res) => {
+  const rows = db.prepare('SELECT * FROM payroll_trips WHERE driverId = ? ORDER BY createdAt DESC, id DESC').all(req.user.id);
+  res.json(rows.map(serializePayrollTrip));
+});
+
+driver.get('/payroll/trips/:id', (req, res) => {
+  const trip = db.prepare('SELECT * FROM payroll_trips WHERE id = ? AND driverId = ?').get(req.params.id, req.user.id);
+  if (!trip) return err(res, 404, 'Trip not found');
+  res.json(serializePayrollTrip(trip));
+});
+
+// The driver approves the admin's final statement on his trip page.
+driver.post('/payroll/trips/:id/approve', (req, res) => {
+  const trip = db.prepare('SELECT * FROM payroll_trips WHERE id = ? AND driverId = ?').get(req.params.id, req.user.id);
+  if (!trip) return err(res, 404, 'Trip not found');
+  if (trip.status !== 'statement_uploaded') return err(res, 400, 'There is no statement waiting for your approval');
+  db.prepare("UPDATE payroll_trips SET status = 'approved', decidedAt = ? WHERE id = ?").run(now(), trip.id);
+  notifyAdmins('payroll', `${req.user.name} approved his statement`, trip.label || 'Payroll', 'payroll', trip.driverId);
+  res.json(serializePayrollTrip(db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(trip.id)));
+});
+
+// Rejection requires the driver's reason — dispatch reads it in the
+// portal, talks to him, and uploads a corrected statement.
+driver.post('/payroll/trips/:id/reject', (req, res) => {
+  const { reason } = req.body || {};
+  if (!reason || !String(reason).trim()) return err(res, 400, 'Say why you are rejecting the statement');
+  const trip = db.prepare('SELECT * FROM payroll_trips WHERE id = ? AND driverId = ?').get(req.params.id, req.user.id);
+  if (!trip) return err(res, 404, 'Trip not found');
+  if (trip.status !== 'statement_uploaded') return err(res, 400, 'There is no statement waiting for your approval');
+  db.prepare("UPDATE payroll_trips SET status = 'rejected', rejectReason = ?, decidedAt = ? WHERE id = ?")
+    .run(String(reason).trim().slice(0, 1000), now(), trip.id);
+  notifyAdmins('payroll', `${req.user.name} rejected his statement`, String(reason).trim().slice(0, 300), 'payroll', trip.driverId);
+  res.json(serializePayrollTrip(db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(trip.id)));
 });
 
 driver.post('/photo', upload.single('photo'), (req, res) => {
@@ -2032,6 +2230,176 @@ admin.get('/drivers', (_req, res) => {
   res.json(db.prepare("SELECT * FROM users WHERE role = 'driver' ORDER BY name").all().map(publicUser));
 });
 
+// One driver's My Loads statement (same payload the driver app gets) —
+// system math from his loads, deadhead legs included.
+admin.get('/drivers/:id/statement', async (req, res) => {
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.id);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  try {
+    res.json(await buildDriverStatement(driverUser.id));
+  } catch (e) {
+    console.error('admin statement failed', e);
+    return err(res, 500, 'Could not build the statement');
+  }
+});
+
+// Driver bank details for payroll (owner, 2026-11-19): where dispatch
+// sends his pay. Admin-editable; the full account number is never in
+// publicUser — it only travels through the Payroll endpoints.
+admin.post('/drivers/:id/bank', (req, res) => {
+  const driverUser = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(req.params.id);
+  if (!driverUser) return err(res, 404, 'Driver not found');
+  const { bankName, routingNumber, accountNumber } = req.body || {};
+  const clean = (v) => (typeof v === 'string' ? v.trim().slice(0, 80) : v == null ? null : null);
+  db.prepare('UPDATE users SET bankName = ?, bankRouting = ?, bankAccount = ? WHERE id = ?')
+    .run(clean(bankName), clean(routingNumber), clean(accountNumber), driverUser.id);
+  const u = db.prepare('SELECT bankName, bankRouting, bankAccount FROM users WHERE id = ?').get(driverUser.id);
+  res.json({ driverId: driverUser.id, bankName: u.bankName ?? null, routingNumber: u.bankRouting ?? null, accountNumber: u.bankAccount ?? null });
+});
+
+// ---------------------------------------------------------------------------
+// Payroll (admin side)
+// ---------------------------------------------------------------------------
+// Folder-list payload: every driver with his bank details and payroll
+// counts. Folders derive from the drivers list itself, so a new driver
+// login has a Payroll folder from day one.
+admin.get('/payroll/drivers', (_req, res) => {
+  const drivers = db.prepare("SELECT * FROM users WHERE role = 'driver' ORDER BY name").all();
+  res.json(
+    drivers.map((d) => {
+      const truck = db.prepare('SELECT * FROM trucks WHERE driverId = ?').get(d.id);
+      const trailer = db.prepare('SELECT * FROM trailers WHERE driverId = ?').get(d.id);
+      const counts = db
+        .prepare(
+          `SELECT
+             SUM(CASE WHEN status = 'received' THEN 1 ELSE 0 END) AS received,
+             SUM(CASE WHEN status = 'statement_uploaded' THEN 1 ELSE 0 END) AS awaitingDriver,
+             SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
+             SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+             SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paidCount,
+             COALESCE(SUM(CASE WHEN status = 'paid' THEN netPayCents ELSE 0 END), 0) AS paidTotalCents,
+             COUNT(*) AS trips
+           FROM payroll_trips WHERE driverId = ?`,
+        )
+        .get(d.id);
+      const pendingCount = (counts.received || 0) + (counts.awaitingDriver || 0) + (counts.approved || 0) + (counts.rejected || 0);
+      return {
+        ...publicUser(d),
+        truck: serializeTruck(truck),
+        trailer: serializeTrailer(trailer),
+        bank: { bankName: d.bankName ?? null, routingNumber: d.bankRouting ?? null, accountNumber: d.bankAccount ?? null },
+        payroll: {
+          trips: counts.trips || 0,
+          received: counts.received || 0,
+          awaitingDriver: counts.awaitingDriver || 0,
+          approved: counts.approved || 0,
+          rejected: counts.rejected || 0,
+          pendingCount,
+          paidCount: counts.paidCount || 0,
+          paidTotalCents: counts.paidTotalCents || 0,
+        },
+      };
+    }),
+  );
+});
+
+admin.get('/payroll/trips', (req, res) => {
+  const { driverId } = req.query;
+  const rows = driverId
+    ? db.prepare('SELECT * FROM payroll_trips WHERE driverId = ? ORDER BY createdAt DESC, id DESC').all(driverId)
+    : db.prepare('SELECT * FROM payroll_trips ORDER BY createdAt DESC, id DESC').all();
+  res.json(rows.map(serializePayrollTrip));
+});
+
+admin.get('/payroll/trips/:id', (req, res) => {
+  const trip = db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(req.params.id);
+  if (!trip) return err(res, 404, 'Trip not found');
+  res.json(serializePayrollTrip(trip));
+});
+
+// Read the staged statement file and hand back the detected numbers
+// for the three boxes (miles / fuel / expenses). Nothing is stored —
+// the admin checks the file, adjusts the numbers, and only the final
+// Upload statement call below saves anything.
+admin.post('/payroll/trips/:id/statement-detect', upload.single('file'), async (req, res) => {
+  const trip = db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(req.params.id);
+  if (!trip) return err(res, 404, 'Trip not found');
+  if (!req.file) return err(res, 400, 'file is required');
+  try {
+    const buf = fs.readFileSync(req.file.path);
+    res.json(await readTripSheetNumbers(buf));
+  } catch (e) {
+    console.error('statement-detect failed', e);
+    res.json({ totalMiles: null, totalFuelCents: null, expensesCents: null });
+  } finally {
+    try { fs.unlinkSync(req.file.path); } catch { /* already gone */ }
+  }
+});
+
+// Upload the final statement (PDF or picture) with the admin's
+// numbers. Any of the three boxes left blank is filled from the
+// file's own detected numbers. Net pay defaults to miles x $0.65 +
+// additions - deductions when the admin does not type it. The trip
+// goes to the driver for approval with a push.
+admin.post('/payroll/trips/:id/statement', upload.single('file'), async (req, res) => {
+  const trip = db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(req.params.id);
+  if (!trip) return err(res, 404, 'Trip not found');
+  if (trip.status !== 'received' && trip.status !== 'rejected')
+    return err(res, 400, 'This trip is not waiting for a statement');
+  if (!req.file) return err(res, 400, 'file is required');
+  const body = req.body || {};
+  let detected = null;
+  if (payrollNum(body.totalMiles) == null || payrollNum(body.totalFuelCents) == null || payrollNum(body.expensesCents) == null) {
+    try {
+      detected = await readTripSheetNumbers(fs.readFileSync(req.file.path));
+    } catch { /* detection is best-effort */ }
+  }
+  const pick = (v, d) => {
+    const n = payrollNum(v);
+    return n != null ? n : d != null ? d : null;
+  };
+  const miles = pick(body.totalMiles, detected && detected.totalMiles);
+  const fuelCents = pick(body.totalFuelCents, detected && detected.totalFuelCents);
+  const expensesCents = pick(body.expensesCents, detected && detected.expensesCents);
+  const additionsCents = payrollNum(body.additionsCents);
+  const deductionsCents = payrollNum(body.deductionsCents);
+  let netPayCents = payrollNum(body.netPayCents);
+  if (netPayCents == null && miles != null) {
+    netPayCents = Math.round(miles * DRIVER_PAY_PER_MILE_CENTS) + (additionsCents || 0) - (deductionsCents || 0);
+  }
+  const fileId = insertFileRow(req.file, 'payroll_statement', null, trip.driverId);
+  db.prepare(
+    `UPDATE payroll_trips SET statementFileId = ?, stmtMiles = ?, stmtFuelCents = ?, stmtExpensesCents = ?,
+       additionsCents = ?, deductionsCents = ?, netPayCents = ?, status = 'statement_uploaded', statementAt = ?, decidedAt = NULL
+     WHERE id = ?`,
+  ).run(fileId, miles, fuelCents, expensesCents, additionsCents, deductionsCents, netPayCents, now(), trip.id);
+  notifyDriver(
+    db,
+    trip.driverId,
+    'payroll_statement',
+    'Your statement has been uploaded',
+    'Please head to the app and view it.',
+  ).catch(() => {});
+  res.json(serializePayrollTrip(db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(trip.id)));
+});
+
+// Mark paid — only after the driver approved, and only once dispatch
+// has actually paid him outside the app.
+admin.post('/payroll/trips/:id/mark-paid', (req, res) => {
+  const trip = db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(req.params.id);
+  if (!trip) return err(res, 404, 'Trip not found');
+  if (trip.status !== 'approved') return err(res, 400, 'The driver has not approved this statement yet');
+  db.prepare("UPDATE payroll_trips SET status = 'paid', paidAt = ? WHERE id = ?").run(now(), trip.id);
+  notifyDriver(
+    db,
+    trip.driverId,
+    'payroll_paid',
+    'You got paid',
+    `Your ${trip.label || 'trip'} statement was marked paid.`,
+  ).catch(() => {});
+  res.json(serializePayrollTrip(db.prepare('SELECT * FROM payroll_trips WHERE id = ?').get(trip.id)));
+});
+
 // Admins & dispatchers — any admin can add another Admin Portal login.
 // Dispatchers sign in with email + password, same as the owner.
 admin.get('/admins', requireAdminManager, (_req, res) => {
@@ -2564,7 +2932,7 @@ function cashAllEntries() {
 // rule, 2026-11-17: this Trucks profit section uses receipts + mileage
 // pay; the company Cash Flow totals still run on the Pilot weekly bill
 // and the entered entries.
-function truckMonthlyFor(monthParam, entries, advanceRows) {
+function truckMonthlyFor(monthParam, entries, advanceRows, deadheadByDriver) {
   const inMonth = (e) => (e.date || '').startsWith(monthParam);
   const truckRows = db.prepare('SELECT * FROM trucks ORDER BY unitNumber').all();
   const loadsInMonth = truckRows.map((t) => (t.driverId ? db.prepare('SELECT COUNT(*) AS n FROM loads WHERE driverId = ? AND substr(pickupAt, 1, 7) = ?').get(t.driverId, monthParam).n : 0));
@@ -2586,12 +2954,16 @@ function truckMonthlyFor(monthParam, entries, advanceRows) {
     // (owner, 2026-11-17) — not only the ones with a rate con — so it
     // is summed over every load on the loads table for the month.
     const monthLoadMiles = t.driverId ? db.prepare("SELECT COALESCE(SUM(miles), 0) AS s FROM loads WHERE driverId = ? AND status != 'cancelled' AND miles > 0 AND substr(pickupAt, 1, 7) = ?").get(t.driverId, monthParam).s : 0;
-    const driverPayCents = Math.round(monthLoadMiles * DRIVER_PAY_PER_MILE_CENTS);
+    // Deadhead legs between the month's loads count in the driver's
+    // miles and pay too (owner, 2026-11-19) — precomputed by the
+    // caller because the routing lookup is async.
+    const monthDeadheadMiles = t.driverId && deadheadByDriver ? (deadheadByDriver.get(t.driverId) || 0) : 0;
+    const driverPayCents = Math.round((monthLoadMiles + monthDeadheadMiles) * DRIVER_PAY_PER_MILE_CENTS);
     const maintCents = sumCatM(['Maintenance', 'Repairs']);
     const knownM = new Set(['Driver pay', 'Maintenance', 'Repairs']);
     const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && inMonth(e) && !knownM.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
     const costs = fuelCents + driverPayCents + maintCents + otherCents;
-    return { truckId: t.id, unitNumber: t.unitNumber, trips, revenueCents, fuelCents, driverPayCents, maintCents, otherCents, profitCents: revenueCents - costs, loadsInMonth: loadsInMonth[ti] };
+    return { truckId: t.id, unitNumber: t.unitNumber, trips, revenueCents, fuelCents, driverPayCents, loadedMiles: monthLoadMiles, deadheadMiles: monthDeadheadMiles, maintCents, otherCents, profitCents: revenueCents - costs, loadsInMonth: loadsInMonth[ti] };
   });
   return { trucks, monthFuelTotalCents: trucks.reduce((s, t) => s + t.fuelCents, 0), totalLoadsMonth };
 }
@@ -2616,6 +2988,12 @@ admin.get('/cashflow', async (req, res) => {
     for (const l of needMiles) { try { await ensureLoadMiles(l); } catch { /* best effort */ } }
   } catch { /* miles column may not exist yet */ }
   const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
+  // Deadhead legs (delivery -> next pickup) count in driver miles and
+  // pay everywhere Trucks profit is shown (owner, 2026-11-19). The
+  // routing lookups are async, so both maps are built once here and
+  // handed to the synchronous profit builders below.
+  const deadheadMonthMap = await monthDeadheadByDriver(monthParam);
+  const deadheadAllTimeMap = await allTimeDeadheadByDriver();
   const rcTotal = db.prepare('SELECT COALESCE(SUM(rateCents), 0) AS s FROM rate_confirmations').get().s;
   const entryRows = db.prepare(
     `SELECT e.*, t.unitNumber AS truckUnit FROM cash_entries e
@@ -2705,14 +3083,15 @@ admin.get('/cashflow', async (req, res) => {
     // All-time driver pay likewise covers every load the driver did,
     // not only the rate-con trips listed above.
     const allLoadMiles = t.driverId ? db.prepare("SELECT COALESCE(SUM(miles), 0) AS s FROM loads WHERE driverId = ? AND status != 'cancelled' AND miles > 0").get(t.driverId).s : 0;
-    const driverPayCents = Math.round(allLoadMiles * DRIVER_PAY_PER_MILE_CENTS);
+    const allDeadheadMiles = t.driverId ? (deadheadAllTimeMap.get(t.driverId) || 0) : 0;
+    const driverPayCents = Math.round((allLoadMiles + allDeadheadMiles) * DRIVER_PAY_PER_MILE_CENTS);
     const maintCents = sumCat(['Maintenance', 'Repairs']);
     const known = new Set(['Driver pay', 'Maintenance', 'Repairs']);
     const otherCents = entries.filter((e) => e.direction === 'out' && e.truckId === t.id && !known.has(e.category) && !e.category.startsWith('Fuel')).reduce((s, e) => s + e.amountCents, 0);
     const costs = fuelCents + driverPayCents + maintCents + otherCents;
     return {
       truckId: t.id, unitNumber: t.unitNumber, trips,
-      revenueCents, fuelCents, driverPayCents, maintCents, otherCents,
+      revenueCents, fuelCents, driverPayCents, loadedMiles: allLoadMiles, deadheadMiles: allDeadheadMiles, maintCents, otherCents,
       profitCents: revenueCents - costs,
     };
   });
@@ -2734,7 +3113,7 @@ admin.get('/cashflow', async (req, res) => {
     totals.outGroups = [...m.entries()].map(([category, amountCents]) => ({ category, amountCents })).sort((a, b) => b.amountCents - a.amountCents);
   }
   const outCentsTotal = outCents + fixedAllTimeCents;
-  const tm = truckMonthlyFor(monthParam, agg.entries, advanceRows);
+  const tm = truckMonthlyFor(monthParam, agg.entries, advanceRows, deadheadMonthMap);
   const loads = db.prepare(
     `SELECT l.id, l.reference, u.name AS driverName FROM loads l
      LEFT JOIN users u ON u.id = l.driverId ORDER BY l.id DESC LIMIT 50`,
@@ -2750,9 +3129,10 @@ admin.get('/cashflow', async (req, res) => {
     trucks: trucksOut, loads, totals, truckMonthly: tm.trucks, monthFuelTotalCents: tm.monthFuelTotalCents,
   });
 });
-admin.get('/cashflow/report.csv', (req, res) => {
+admin.get('/cashflow/report.csv', async (req, res) => {
   const section = ['total', 'monthly', 'trucks'].includes(req.query.section) ? req.query.section : 'monthly';
   const monthParam = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
+  const deadheadMonthMap = await monthDeadheadByDriver(monthParam);
   const { entries, advanceRows, all } = cashAllEntries();
   const fixed = db.prepare('SELECT * FROM fixed_payments WHERE active = 1 ORDER BY category').all();
   const money = (c) => (Number(c || 0) / 100).toFixed(2);
@@ -2809,7 +3189,7 @@ admin.get('/cashflow/report.csv', (req, res) => {
     L.push(['Total out', money(outT)].map(q).join(','));
     L.push(['PROFIT', money(inT - outT)].map(q).join(','));
   } else {
-    const tm = truckMonthlyFor(monthParam, entries, advanceRows);
+    const tm = truckMonthlyFor(monthParam, entries, advanceRows, deadheadMonthMap);
     L.push(q('LXL Cash Flow — Per-truck — ' + monthParam));
     L.push(q('Fuel note: the Pilot weekly total for the month (' + money(tm.monthFuelTotalCents) + ') is split across trucks by their share of the month loads.'));
     L.push(['Truck', 'Revenue', 'Fuel', 'Driver pay', 'Maintenance and repairs', 'Other', 'Profit'].map(q).join(','));
@@ -3236,6 +3616,17 @@ admin.post('/documents', upload.single('file'), (req, res) => {
   const row = db
     .prepare('SELECT d.*, f.originalFilename, f.mimeType FROM documents d JOIN files f ON f.id = d.fileId WHERE d.id = ?')
     .get(id);
+  // A dispatch upload to the driver's load notifies him too (owner,
+  // 2026-11-19: notifications for everything, both ways).
+  if (load && load.driverId) {
+    notifyDriver(
+      db,
+      load.driverId,
+      'document',
+      'Dispatch added a document',
+      `${load.reference} — ${label || kind.replace(/_/g, ' ')}`,
+    ).catch(() => {});
+  }
   res.status(201).json(serializeDocument(row));
 });
 
@@ -3325,7 +3716,20 @@ admin.post('/loads/:id/status', (req, res) => {
       db.prepare('UPDATE loads SET status = ? WHERE id = ?').run(status, load.id);
     }
   });
-  res.json(serializeLoad(db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id)));
+  const updatedLoad = db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id);
+  // The driver hears about status changes dispatch makes (owner,
+  // 2026-11-19: every event notifies, both ways).
+  if (updatedLoad.driverId && updatedLoad.status !== load.status) {
+    const titles = { completed: 'Load completed', active: 'Load reopened', cancelled: 'Load cancelled' };
+    notifyDriver(
+      db,
+      updatedLoad.driverId,
+      'load_status',
+      titles[updatedLoad.status] || 'Load updated',
+      `Load ${updatedLoad.reference}: ${updatedLoad.pickupLocation} → ${updatedLoad.deliveryLocation}.`,
+    ).catch(() => {});
+  }
+  res.json(serializeLoad(updatedLoad));
 });
 
 // Edit a load (admin only): fixes typos like the LXL-2038499 pickup
@@ -3410,6 +3814,10 @@ admin.post('/loads/:id/edit', (req, res) => {
   if (reassignTo !== null) {
     // Tell the new driver (fire-and-forget — never blocks the save).
     notifyDriver(db, reassignTo, 'load_assigned', 'New load assigned', `Load ${updated.reference}: ${updated.pickupLocation} → ${updated.deliveryLocation}.`).catch(() => {});
+  } else if (updated.driverId && updated.status === 'active') {
+    // Same driver, changed details: he hears about the edit too
+    // (owner, 2026-11-19: notifications for everything, both ways).
+    notifyDriver(db, updated.driverId, 'load_updated', 'Load updated', `Load ${updated.reference}: ${updated.pickupLocation} → ${updated.deliveryLocation} — check the load for the new details.`).catch(() => {});
   }
   res.json(serializeLoad(updated));
 });
@@ -4275,6 +4683,170 @@ async function ensureLoadMiles(load) {
   }
   try { db.prepare('UPDATE loads SET miles = ? WHERE id = ?').run(miles != null && miles > 0 ? Math.round(miles * 10) / 10 : -1, load.id); } catch { /* miles column may not exist yet */ }
   return miles != null && miles > 0 ? Math.round(miles * 10) / 10 : null;
+}
+
+// ---------------------------------------------------------------------------
+// Deadhead miles + the My Loads statement (owner, 2026-11-19)
+// ---------------------------------------------------------------------------
+// Road miles between two coordinates: OSRM public routing first,
+// straight-line x 1.18 as the fallback — the same recipe ensureLoadMiles
+// uses for a load's own miles.
+async function roadMilesBetweenCoords(a, b) {
+  try {
+    const r = await fetch('https://router.project-osrm.org/route/v1/driving/' + a.lng + ',' + a.lat + ';' + b.lng + ',' + b.lat + '?overview=false', { signal: AbortSignal.timeout(8000) });
+    if (r.ok) {
+      const j = await r.json();
+      const dist = j && j.routes && j.routes[0] && j.routes[0].distance;
+      if (Number.isFinite(dist) && dist > 0) return Math.round((dist / 1609.344) * 10) / 10;
+    }
+  } catch { /* fall through to the straight-line estimate */ }
+  const m = distanceMeters(a.lat, a.lng, b.lat, b.lng);
+  if (Number.isFinite(m) && m > 0) return Math.round(((m / 1609.344) * 1.18) * 10) / 10;
+  return null;
+}
+
+// Deadhead miles for one pair: from a load's delivery to the same
+// driver's next pickup. Cached in deadhead_legs (miles = -1 when the
+// route cannot be resolved, so the pair is not recomputed on every
+// request). The two loads' stored coordinates are used when present;
+// milesCoords geocodes the city/address otherwise.
+async function ensureDeadheadMiles(fromLoad, toLoad) {
+  try {
+    const cached = db.prepare('SELECT miles FROM deadhead_legs WHERE fromLoadId = ? AND toLoadId = ?').get(fromLoad.id, toLoad.id);
+    if (cached) return typeof cached.miles === 'number' && cached.miles > 0 ? cached.miles : null;
+  } catch { /* table may not exist yet */ }
+  const from = await milesCoords(fromLoad, 'delivery');
+  const to = await milesCoords(toLoad, 'pickup');
+  let miles = null;
+  if (from && to) miles = await roadMilesBetweenCoords(from, to);
+  try {
+    db.prepare('INSERT OR REPLACE INTO deadhead_legs (fromLoadId, toLoadId, miles, createdAt) VALUES (?, ?, ?, ?)')
+      .run(fromLoad.id, toLoad.id, miles != null && miles > 0 ? miles : -1, now());
+  } catch { /* cache is best-effort */ }
+  return miles != null && miles > 0 ? miles : null;
+}
+
+// A driver's loads in strict pickup order (earliest first), optionally
+// restricted to one month (by pickup date) and a status set.
+function loadsInPickupOrder(driverId, { month = null, statuses = ['completed'] } = {}) {
+  const statusList = statuses.map(() => '?').join(',');
+  let sql = `SELECT * FROM loads WHERE driverId = ? AND status IN (${statusList})`;
+  const args = [driverId, ...statuses];
+  if (month) {
+    sql += ' AND substr(pickupAt, 1, 7) = ?';
+    args.push(month);
+  }
+  sql += ' ORDER BY pickupAt ASC, id ASC';
+  return db.prepare(sql).all(...args);
+}
+
+// The deadhead legs between consecutive loads of an ordered list.
+// A leg whose route cannot be resolved comes back with miles: null —
+// the statement lists it openly instead of hiding it, and totals
+// count it as 0.
+async function deadheadLegsFor(orderedLoads) {
+  const legs = [];
+  for (let i = 0; i + 1 < orderedLoads.length; i++) {
+    const fromLoad = orderedLoads[i];
+    const toLoad = orderedLoads[i + 1];
+    const miles = await ensureDeadheadMiles(fromLoad, toLoad);
+    legs.push({ fromLoad, toLoad, miles });
+  }
+  return legs;
+}
+
+const sumLegMiles = (legs) => Math.round(legs.reduce((s, l) => s + (l.miles || 0), 0) * 10) / 10;
+
+// Deadhead miles per driver for one month (Trucks profit): legs
+// between consecutive non-cancelled loads picked up that month.
+async function monthDeadheadByDriver(monthParam) {
+  const out = new Map();
+  const driverIds = db.prepare("SELECT DISTINCT driverId FROM loads WHERE driverId IS NOT NULL AND status != 'cancelled' AND substr(pickupAt, 1, 7) = ?").all(monthParam).map((r) => r.driverId);
+  for (const driverId of driverIds) {
+    const loads = loadsInPickupOrder(driverId, { month: monthParam, statuses: ['active', 'completed'] });
+    out.set(driverId, sumLegMiles(await deadheadLegsFor(loads)));
+  }
+  return out;
+}
+
+// Deadhead miles per driver across all his non-cancelled loads.
+async function allTimeDeadheadByDriver() {
+  const out = new Map();
+  const driverIds = db.prepare("SELECT DISTINCT driverId FROM loads WHERE driverId IS NOT NULL AND status != 'cancelled'").all().map((r) => r.driverId);
+  for (const driverId of driverIds) {
+    const loads = loadsInPickupOrder(driverId, { statuses: ['active', 'completed'] });
+    out.set(driverId, sumLegMiles(await deadheadLegsFor(loads)));
+  }
+  return out;
+}
+
+// The My Loads statement for one driver: per month, his completed
+// loads in strict pickup order (earliest first) with a deadhead entry
+// between each delivery and the next pickup. Month miles = loaded +
+// deadhead; pay = total miles x $0.65. This is the SYSTEM's math from
+// the loads themselves — never the driver's payroll trip sheet (the
+// two never mix, owner's rule 2026-11-19).
+async function buildDriverStatement(driverId) {
+  const initial = db.prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'completed' ORDER BY pickupAt ASC, id ASC").all(driverId);
+  for (const l of initial) {
+    if (!(typeof l.miles === 'number' && l.miles > 0)) {
+      try { await ensureLoadMiles(l); } catch { /* best effort */ }
+    }
+  }
+  const rows = db.prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'completed' ORDER BY pickupAt ASC, id ASC").all(driverId);
+  const byMonth = new Map();
+  for (const l of rows) {
+    const month = String(l.pickupAt || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) continue;
+    if (!byMonth.has(month)) byMonth.set(month, []);
+    byMonth.get(month).push(l);
+  }
+  const months = [];
+  for (const [month, loads] of byMonth) {
+    const legs = await deadheadLegsFor(loads);
+    const entries = [];
+    let loadedMiles = 0;
+    let deadheadMiles = 0;
+    loads.forEach((l, i) => {
+      const miles = typeof l.miles === 'number' && l.miles > 0 ? l.miles : null;
+      if (miles) loadedMiles += miles;
+      entries.push({
+        type: 'load',
+        load: serializeLoad(l),
+        miles,
+        payCents: miles ? Math.round(miles * DRIVER_PAY_PER_MILE_CENTS) : null,
+      });
+      const leg = legs[i];
+      if (leg) {
+        if (leg.miles) deadheadMiles += leg.miles;
+        entries.push({
+          type: 'deadhead',
+          fromLoadId: leg.fromLoad.id,
+          toLoadId: leg.toLoad.id,
+          fromReference: leg.fromLoad.reference,
+          toReference: leg.toLoad.reference,
+          fromLocation: leg.fromLoad.deliveryLocation,
+          toLocation: leg.toLoad.pickupLocation,
+          miles: leg.miles,
+          payCents: leg.miles ? Math.round(leg.miles * DRIVER_PAY_PER_MILE_CENTS) : null,
+        });
+      }
+    });
+    loadedMiles = Math.round(loadedMiles * 10) / 10;
+    deadheadMiles = Math.round(deadheadMiles * 10) / 10;
+    const totalMiles = Math.round((loadedMiles + deadheadMiles) * 10) / 10;
+    months.push({
+      month,
+      entries,
+      loadsCompleted: loads.length,
+      loadedMiles,
+      deadheadMiles,
+      totalMiles,
+      payCents: Math.round(totalMiles * DRIVER_PAY_PER_MILE_CENTS),
+    });
+  }
+  months.sort((a, b) => (a.month < b.month ? 1 : -1));
+  return { driverId, months };
 }
 
 function loadFuelReceiptCents(loadId) {
