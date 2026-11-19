@@ -5225,6 +5225,12 @@ function detectRateCents(text) {
     /FLAT\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s+(?:\w+\s+)?PAY\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    // Rehmann-style load table (owner, 2026-11-19): the rate sits in an
+    // "Amount" column with no $ sign and no TOTAL label — the flattened
+    // row reads "Weight Equipment Amount 1,080 Juice 42,085 V/R
+    // 2,950.00". The weight prints without decimals, so the first
+    // decimal amount after the header is the rate.
+    /WEIGHT\s+EQUIPMENT\s+AMOUNT\s+[\d,]+\s+.{0,60}?([\d,]+\.\d{2})/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
@@ -5255,6 +5261,8 @@ function detectRateCentsDetailed(text) {
     /FLAT\s+RATE\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s+(?:\w+\s+)?PAY\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
     /TOTAL\s*:?\s*(?:USD\s*)?\$?\s*([\d,]+\.\d{2})/i,
+    // Rehmann-style "Amount" column in the load table — see detectRateCents.
+    /WEIGHT\s+EQUIPMENT\s+AMOUNT\s+[\d,]+\s+.{0,60}?([\d,]+\.\d{2})/i,
   ];
   for (const re of patterns) {
     const m = re.exec(text);
