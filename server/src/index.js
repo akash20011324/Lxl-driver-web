@@ -9452,30 +9452,76 @@ app.use('/api/admin', admin);
 // ---------------------------------------------------------------------------
 // Files — token required; caller must own the file or be an admin.
 // ---------------------------------------------------------------------------
-app.get('/files/:id', auth, (req, res) => {
+// The one access rule for a file, shared by the file route itself and by
+// the download-token mint below: admins reach everything; a driver only
+// their own files, their units' equipment documents, and their own
+// profile photo.
+function canAccessFile(user, file) {
+  if (user.role === 'admin') return true;
+  if (file.driverId === user.id) return true;
+  if (file.ownerType === 'equipment') {
+    const doc = db.prepare('SELECT * FROM equipment_documents WHERE fileId = ?').get(file.id);
+    if (doc) {
+      const table = doc.unitType === 'truck' ? 'trucks' : 'trailers';
+      const unit = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(doc.unitId);
+      if (unit && unit.driverId === user.id) return true;
+    }
+  }
+  // The caller's own profile photo: the files row can predate the
+  // current account (photo uploaded by a very old build, account
+  // later recreated), leaving the row's driverId pointing at a dead
+  // user id. users.photoUrl pointing at this exact file proves the
+  // photo is the caller's own, so allow it.
+  const me = db.prepare('SELECT photoUrl FROM users WHERE id = ?').get(user.id);
+  return !!(me && me.photoUrl === `/files/${file.id}`);
+}
+
+// One-time download links. A portal Download click cannot ride a plain
+// <a href> — file auth is a Bearer header — and the old fallback
+// (fetch → blob → synthetic anchor click) does not actually save the
+// file in every browser: Safari drops the programmatic blob download
+// while View, which opens the same blob in a tab, works (owner report,
+// 2026-11-19: every rate confirmation views fine but won't download).
+// So the portal mints a single-use token bound to one file (60 s) and
+// navigates to /files/:id?download=1&dt=… — the browser then saves the
+// server's attachment response natively, with its own download UI.
+const fileDownloadTokens = new Map(); // token -> { fileId, userId, expiresAt }
+function pruneFileDownloadTokens() {
+  const t = Date.now();
+  for (const [k, v] of fileDownloadTokens) if (v.expiresAt <= t) fileDownloadTokens.delete(k);
+}
+
+app.post('/files/:id/download-token', auth, (req, res) => {
   const file = getFileRow(req.params.id);
   if (!file) return err(res, 404, 'File not found');
-  if (req.user.role !== 'admin') {
-    let allowed = file.driverId === req.user.id;
-    if (!allowed && file.ownerType === 'equipment') {
-      const doc = db.prepare('SELECT * FROM equipment_documents WHERE fileId = ?').get(file.id);
-      if (doc) {
-        const table = doc.unitType === 'truck' ? 'trucks' : 'trailers';
-        const unit = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(doc.unitId);
-        allowed = !!unit && unit.driverId === req.user.id;
-      }
+  if (!canAccessFile(req.user, file)) return err(res, 403, 'Forbidden');
+  pruneFileDownloadTokens();
+  const token = crypto.randomBytes(24).toString('base64url');
+  fileDownloadTokens.set(token, { fileId: file.id, userId: req.user.id, expiresAt: Date.now() + 60 * 1000 });
+  res.json({ downloadUrl: `/files/${file.id}?download=1&dt=${token}` });
+});
+
+// Bearer session (via auth) OR a one-time download token from the mint
+// above. A presented token is consumed whether it checks out or not,
+// so a link cannot be replayed or probed.
+function fileAuth(req, res, next) {
+  const dt = req.query.dt;
+  if (dt) {
+    const rec = fileDownloadTokens.get(String(dt));
+    if (rec) fileDownloadTokens.delete(String(dt));
+    if (rec && rec.fileId === Number(req.params.id) && rec.expiresAt > Date.now()) {
+      const u = db.prepare('SELECT * FROM users WHERE id = ?').get(rec.userId);
+      if (u && u.active) { req.user = u; return next(); }
     }
-    if (!allowed) {
-      // The caller's own profile photo: the files row can predate the
-      // current account (photo uploaded by a very old build, account
-      // later recreated), leaving the row's driverId pointing at a dead
-      // user id. users.photoUrl pointing at this exact file proves the
-      // photo is the caller's own, so allow it.
-      const me = db.prepare('SELECT photoUrl FROM users WHERE id = ?').get(req.user.id);
-      if (me && me.photoUrl === `/files/${file.id}`) allowed = true;
-    }
-    if (!allowed) return err(res, 403, 'Forbidden');
+    return err(res, 401, 'Authentication required');
   }
+  return auth(req, res, next);
+}
+
+app.get('/files/:id', fileAuth, (req, res) => {
+  const file = getFileRow(req.params.id);
+  if (!file) return err(res, 404, 'File not found');
+  if (!canAccessFile(req.user, file)) return err(res, 403, 'Forbidden');
   const filePath = path.join(UPLOADS_DIR, file.storedFilename);
   if (!fs.existsSync(filePath)) return err(res, 404, 'File not found');
   // Sniff the real type from the file's magic bytes. Photos uploaded by

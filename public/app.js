@@ -540,6 +540,31 @@ async function viewUnitDocuments(main) {
 
 async function downloadFile(url, filename, view, mimeType) {
   try {
+    if (!view) {
+      // Download must end in a native browser save of the server's
+      // attachment response. The fetch → blob → synthetic-click route
+      // further down silently fails to save in some browsers (Safari
+      // drops programmatic blob downloads) even though the identical
+      // fetch succeeds for View — the owner hit exactly that on every
+      // rate confirmation. File auth is a Bearer header a plain
+      // navigation cannot send, so mint a one-time, file-bound
+      // download link and navigate to it instead. Any failure falls
+      // back to the blob route below.
+      const m = /\/files\/(\d+)/.exec(String(url));
+      if (m) {
+        try {
+          const r = await api('/files/' + m[1] + '/download-token', { method: 'POST' });
+          if (r && r.downloadUrl) {
+            const a = document.createElement('a');
+            a.href = r.downloadUrl;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            return;
+          }
+        } catch { /* fall back to the blob download below */ }
+      }
+    }
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } });
     if (res.status === 401) { signOutLocal(); throw new Error('Session expired — please sign in again.'); }
     if (!res.ok) throw new Error('Download failed (' + res.status + ')');
