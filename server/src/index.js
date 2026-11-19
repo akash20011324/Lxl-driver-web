@@ -297,6 +297,33 @@ function notifyAdmins(type, title, body, view, refId) {
   } catch (e) {
     console.error('[notify] admin notification failed:', e.message);
   }
+  // Owner's rule (2026-11-19): portal notifications also pop up on the
+  // admin's phone. Admins can't sign into the app, so mirror the event
+  // as a push to any DRIVER account that belongs to an admin — matched
+  // by the same phone number or email (in this fleet that is the
+  // owner's own driver account). Fire-and-forget; never throws.
+  try {
+    const targets = db
+      .prepare(
+        `SELECT DISTINCT d.id AS id FROM users d
+         WHERE d.role = 'driver' AND d.active = 1 AND d.pushToken IS NOT NULL
+           AND (
+             (d.phoneNormalized IS NOT NULL AND d.phoneNormalized IN
+               (SELECT phoneNormalized FROM users WHERE role = 'admin' AND phoneNormalized IS NOT NULL))
+             OR (d.email IS NOT NULL AND LOWER(d.email) IN
+               (SELECT LOWER(email) FROM users WHERE role = 'admin' AND email IS NOT NULL))
+           )`,
+      )
+      .all();
+    for (const t of targets) {
+      notifyDriver(db, t.id, type, title, body ?? '').catch(() => {});
+    }
+    if (targets.length) {
+      console.log('[notify] admin notification mirrored as push to driver account(s): ' + targets.map((t) => t.id).join(', '));
+    }
+  } catch (e) {
+    console.error('[notify] admin push mirror failed:', e.message);
+  }
 }
 
 function serializeAdminNotification(n) {
