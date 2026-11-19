@@ -942,6 +942,7 @@ async function pollAdminNotifications() {
   try { data = await api('/api/admin/notifications'); } catch { return; }
   if (!data) return;
   bellData = data;
+  maybeShowNotifBanner();
   const bb = document.getElementById('bellBadge');
   if (bb) {
     bb.hidden = !(data.unread > 0);
@@ -4802,7 +4803,11 @@ async function viewRateCons(main) {
     '<div class="form-row">' +
     '<div class="field"><label>File *</label><input type="file" name="file" id="rcFile" required></div>' +
     '<div class="field"><label>Load</label><select name="loadId" id="rcLoad"><option value="">✨ Create the load automatically from this RC</option>' + loadOptions + '</select></div>' +
-    '</div><p class="small muted">Auto: the system reads the RC and creates the load — LXL reference, pickup and delivery city/state, driver from the RC — and the file is renamed to <code id="rcPreview"></code>. Or pick an existing load to attach it to.</p>' +
+    '</div>' +
+    '<div class="form-row">' +
+    '<div class="field"><label>Amount</label><input type="number" id="rcAmount" min="0" step="0.01" placeholder="e.g. 2400.00 — or leave blank and the system reads it"></div>' +
+    '</div><p class="small muted" id="rcAmountHint" style="display:none">Detected from the RC — correct it if it\'s wrong.</p>' +
+    '<p class="small muted">Auto: the system reads the RC and creates the load — LXL reference, pickup and delivery city/state, driver from the RC — and the file is renamed to <code id="rcPreview"></code>. Or pick an existing load to attach it to.</p>' +
     '<div class="form-actions"><button class="btn" type="submit">Upload</button></div>' +
     '<p id="rcResult" class="small mt"></p></form>' +
     '</div>' +
