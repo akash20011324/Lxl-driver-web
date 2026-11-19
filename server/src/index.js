@@ -376,6 +376,20 @@ function serializeNotification(n) {
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
+// The mobile app is for DRIVERS ONLY (owner's rule, 2026-11-18): every admin
+// account — the main admin, admins and dispatchers, including any admin added
+// in the portal later — signs in on the web portal, never in the app. The app
+// identifies itself through its native networking stack (iOS CFNetwork /
+// Android okhttp, neither of which appears in a browser user-agent) or the
+// explicit x-lxl-client: app header the app sends.
+function isAppClient(req) {
+  if (String(req.headers['x-lxl-client'] || '') === 'app') return true;
+  const ua = String(req.headers['user-agent'] || '');
+  return /CFNetwork|okhttp/i.test(ua) && !/Mozilla/i.test(ua);
+}
+const ADMIN_APP_BLOCK_MESSAGE =
+  "Admin accounts can't use the app — please use the web portal.";
+
 function auth(req, res, next) {
   const h = req.headers.authorization || '';
   const m = /^Bearer\s+(.+)$/.exec(h);
@@ -385,6 +399,10 @@ function auth(req, res, next) {
     .get(m[1]);
   if (!row) return err(res, 401, 'Invalid or expired session');
   if (!row.active) return err(res, 403, 'Account is deactivated');
+  // Drivers-only app: an admin session is refused when the request comes
+  // from the mobile app (covers admins who signed in before this rule).
+  if (row.role === 'admin' && isAppClient(req))
+    return err(res, 403, ADMIN_APP_BLOCK_MESSAGE);
   req.user = row;
   req.token = m[1];
   next();
@@ -537,6 +555,10 @@ app.post('/api/auth/login', (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.passwordHash))
     return err(res, 401, 'Invalid phone number, email or password');
   if (!user.active) return err(res, 403, 'Account is deactivated');
+  // Drivers-only app: admins (any kind, incl. future portal-added admins)
+  // are refused app sign-in; the same credentials work on the web portal.
+  if (user.role === 'admin' && isAppClient(req))
+    return err(res, 403, ADMIN_APP_BLOCK_MESSAGE);
   // A driver signing in is heading out: their truck and trailer move to
   // On the Road on their own (owner's rule, 2026-11-15).
   if (user.role === 'driver') {
