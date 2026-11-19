@@ -7780,16 +7780,12 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
                 if (counts.heldOutSubjects.length < 10) counts.heldOutSubjects.push(subject + ' (no load number found)');
                 break;
               }
-              // Owner's rule (2026-11-16, enforced 2026-11-17): a rate
-              // confirmation is imported ONLY if its load number appears
-              // on an OTR paid schedule. Before this check the import let
-              // off-schedule mail in "on your say-so", which re-created
-              // cancelled/fake/dispatch-sheet rows the owner had removed.
-              if (!onSchedule && run.paidRefs && run.paidRefs.size > 0) {
-                counts.heldOut += 1;
-                if (counts.heldOutSubjects.length < 10) counts.heldOutSubjects.push(subject + ' (not on any OTR schedule)');
-                break;
-              }
+              // Owner's CORRECTED rule (2026-11-19): the OTR paid
+              // schedule is only for Cash Flow — it is NOT a gate for
+              // rate confirmations. Every genuine RC imports from the
+              // emails without it; one that is not on a schedule is
+              // only tallied as `unverified` after import below. (The
+              // 2026-11-16/17 schedule hold-out was removed.)
               let load = null;
               if (f.lxlRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(f.lxlRef);
               if (!load && f.loadRef) load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(lxlLoadRef(f.loadRef));
