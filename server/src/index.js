@@ -7814,6 +7814,18 @@ function saveRcImportRun(run) {
     .run(run.id, run.startedAt, JSON.stringify([...run.paidRefs]), JSON.stringify([...run.scheduleHashes]), JSON.stringify([...run.examined]), run.schedules, JSON.stringify(run.mailboxErrors), JSON.stringify(run.mailboxes), run.cursorJson || null, run.epoch || RC_IMPORT_EPOCH);
 }
 const RC_IMPORT_EPOCH = 'ocr1-2026-11-16';
+// Owner's RECENT-ONLY rule (2026-11-19): the bulk RC import pulls
+// only the recent/latest rate confirmations arriving in the
+// mailboxes — never a full-history sweep. Old mailbox RCs include
+// cancelled / not-legit loads the owner then had to delete by hand.
+// An email counts as recent when it arrived within the last
+// RC_IMPORT_RECENT_DAYS days of the import run.
+const RC_IMPORT_RECENT_DAYS = 7;
+function rcMessageIsRecent(receivedDateTime, nowMs = Date.now()) {
+  const t = Date.parse(receivedDateTime || '');
+  if (!Number.isFinite(t)) return false;
+  return nowMs - t <= RC_IMPORT_RECENT_DAYS * 24 * 60 * 60 * 1000;
+}
 function rcImportRun(runId) {
   if (!runId) {
     const latest = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
@@ -7862,7 +7874,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
     const run = rcImportRun(state.runId);
     if (!body.cursor && run.savedCursor && run.savedCursor.phase) state = { ...run.savedCursor, runId: run.id };
     state.runId = run.id;
-    const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [], bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0, bolsUnmatchedSubjects: [] };
+    const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, skippedOld: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [], bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0, bolsUnmatchedSubjects: [] };
     const deadline = Date.now() + 40000;
     let processed = 0;
     const finish = (done) => {
@@ -7903,6 +7915,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
       const page = await outlookGraph(accessToken, pageUrl);
       const messages = page.value || [];
       let budgetHit = false;
+      let hitOldBoundary = false;
       for (const m of messages) {
         if (Date.now() >= deadline || processed >= 10) { budgetHit = true; break; }
         const subject = m.subject || '';
@@ -7987,6 +8000,18 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         } else {
           if (!m.hasAttachments) continue;
           if (run.examined.has(exKey)) continue;
+          if (!rcMessageIsRecent(m.receivedDateTime)) {
+            // RECENT-ONLY (owner, 2026-11-19): this email arrived
+            // more than RC_IMPORT_RECENT_DAYS ago — it is never
+            // imported, only tallied as skippedOld. Pages are
+            // newest-first, so every later message in this mailbox
+            // is older still: hitOldBoundary stops the paging below
+            // instead of sweeping the mailbox's whole history.
+            run.examined.add(exKey);
+            counts.skippedOld += 1;
+            hitOldBoundary = true;
+            continue;
+          }
           if (!/rate|confirm|load|tender|booking|signed|agreement|\d{5,}/i.test(subject)) { run.examined.add(exKey); counts.notRc += 1; continue; }
           run.examined.add(exKey);
           if (db.prepare('SELECT id FROM rate_confirmations WHERE outlookMessageId = ?').get(m.id)) { counts.alreadyHave += 1; continue; }
@@ -8081,8 +8106,17 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         }
       }
       if (budgetHit) return finish(false); // re-fetch this page next call; examined-set + dedupe make it harmless
-      state.link = page['@odata.nextLink'] || null;
-      if (!state.link) state.m += 1;
+      if (state.phase === 'rc' && hitOldBoundary) {
+        // RECENT-ONLY: the rc phase reached emails older than the
+        // window and the mailbox is paged newest-first, so the rest
+        // of it is older still — stop paging this mailbox instead of
+        // sweeping its full history.
+        state.link = null;
+        state.m += 1;
+      } else {
+        state.link = page['@odata.nextLink'] || null;
+        if (!state.link) state.m += 1;
+      }
     }
     return finish(false);
   } catch (e) {
