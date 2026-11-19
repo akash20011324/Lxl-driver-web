@@ -7819,8 +7819,9 @@ const RC_IMPORT_EPOCH = 'ocr1-2026-11-16';
 // mailboxes — never a full-history sweep. Old mailbox RCs include
 // cancelled / not-legit loads the owner then had to delete by hand.
 // An email counts as recent when it arrived within the last
-// RC_IMPORT_RECENT_DAYS days of the import run.
-const RC_IMPORT_RECENT_DAYS = 7;
+// RC_IMPORT_RECENT_DAYS days of the import run (the owner first set
+// a 7-day window, then corrected it to 3 days on 2026-11-19).
+const RC_IMPORT_RECENT_DAYS = 3;
 function rcMessageIsRecent(receivedDateTime, nowMs = Date.now()) {
   const t = Date.parse(receivedDateTime || '');
   if (!Number.isFinite(t)) return false;
@@ -7863,16 +7864,26 @@ function rcImportRun(runId) {
   return run;
 }
 
-admin.post('/rate-confirmations/import-all', async (req, res) => {
+// One budgeted step of the bulk RC import state machine (sched ->
+// rc -> bol across every connected mailbox). This is the single
+// internal entry point shared by the admin route below — which the
+// portal drives one step per HTTP call — and the daily scheduler
+// further down, which drives it in-process until the run completes.
+// Steps are single-flight: rcImportStepRunning makes a step requested
+// mid-step return { busy: true } without touching any state, so the
+// route and the scheduler can never execute the import in parallel.
+// rawState is a parsed cursor object (or null); resumeSaved mirrors
+// the route's no-cursor call — resume the persisted run's saved
+// cursor instead of starting over.
+let rcImportStepRunning = false;
+async function runRcImportStep(rawState, { resumeSaved = false } = {}) {
+  if (rcImportStepRunning) return { busy: true };
+  rcImportStepRunning = true;
   try {
-    const body = req.body || {};
-    let state = null;
-    if (body.cursor) {
-      try { state = JSON.parse(Buffer.from(String(body.cursor), 'base64url').toString('utf8')); } catch { state = null; }
-    }
-    if (!state || typeof state !== 'object' || !state.phase) state = { runId: null, phase: 'sched', m: 0, link: null };
+    let state = rawState && typeof rawState === 'object' && rawState.phase ? rawState : null;
+    if (!state) state = { runId: null, phase: 'sched', m: 0, link: null };
     const run = rcImportRun(state.runId);
-    if (!body.cursor && run.savedCursor && run.savedCursor.phase) state = { ...run.savedCursor, runId: run.id };
+    if (resumeSaved && run.savedCursor && run.savedCursor.phase) state = { ...run.savedCursor, runId: run.id };
     state.runId = run.id;
     const counts = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, skippedOld: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [], bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0, bolsUnmatchedSubjects: [] };
     const deadline = Date.now() + 40000;
@@ -7881,7 +7892,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
       const nextCursor = done ? null : Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
       if (done) db.prepare('DELETE FROM rc_import_runs WHERE id = ?').run(run.id);
       else { run.cursorJson = JSON.stringify(state); saveRcImportRun(run); }
-      res.json({
+      return {
         ...counts,
         phase: state.phase,
         mailboxes: run.mailboxes.map((u) => u.outlookEmail || u.name),
@@ -7892,7 +7903,7 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
         paidLoads: run.paidRefs.size,
         nextCursor,
         done,
-      });
+      };
     };
     while (Date.now() < deadline) {
       if (state.m >= run.mailboxes.length) {
@@ -8119,12 +8130,137 @@ admin.post('/rate-confirmations/import-all', async (req, res) => {
       }
     }
     return finish(false);
+  } finally {
+    rcImportStepRunning = false;
+  }
+}
+
+admin.post('/rate-confirmations/import-all', async (req, res) => {
+  try {
+    const body = req.body || {};
+    let state = null;
+    if (body.cursor) {
+      try { state = JSON.parse(Buffer.from(String(body.cursor), 'base64url').toString('utf8')); } catch { state = null; }
+    }
+    const step = await runRcImportStep(state, { resumeSaved: !body.cursor });
+    if (step.busy) {
+      // A step is executing this instant (another admin call, or the
+      // daily scheduler driving the same run in-process). Answer with
+      // a no-progress step that hands the client back its position —
+      // its driver loop simply calls again; nothing was touched. The
+      // echoed cursor is the client's own when it sent one, else the
+      // persisted run's saved cursor, else a fresh state.
+      const savedRow = db.prepare('SELECT cursor FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
+      let echoState = state && state.phase ? state : null;
+      if (!echoState && savedRow && savedRow.cursor) { try { echoState = JSON.parse(savedRow.cursor); } catch { echoState = null; } }
+      if (!echoState || !echoState.phase) echoState = { runId: null, phase: 'sched', m: 0, link: null };
+      return res.json({
+        imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, skippedOld: 0, heldOut: 0, skippedSubjects: [], heldOutSubjects: [], bolsAdded: 0, bolsDuplicate: 0, bolsUnmatched: 0, bolsUnmatchedSubjects: [],
+        phase: echoState.phase,
+        mailboxes: [],
+        mailboxErrors: [],
+        lastSkip: '',
+        nextCursor: Buffer.from(JSON.stringify(echoState), 'utf8').toString('base64url'),
+        done: false,
+        busy: true,
+      });
+    }
+    return res.json(step);
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
     console.error('ratecon import-all failed', e);
     return err(res, 500, 'Import failed — try again');
   }
 });
+
+// ---------------------------------------------------------------------------
+// Daily automatic RC import (owner, 2026-11-19): the server checks the
+// connected mailboxes BY ITSELF once a day — at ~06:00 America/Chicago
+// — and imports the recent rate confirmations through the very same
+// import-all machinery above: same phases, blocklist, dedupe, 3-day
+// recency, no OTR gate, and the assignment + admin-notification
+// behavior. No admin session and no manual trigger are involved — the
+// scheduler drives runRcImportStep in-process until the run completes.
+//
+// Overlap safety: steps are single-flight (a step requested mid-step
+// returns { busy: true } and this driver waits), and the run itself
+// is the persisted, resumable state machine — so when a run is
+// already in progress (an admin importing from the portal, or an
+// earlier daily run cut short by a deploy), the daily driver
+// CONTINUES that run from its saved cursor instead of starting a
+// parallel one. If the portal finishes the run between this driver's
+// steps, the run row disappears and the driver treats that as
+// completion rather than starting a second run.
+//
+// When it fires: maybeRunDailyRcImport is called on boot and then
+// every 30 minutes (the Relay sync pattern). It starts the import
+// only when the Chicago time is at/after RC_DAILY_IMPORT_HOUR AND the
+// persisted last-daily date (meta) is not today — so a boot/deploy
+// fires ONLY as a catch-up when today's run was missed, and a normal
+// day sees exactly one run, at ~06:00 Chicago.
+// ---------------------------------------------------------------------------
+const RC_DAILY_IMPORT_HOUR = (() => { const h = Number(process.env.RC_DAILY_IMPORT_HOUR); return Number.isFinite(h) && h >= 0 ? h : 6; })();
+const RC_DAILY_IMPORT_CHECK_MS = 30 * 60 * 1000;
+const RC_IMPORT_LAST_DAILY_KEY = 'rc_import_last_daily_date';
+
+function rcChicagoNow(nowMs = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(nowMs));
+  const part = (type) => (parts.find((p) => p.type === type) || {}).value || '';
+  return { date: `${part('year')}-${part('month')}-${part('day')}`, hour: Number(part('hour')) % 24 };
+}
+
+function rcDailyImportDue(nowMs = Date.now()) {
+  const { date, hour } = rcChicagoNow(nowMs);
+  if (hour < RC_DAILY_IMPORT_HOUR) return false;
+  return getMeta(db, RC_IMPORT_LAST_DAILY_KEY) !== date;
+}
+
+let rcDailyImportRunning = false;
+async function runDailyRcImport() {
+  if (rcDailyImportRunning) return;
+  rcDailyImportRunning = true;
+  const { date } = rcChicagoNow();
+  const totals = { imported: 0, loadsCreated: 0, alreadyHave: 0, notRc: 0, skipped: 0, skippedOld: 0, heldOut: 0, bolsAdded: 0, loadsUnassigned: 0 };
+  try {
+    const existing = db.prepare('SELECT id FROM rc_import_runs ORDER BY startedAt DESC LIMIT 1').get();
+    console.log(`[rc-import] daily import starting for ${date}${existing ? ` — continuing in-progress run ${existing.id}` : ' — fresh run'}`);
+    let done = false;
+    const stopAt = Date.now() + 25 * 60 * 1000;
+    while (!done && Date.now() < stopAt) {
+      const step = await runRcImportStep(null, { resumeSaved: true });
+      if (step.busy) {
+        // A portal-driven step holds the single flight right now —
+        // wait for it; the run's saved cursor keeps our place.
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+      for (const k of Object.keys(totals)) totals[k] += step[k] || 0;
+      if (step.done) { done = true; break; }
+      // The run row disappears when a run completes. If it is gone
+      // without our step reporting done, the portal drove the same
+      // run to completion between our steps — that is completion;
+      // do NOT start a second run.
+      if (!db.prepare('SELECT id FROM rc_import_runs LIMIT 1').get()) { done = true; break; }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (done) {
+      setMeta(db, RC_IMPORT_LAST_DAILY_KEY, date);
+      console.log(`[rc-import] daily import finished for ${date}: imported=${totals.imported} loadsCreated=${totals.loadsCreated} alreadyHave=${totals.alreadyHave} notRc=${totals.notRc} skipped=${totals.skipped} skippedOld=${totals.skippedOld} heldOut=${totals.heldOut} bolsAdded=${totals.bolsAdded} loadsUnassigned=${totals.loadsUnassigned}`);
+    } else {
+      console.log(`[rc-import] daily import for ${date} not finished within the step budget — the persisted run continues on the next check (imported=${totals.imported} loadsCreated=${totals.loadsCreated} so far)`);
+    }
+  } catch (e) {
+    console.error('[rc-import] daily import failed:', (e && e.message) || e);
+  } finally {
+    rcDailyImportRunning = false;
+  }
+}
+
+function maybeRunDailyRcImport() {
+  if (rcDailyImportRunning) return;
+  if (!rcDailyImportDue()) return;
+  void runDailyRcImport();
+}
 
 
 // Add-RC auto-load (owner, 2026-11-16): when a dispatcher picks a rate
@@ -9431,6 +9567,14 @@ app.listen(PORT, () => {
   setInterval(() => {
     void syncRelayTransactions();
   }, RELAY_SYNC_INTERVAL_MS);
+  // Daily automatic RC import (owner, 2026-11-19): checked on boot
+  // and every 30 minutes; the Chicago-hour + persisted last-run-date
+  // gate inside maybeRunDailyRcImport makes a boot fire ONLY as a
+  // catch-up when today's ~06:00 Chicago run was missed.
+  maybeRunDailyRcImport();
+  setInterval(() => {
+    maybeRunDailyRcImport();
+  }, RC_DAILY_IMPORT_CHECK_MS);
   void (async () => { await verifyRateConStates(); await repairRateConDates(); await cleanupRateCons(); await removeCancelledScotlynnLoad(); await adjudicateRateCons(); await adjudicateRateCons2(); await adjudicateRateCons3(); await adjudicateRateCons4(); await adjudicateRateCons5(); await adjudicateRateCons6(); await adjudicateRateCons7(); await adjudicateRateCons8(); await adjudicateRateCons9(); await fixIelLoadDates(); await fixTruckPaymentCategories(); await setupFixedTruckPayments(); await fixTransportFundingFixed(); await addRtc528772Load(); await mergeRtc528772Loads(); await fixCircle2661800(); await fixRtc528772Rate(); await fixRtc528772DeliveryTime(); await fixLoad1197586Driver(); await addMissingUberLoads(); await findMissingRcFiles(); await fetchMissingRcFromMailboxes(); await fetchMissingRcFromMailboxes2(); await fetchMissingRcFromMailboxes3(); await addMissingAkashLoads(); await fetchMissingRcFinal(); await removeDispatchSheetLoads(); await fixCashflowReconciliation(); await removeOutlookFactoring2(); await dumpRc528772(); await fetchRc528772(); await fixRc528772Addresses(); await backfillDocDates(); await backfillUnitPlates(); await backfillUnitPlates2(); await dumpCabCardPlateContext(); await setVerifiedPlates(); })();
   // Re-derive active loads' gate pins with the current geocoder on
   // boot: a stale pin from a weaker geocode must not block a delivery.
