@@ -2639,12 +2639,12 @@ function folderUnitsSub(units, driverId) {
   return [u.truck ? 'Truck ' + u.truck : '', u.trailer ? 'Trailer ' + u.trailer : ''].filter(Boolean).join(' · ');
 }
 
-function renderLoadsFolders(main, loads, drivers) {
+function renderLoadsFolders(main, loads, drivers, rcByLoad) {
   driverUnitsById().then((units) => {
     const statsFor = (mine) =>
       folderStatHtml('Active', mine.filter((l) => l.status !== 'completed' && l.status !== 'cancelled').length) +
       folderStatHtml('Completed', mine.filter((l) => l.status === 'completed').length) +
-      folderStatHtml('Booked', fmtMoney(mine.reduce((s, l) => s + (l.rateCents || 0), 0)));
+      folderStatHtml('Booked', fmtMoney(mine.reduce((s, l) => s + ((rcByLoad && rcByLoad[l.id] && rcByLoad[l.id].rateCents) || 0), 0)));
     const cards = drivers.map((d) =>
       folderCardHtml(d.id, d.name, folderUnitsSub(units, d.id), statsFor(loads.filter((l) => String(l.driverId) === String(d.id)))));
     const unassigned = loads.filter((l) => !l.driverId);
@@ -2661,9 +2661,11 @@ async function viewLoads(main) {
   state.editingLoadId = null;
   document.body.classList.add('loads-bg'); // reefer dock-row photo + liquid glass (removed on view switch)
   ensureLoadsBgLayer();
-  const [loads, drivers] = await Promise.all([api('/api/admin/loads'), api('/api/admin/drivers')]);
+  const [loads, drivers, rcs] = await Promise.all([api('/api/admin/loads'), api('/api/admin/drivers'), api('/api/admin/rate-confirmations').catch(() => [])]);
   state.driversCache = Array.isArray(drivers) ? drivers : [];
-  if (state.loadsFolder === null) { renderLoadsFolders(main, Array.isArray(loads) ? loads : [], state.driversCache); return; }
+  const rcByLoad = {};
+  (Array.isArray(rcs) ? rcs : []).forEach((r) => { if (r.loadId != null && r.rateCents != null) rcByLoad[r.loadId] = r; });
+  if (state.loadsFolder === null) { renderLoadsFolders(main, Array.isArray(loads) ? loads : [], state.driversCache, rcByLoad); return; }
   const driverOptions = (sel) =>
     state.driversCache.map((d) => '<option value="' + d.id + '"' + (String(d.id) === String(sel) ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('');
   let list = Array.isArray(loads) ? loads : [];
