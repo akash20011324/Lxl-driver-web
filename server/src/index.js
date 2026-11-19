@@ -180,6 +180,21 @@ function cleanStopsPayload(raw) {
   return { pickups, deliveries };
 }
 
+// The driver's CURRENT load (owner's rule, 2026-11-19): among the
+// driver's unfinished loads (status 'active'), the current load is
+// the EARLIEST assigned one. A load assigned later must NOT take
+// over Home — or anywhere else that shows "the current load" —
+// while an earlier load is still incomplete; the next assigned
+// load becomes current only once the previous one is completed
+// (or cancelled). Assignment order is the row creation order:
+// createdAt, with the AUTOINCREMENT id as the monotonic tiebreak
+// for rows created in the same instant.
+function currentLoadForDriver(driverId) {
+  return db
+    .prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt ASC, id ASC LIMIT 1")
+    .get(driverId);
+}
+
 function serializeLoad(l) {
   if (!l) return null;
   return {
@@ -648,9 +663,7 @@ driver.use(auth, requireDriver);
 driver.get('/home', (req, res) => {
   const truck = db.prepare('SELECT * FROM trucks WHERE driverId = ?').get(req.user.id);
   const trailer = db.prepare('SELECT * FROM trailers WHERE driverId = ?').get(req.user.id);
-  const activeLoad = db
-    .prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC LIMIT 1")
-    .get(req.user.id);
+  const activeLoad = currentLoadForDriver(req.user.id);
   const pendingRequests = db
     .prepare("SELECT COUNT(*) AS c FROM requests WHERE driverId = ? AND status = 'pending'")
     .get(req.user.id).c;
@@ -667,9 +680,7 @@ driver.get('/home', (req, res) => {
 });
 
 driver.get('/loads/active', (req, res) => {
-  const load = db
-    .prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC LIMIT 1")
-    .get(req.user.id);
+  const load = currentLoadForDriver(req.user.id);
   res.json(serializeLoad(load));
 });
 
@@ -1101,9 +1112,7 @@ driver.post('/location', async (req, res) => {
   // pickup BOL, push him once — "Please upload the BOL". State lives on
   // the load row so it fires exactly once per load.
   try {
-    const load = db
-      .prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY id DESC LIMIT 1")
-      .get(req.user.id);
+    const load = currentLoadForDriver(req.user.id);
     if (load) {
       const coords = await ensurePickupCoords(load);
       if (coords) {
@@ -3697,7 +3706,7 @@ admin.post('/broker-access', (req, res) => {
     load = db.prepare('SELECT id, driverId FROM loads WHERE id = ?').get(Number(loadId));
     if (!load || load.driverId !== driver.id) return err(res, 400, 'That load is not assigned to this driver');
   } else {
-    load = db.prepare("SELECT id FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC").get(driver.id);
+    load = currentLoadForDriver(driver.id);
   }
   const token = crypto.randomBytes(24).toString('base64url');
   const info = db.prepare(
@@ -3767,7 +3776,7 @@ async function brokerTrackPayload(token) {
   const loc = db.prepare('SELECT * FROM locations WHERE driverId = ? ORDER BY updatedAt DESC').get(a.driverId);
   let loadRow = a.loadId ? db.prepare('SELECT * FROM loads WHERE id = ?').get(a.loadId) : null;
   if (!loadRow) {
-    loadRow = db.prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC").get(a.driverId);
+    loadRow = currentLoadForDriver(a.driverId);
   }
   const s = loadRow ? serializeLoad(loadRow) : null;
   const location = loc ? { lat: loc.lat, lng: loc.lng, speedMph: loc.speedMph, heading: loc.heading, updatedAt: loc.updatedAt } : null;
@@ -3954,9 +3963,7 @@ admin.get('/dispatch/conversations', async (_req, res) => {
     const unread = db
       .prepare("SELECT COUNT(*) AS c FROM messages WHERE driverId = ? AND sender = 'driver' AND read = 0")
       .get(d.id).c;
-    const activeLoad = db
-      .prepare("SELECT * FROM loads WHERE driverId = ? AND status = 'active' ORDER BY createdAt DESC LIMIT 1")
-      .get(d.id);
+    const activeLoad = currentLoadForDriver(d.id);
     let place = null;
     if (location) {
       try {
