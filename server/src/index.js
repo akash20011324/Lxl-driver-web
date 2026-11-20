@@ -3941,6 +3941,37 @@ admin.get('/documents', (_req, res) => {
   res.json(rows.map(serializeDocument));
 });
 
+// An admin can delete any load document (e.g. a duplicate BOL page that
+// was uploaded into the wrong category). Same cleanup as the driver's
+// own delete: the file row and the stored file go with it, and if the
+// last BOL page for a load is gone, the BOL result no longer stands —
+// clear it so the load cannot be completed without a BOL on file.
+admin.delete('/documents/:id', (req, res) => {
+  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
+  if (!doc) return err(res, 404, 'Document not found');
+  const file = getFileRow(doc.fileId);
+  withTransaction(db, () => {
+    db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+    db.prepare('DELETE FROM files WHERE id = ?').run(doc.fileId);
+    if ((doc.kind === 'pickup_bol' || doc.kind === 'delivery_bol') && doc.loadId) {
+      const remaining = db
+        .prepare("SELECT COUNT(*) AS n FROM documents WHERE loadId = ? AND kind IN ('pickup_bol', 'delivery_bol')")
+        .get(doc.loadId).n;
+      if (remaining === 0) {
+        db.prepare('UPDATE loads SET bolStatus = NULL WHERE id = ?').run(doc.loadId);
+      }
+    }
+  });
+  if (file) {
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, file.storedFilename));
+    } catch {
+      // file already gone — ignore
+    }
+  }
+  res.json({ ok: true });
+});
+
 // Each admin's own sidebar order (view keys, in the order they arranged
 // them with the sidebar's Organize mode). NULL / empty = default order.
 admin.get('/sidebar-order', (req, res) => {

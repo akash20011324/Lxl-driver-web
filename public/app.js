@@ -3098,6 +3098,7 @@ async function viewDocuments(main) {
     '<p class="docs-nomatch" id="docsNoMatch" hidden>No load matches that number.</p>' +
     '<div class="docs-sendbar" id="docsSendBar" hidden><span id="docsSendCount"></span>' +
     '<button class="btn" id="docsSendOpen">Send to broker</button>' +
+    '<button class="btn btn-danger" id="docsDeleteSelected">Delete</button>' +
     '<button class="btn btn-ghost" id="docsSendClear">Clear</button></div></div>';
 
   document.getElementById('docsFolderBack').addEventListener('click', () => { state.docsFolder = null; viewDocuments(main); });
@@ -3292,6 +3293,25 @@ async function viewDocuments(main) {
     selected.clear();
     main.querySelectorAll('[data-doc-check]').forEach(x => { x.checked = false; });
     updateSendBar();
+  });
+  document.getElementById('docsDeleteSelected').addEventListener('click', async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    const ok = await confirmModal({
+      title: 'Delete documents',
+      message: 'Delete ' + ids.length + ' selected file' + (ids.length === 1 ? '' : 's') + '? This cannot be undone.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      for (const id of ids) {
+        await api('/api/admin/documents/' + id, { method: 'DELETE' });
+      }
+      selected.clear();
+      toast(ids.length + ' file' + (ids.length === 1 ? '' : 's') + ' deleted.', 'ok');
+      renderAdminView('documents');
+    } catch (err) { showError(err); }
   });
 }
 
