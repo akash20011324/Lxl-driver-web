@@ -2655,6 +2655,33 @@ admin.post('/trucks', (req, res) => {
   }
 });
 
+// Edit a truck's descriptive fields only (make / model / year / plate /
+// vin) — e.g. typing in a plate or VIN the document reader could not
+// pull off a cab card. Unit number, status, driver assignment and
+// odometer are managed by their own endpoints and cannot change here.
+admin.patch('/trucks/:id', (req, res) => {
+  const truck = db.prepare('SELECT * FROM trucks WHERE id = ?').get(req.params.id);
+  if (!truck) return err(res, 404, 'Truck not found');
+  const body = req.body || {};
+  const sets = [];
+  const vals = [];
+  for (const field of ['make', 'model', 'year', 'plate', 'vin']) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+    let value = body[field];
+    if (typeof value === 'string') {
+      value = value.trim();
+      if (field === 'plate' || field === 'vin') value = value.toUpperCase();
+      if (value === '') value = null;
+    }
+    sets.push(field + ' = ?');
+    vals.push(value ?? null);
+  }
+  if (!sets.length) return err(res, 400, 'Nothing to update');
+  vals.push(truck.id);
+  db.prepare('UPDATE trucks SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals);
+  res.json(serializeTruck(db.prepare('SELECT * FROM trucks WHERE id = ?').get(truck.id)));
+});
+
 admin.post('/trucks/:id/assign', (req, res) => {
   const { driverId } = req.body || {};
   let result;
@@ -3559,6 +3586,33 @@ admin.post('/trailers', (req, res) => {
     if (String(e.message).includes('UNIQUE')) return err(res, 409, 'A trailer with that unit number already exists');
     throw e;
   }
+});
+
+// Edit a trailer's descriptive fields only (kind / year / plate / vin) —
+// e.g. typing in a plate or VIN the document reader could not pull off
+// a cab card. Unit number, status and driver assignment are managed by
+// their own endpoints and cannot change here.
+admin.patch('/trailers/:id', (req, res) => {
+  const trailer = db.prepare('SELECT * FROM trailers WHERE id = ?').get(req.params.id);
+  if (!trailer) return err(res, 404, 'Trailer not found');
+  const body = req.body || {};
+  const sets = [];
+  const vals = [];
+  for (const field of ['kind', 'year', 'plate', 'vin']) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+    let value = body[field];
+    if (typeof value === 'string') {
+      value = value.trim();
+      if (field === 'plate' || field === 'vin') value = value.toUpperCase();
+      if (value === '') value = null;
+    }
+    sets.push(field + ' = ?');
+    vals.push(value ?? null);
+  }
+  if (!sets.length) return err(res, 400, 'Nothing to update');
+  vals.push(trailer.id);
+  db.prepare('UPDATE trailers SET ' + sets.join(', ') + ' WHERE id = ?').run(...vals);
+  res.json(serializeTrailer(db.prepare('SELECT * FROM trailers WHERE id = ?').get(trailer.id)));
 });
 
 admin.post('/trailers/:id/assign', (req, res) => {

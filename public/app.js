@@ -2510,7 +2510,19 @@ function unitCard(u, type, pair) {
     '<button class="btn btn-ghost btn-sm" data-yard-toggle>Move to ' + (u.yardStatus === 'road' ? 'Yard' : 'Road') + '</button>' +
     '<select data-assign-select>' + driverOpts + '</select>' +
     '<button class="btn btn-gold btn-sm" data-assign-btn>Assign</button>' +
+    '<button class="btn btn-ghost btn-sm" data-edit-btn>Edit</button>' +
     '</div>' +
+    '<div class="card add-unit-card" data-edit-card hidden><h3>Edit ' + type + ' ' + esc(u.unitNumber) + '</h3>' +
+    '<form data-edit-form><div class="form-row">' +
+    (type === 'truck'
+      ? '<div class="field"><label>Make</label><input name="make" value="' + esc(u.make || '') + '"></div>' +
+        '<div class="field"><label>Model</label><input name="model" value="' + esc(u.model || '') + '"></div>'
+      : '<div class="field"><label>Kind / type</label><input name="kind" placeholder="e.g. Reefer" value="' + esc(u.kind || '') + '"></div>') +
+    '<div class="field"><label>Year</label><input name="year" type="number" value="' + (u.year != null ? u.year : '') + '"></div>' +
+    '<div class="field"><label>Plate</label><input name="plate" value="' + esc(u.plate || '') + '"></div>' +
+    '<div class="field"><label>VIN</label><input name="vin" value="' + esc(u.vin || '') + '"></div>' +
+    '</div><div class="form-actions"><button class="btn btn-blue" type="submit">Save changes</button>' +
+    '<button class="btn btn-ghost" type="button" data-edit-cancel>Cancel</button></div></form></div>' +
     (type === 'truck'
       ? (u.odometerUpdatedAt ? '<p class="muted small" style="margin-top:8px">Odometer live from TRC eLOGS · Updated ' + esc(fmtDate(u.odometerUpdatedAt)) + '</p>' : '') +
         '<details class="odo-override"><summary>Manual odometer override</summary>' +
@@ -2544,6 +2556,26 @@ function bindUnitCards(main, type) {
     card.querySelector('[data-doc-btn]').addEventListener('click', () => {
       state.unitDocsTarget = { type, id: parseInt(id, 10) };
       renderAdminView('unitDocs');
+    });
+    const editCard = card.querySelector('[data-edit-card]');
+    const editForm = card.querySelector('[data-edit-form]');
+    card.querySelector('[data-edit-btn]').addEventListener('click', () => { editCard.hidden = !editCard.hidden; });
+    card.querySelector('[data-edit-cancel]').addEventListener('click', () => {
+      editForm.reset();
+      editCard.hidden = true;
+    });
+    editForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(editForm);
+      const body = {};
+      (type === 'truck' ? ['make', 'model', 'plate', 'vin'] : ['kind', 'plate', 'vin'])
+        .forEach(k => { body[k] = String(f.get(k) || '').trim(); });
+      body.year = f.get('year') ? parseInt(f.get('year'), 10) : null;
+      try {
+        await api(base + '/' + id, { method: 'PATCH', body: JSON.stringify(body) });
+        toast((type === 'truck' ? 'Truck' : 'Trailer') + ' updated.', 'ok');
+        renderAdminView('equipment');
+      } catch (err) { showError(err); }
     });
     if (type === 'truck') {
       const odoInput = card.querySelector('[data-odo-input]');
