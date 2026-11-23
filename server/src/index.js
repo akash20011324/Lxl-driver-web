@@ -5485,10 +5485,32 @@ function detectBroker(text, subject) {
 
 async function extractRateConDetails(fileBuffer, subject) {
   try {
-    if (!fileBuffer || fileBuffer.length < 4 || fileBuffer.subarray(0, 4).toString('ascii') !== '%PDF') return {};
-    const text = cleanRateText(await pdfTextFromBuffer(fileBuffer));
+    if (!fileBuffer || fileBuffer.length < 4) return {};
+    // Open the document itself and read EVERYTHING (owner, 2026-11-23):
+    // the full text pipeline — PDF text layer, embedded-image OCR,
+    // page-raster OCR, photo OCR — not just the PDF text layer, so
+    // scanned and photographed rate confirmations read too. Returns
+    // every field the upload/Outlook flows need: amount, broker, load
+    // number, pickup and delivery city/state/ZIP, and both dates.
+    const text = await extractFileText(fileBuffer);
     if (!text) return {};
-    return { broker: detectBroker(text, subject), rateCents: detectRateCents(text) };
+    const f = extractRcLoadFields(text, subject || '');
+    const places = f.places || [];
+    const first = places[0] || null;
+    const last = places.length > 1 ? places[places.length - 1] : null;
+    return {
+      broker: detectBroker(text, subject),
+      rateCents: detectRateCents(text),
+      reference: f.lxlRef || (f.loadRef ? lxlLoadRef(f.loadRef) : null),
+      pickupCity: first ? first.city : null,
+      pickupState: first ? first.state : null,
+      pickupZip: first ? (first.zip || null) : null,
+      deliveryCity: last ? last.city : null,
+      deliveryState: last ? last.state : null,
+      deliveryZip: last ? (last.zip || null) : null,
+      pickupDate: f.dates && f.dates.length ? f.dates[0] : null,
+      deliveryDate: f.dates && f.dates.length ? f.dates[f.dates.length - 1] : null,
+    };
   } catch (e) {
     console.error('rate-con auto-detect failed', e);
     return {};
@@ -7902,7 +7924,15 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
     load = db.prepare('SELECT * FROM loads WHERE id = ?').get(Number(loadId));
     if (!load) throw Object.assign(new Error('Load not found'), { status: 404 });
   }
-  const ref = lxlLoadRef(reference || (load && load.reference) || '');
+  // Read the document itself whenever anything is still missing
+  // (owner, 2026-11-23): one full read of the RC — amount, broker,
+  // load number, pickup/delivery states and dates — fills whatever
+  // wasn't typed and doesn't come from a picked load. Precedence:
+  // typed values win, then the picked load, then the document.
+  let detected = {};
+  if (fileBuffer && (!broker || rateCents == null || !(reference || (load && load.reference)) || !(pickupState || load) || !(deliveryState || load) || !(pickupDate || load) || !(deliveryDate || load)))
+    detected = await extractRateConDetails(fileBuffer, subject);
+  const ref = lxlLoadRef(reference || (load && load.reference) || detected.reference || '');
   // Owner-ruled-out load numbers (2026-11-16 cleanup; a sweep re-imported
   // them on 2026-11-17 because deleting the rows erased their dedupe
   // fingerprints): Corcoran 127657 is CANCELLED, PTG 9841352 and WJW
@@ -7912,18 +7942,14 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
   const bareRef = String(ref || '').replace(/^LXL-/i, '');
   if (['127657', '9841352', '10425782', '1580304', '3020150', '3012815', '3002349', '3127767'].includes(bareRef))
     throw Object.assign(new Error('This load number is on the do-not-import list (cancelled, fake, or not a rate confirmation)'), { status: 400 });
-  const pState = pickupState || (load && stateFromAddress(load.pickupLocation));
-  const dState = deliveryState || (load && stateFromAddress(load.deliveryLocation));
-  const pDate = pickupDate || (load && dateInZone(load.pickupAt, load.pickupTimezone));
-  const dDate = deliveryDate || (load && dateInZone(load.deliveryAt, load.deliveryTimezone));
+  const pState = pickupState || (load && stateFromAddress(load.pickupLocation)) || detected.pickupState || null;
+  const dState = deliveryState || (load && stateFromAddress(load.deliveryLocation)) || detected.deliveryState || null;
+  const pDate = pickupDate || (load && dateInZone(load.pickupAt, load.pickupTimezone)) || detected.pickupDate || null;
+  const dDate = deliveryDate || (load && dateInZone(load.deliveryAt, load.deliveryTimezone)) || detected.deliveryDate || null;
   if (!ref || !pState || !dState || !pDate || !dDate)
     throw Object.assign(new Error('Pick a load, or fill in reference, pickup/delivery state and dates'), { status: 400 });
   const ext = fileName ? path.extname(fileName || '') : '';
   const autoName = `${ref}_${pState}-${dState}_${pDate}_to_${dDate}${ext}`;
-  // Auto-detect rate + broker from the PDF when they weren't typed.
-  // Typed values still win when given (older clients send them).
-  let detected = {};
-  if ((!broker || rateCents == null) && fileBuffer) detected = await extractRateConDetails(fileBuffer, subject);
   const finalBroker = broker ?? detected.broker ?? null;
   const finalRate = rateCents != null ? Number(rateCents) : (detected.rateCents ?? null);
   if (finalRate != null) {
@@ -8022,7 +8048,22 @@ admin.post('/rate-confirmations/detect', upload.single('file'), async (req, res)
     const fileBuffer = fs.readFileSync(req.file.path);
     try { fs.unlinkSync(req.file.path); } catch {}
     const detected = await extractRateConDetails(fileBuffer);
-    res.json({ rateCents: detected.rateCents ?? null });
+    // The full read (owner, 2026-11-23): everything the system opened
+    // the document and read — amount, broker, load number, route and
+    // dates — so the form can show it all before the admin commits.
+    res.json({
+      rateCents: detected.rateCents ?? null,
+      broker: detected.broker ?? null,
+      reference: detected.reference ?? null,
+      pickupCity: detected.pickupCity ?? null,
+      pickupState: detected.pickupState ?? null,
+      pickupZip: detected.pickupZip ?? null,
+      deliveryCity: detected.deliveryCity ?? null,
+      deliveryState: detected.deliveryState ?? null,
+      deliveryZip: detected.deliveryZip ?? null,
+      pickupDate: detected.pickupDate ?? null,
+      deliveryDate: detected.deliveryDate ?? null,
+    });
   } catch (e) {
     if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} }
     if (e.status) return err(res, e.status, e.message);
@@ -9656,17 +9697,29 @@ async function extractFileText(buf) {
   const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
   const isPng = buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
   if (isPdf) {
-    const text = cleanRateText(await pdfTextFromBuffer(buf));
-    if (text.length >= 200) return text;
+    let best = cleanRateText(await pdfTextFromBuffer(buf));
+    if (best.length >= 200) return best;
     // Scanned / image-only PDF: no usable text layer. Read the page
     // images with OCR instead — slower, but the document still counts.
     try {
       const ocr = cleanRateText(await ocrPdfImagesQueued(buf));
-      if (ocr.length > text.length) return ocr;
+      if (ocr.length > best.length) best = ocr;
     } catch (e) {
       console.error('pdf OCR fallback failed', e);
     }
-    return text;
+    if (best.length >= 200) return best;
+    // Print-to-PDF documents (e.g. Microsoft Print to PDF) keep their
+    // values as vector glyphs — no text layer and no embedded image —
+    // so only a rendered page shows them. Rasterize the pages and OCR
+    // the renders (owner, 2026-11-23: an uploaded rate confirmation
+    // the system "cannot read" is exactly this case).
+    try {
+      const raster = cleanRateText(await ocrPdfPagesQueued(buf));
+      if (raster.length > best.length) best = raster;
+    } catch (e) {
+      console.error('pdf raster OCR fallback failed', e);
+    }
+    return best;
   }
   if ((isJpeg || isPng) && buf.length > 1024) {
     const worker = await createWorker('eng', undefined, {

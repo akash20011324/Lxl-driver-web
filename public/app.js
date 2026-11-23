@@ -803,10 +803,13 @@ function renderAdminShell() {
   const bellBtn = document.getElementById('bellBtn');
   if (bellBtn) bellBtn.addEventListener('click', toggleBell);
   startAdminNotifier();
+  liveState.view = null;
+  liveState.sig = null;
+  startLiveRefresh();
 }
 
 /* ---------- Admin notifications: bell, badges, desktop popups ----------
-   The bell feed (GET /api/admin/notifications) is polled every 15 s.
+   The bell feed (GET /api/admin/notifications) is polled every 10 s.
    It drives the bell badge, the Chat menu unread badge, the dropdown
    panel, and — when the browser allows it — real desktop notifications
    on whatever device the admin is using. */
@@ -924,7 +927,7 @@ function maybeShowNotifBanner() {
 
 function startAdminNotifier() {
   if (state.bellTimer) clearInterval(state.bellTimer);
-  state.bellTimer = setInterval(pollAdminNotifications, 15000);
+  state.bellTimer = setInterval(pollAdminNotifications, 10000);
   pollAdminNotifications();
   maybeShowNotifBanner();
   if (!state.bellClickBound) {
@@ -1290,6 +1293,240 @@ async function renderAdminView(view) {
   } catch (e) { main.innerHTML = '<p class="empty">Could not load this view.</p>'; showError(e); }
 }
 
+/* ---------- Silent live refresh (owner, 2026-11-23) ----------
+   Every admin section re-checks its data every 10 seconds and swaps
+   in the new data ONLY when something actually changed — no page
+   reload, no "Loading…" flash, scroll position kept, so nobody using
+   the portal can tell a refresh happened. Dashboard, Tracking and
+   Chat keep their own built-in refreshers (also every 10 s), and the
+   bell poller above drives the pop-ups (sound + desktop notification)
+   whenever a new message, load or other item lands.
+   A section is never touched while the user is working in it: a
+   focused field, unsaved typing, a picked file, an open dialog, an
+   open add-form or a staged import all defer the swap; the newer
+   data is picked up on a later tick once the user is done. Polling
+   pauses while the browser tab is hidden and resumes the moment it
+   is visible again. */
+const LIVE_REFRESH_MS = 10000;
+const liveState = { view: null, sig: null, running: false, timer: null };
+
+function liveHash(value) {
+  const s = JSON.stringify(value) || '';
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = (((h << 5) + h) ^ s.charCodeAt(i)) >>> 0;
+  return s.length + ':' + h.toString(36);
+}
+
+/* Probes re-fetch exactly what each view fetches to render it, so the
+   signature covers everything on screen. A probe returns null when
+   there is nothing to watch (e.g. no document target picked). */
+async function liveProbeDrivers() {
+  const [drivers, overview] = await Promise.all([
+    api('/api/admin/drivers'),
+    api('/api/admin/overview').catch(() => null),
+  ]);
+  // The Drivers page reads only truck/trailer assignments from the
+  // overview — the live GPS locations in it change every few seconds
+  // and are not shown here, so they stay out of the signature.
+  const units = {};
+  (Array.isArray(overview) ? overview : []).forEach((o) => { units[o.id] = [o.truck, o.trailer]; });
+  return [drivers, units];
+}
+async function liveProbeAdmins() {
+  return [await api('/api/admin/admins')];
+}
+async function liveProbeEquipment() {
+  const [trucks, trailers, drivers] = await Promise.all([
+    api('/api/admin/trucks'), api('/api/admin/trailers'), api('/api/admin/drivers'),
+  ]);
+  return [trucks, trailers, drivers];
+}
+async function liveProbeLoads() {
+  const [loads, drivers, rcs] = await Promise.all([
+    api('/api/admin/loads'), api('/api/admin/drivers'), api('/api/admin/rate-confirmations').catch(() => []),
+  ]);
+  return [loads, drivers, rcs];
+}
+async function liveProbeDocuments() {
+  const [docs, loads, drivers, trucks, trailers] = await Promise.all([
+    api('/api/admin/documents'),
+    api('/api/admin/loads').catch(() => []),
+    api('/api/admin/drivers').catch(() => []),
+    api('/api/admin/trucks').catch(() => []),
+    api('/api/admin/trailers').catch(() => []),
+  ]);
+  return [docs, loads, drivers, trucks, trailers];
+}
+async function liveProbePayroll() {
+  const drivers = await api('/api/admin/payroll/drivers').catch(() => []);
+  if (state.payrollFolder === null) return [drivers];
+  const trips = await api('/api/admin/payroll/trips?driverId=' + encodeURIComponent(state.payrollFolder)).catch(() => []);
+  return [drivers, trips];
+}
+async function liveProbeUnitDocs() {
+  const target = state.unitDocsTarget;
+  if (!target) return null;
+  const [trucks, trailers, docs] = await Promise.all([
+    api('/api/admin/trucks').catch(() => []),
+    api('/api/admin/trailers').catch(() => []),
+    api('/api/admin/equipment-documents?unitType=' + target.type + '&unitId=' + target.id).catch(() => []),
+  ]);
+  return [trucks, trailers, docs];
+}
+async function liveProbeDriverDocs() {
+  const target = state.driverDocsTarget;
+  if (!target) return null;
+  const [drivers, docs] = await Promise.all([
+    api('/api/admin/drivers').catch(() => []),
+    api('/api/admin/driver-documents?driverId=' + target.id).catch(() => []),
+  ]);
+  return [drivers, docs];
+}
+async function liveProbeRequests() {
+  return [await api('/api/admin/requests')];
+}
+async function liveProbeMaintenance() {
+  return [await api('/api/admin/maintenance')];
+}
+async function liveProbeCashflow() {
+  const [data, trucks] = await Promise.all([
+    api('/api/admin/cashflow' + (cfMonthKey ? '?month=' + cfMonthKey : '')),
+    api('/api/admin/trucks').catch(() => []),
+  ]);
+  return [data, trucks];
+}
+async function liveProbeRateCons() {
+  const [rcs, loads] = await Promise.all([
+    api('/api/admin/rate-confirmations'),
+    api('/api/admin/loads').catch(() => []),
+  ]);
+  return [rcs, loads];
+}
+
+/* Dashboard, Tracking (locations) and Chat (dispatch) are not in this
+   map: they already refresh themselves in place (see viewDashboard,
+   viewLocations, viewDispatch) on the same 10-second beat. */
+const LIVE_VIEWS = {
+  drivers: { probe: liveProbeDrivers, render: viewDrivers },
+  admins: { probe: liveProbeAdmins, render: viewAdmins },
+  equipment: { probe: liveProbeEquipment, render: viewEquipment },
+  loads: { probe: liveProbeLoads, render: viewLoads },
+  documents: { probe: liveProbeDocuments, render: viewDocuments },
+  payroll: { probe: liveProbePayroll, render: viewPayroll },
+  unitDocs: { probe: liveProbeUnitDocs, render: viewUnitDocuments },
+  driverDocs: { probe: liveProbeDriverDocs, render: viewDriverDocuments },
+  requests: { probe: liveProbeRequests, render: viewRequests },
+  maintenance: { probe: liveProbeMaintenance, render: viewMaintenance },
+  cashflow: { probe: liveProbeCashflow, render: viewCashflow },
+  ratecons: { probe: liveProbeRateCons, render: viewRateCons },
+};
+
+function liveIsTextEntry(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  if (el.tagName === 'INPUT') return !/^(button|submit|reset|checkbox|radio|file|hidden|image)$/i.test(el.type || 'text');
+  return false;
+}
+
+/* True while the user is working anywhere the refresh could hurt:
+   a dialog is open, the sidebar is being reorganized, a field is
+   focused, or any field in the section holds unsaved edits (a value
+   that differs from what was rendered, a ticked checkbox, a picked
+   file). An open "add" form counts too, even before anything is
+   typed into it. */
+function liveUserBusy(main) {
+  if (state.organizing) return true;
+  if (document.querySelector('.docs-modal-backdrop, .wp-editor-overlay')) return true;
+  if (!main) return true;
+  const ae = document.activeElement;
+  if (ae && main.contains(ae) && liveIsTextEntry(ae)) return true;
+  if (main.querySelector('#assignCard:not([hidden]), #addDriverCard:not([hidden]), #addAdminCard:not([hidden]), #addTruckCard:not([hidden]), #addTrailerCard:not([hidden]), #cfAddCard:not(.hidden), #cfOutlookCard:not(.hidden)')) return true;
+  const fields = main.querySelectorAll('input, textarea');
+  for (const el of fields) {
+    if (el.type === 'checkbox' || el.type === 'radio') { if (el.checked !== el.defaultChecked) return true; }
+    else if (el.type === 'file') { if (el.files && el.files.length) return true; }
+    else if (el.value !== el.defaultValue) return true;
+  }
+  return false;
+}
+
+/* Section-specific work in progress that the generic checks cannot
+   see: an open Documents file panel, a staged Payroll statement file,
+   a staged Cash Flow / Rate Con Outlook import, a load being edited,
+   or the Rate Con bulk import running. */
+function liveViewBusy(view, main) {
+  if (view === 'documents' && main.querySelector('[data-doc-panel]:not([hidden])')) return true;
+  if (view === 'payroll' && state.payrollStatementDraft && state.payrollStatementDraft.file) return true;
+  if (view === 'cashflow' && cfOutlookPick) return true;
+  if (view === 'loads' && state.editingLoadId) return true;
+  if (view === 'ratecons') {
+    if (state.rcOutlook) return true;
+    const imp = document.getElementById('rcImportAll');
+    if (imp && imp.disabled) return true;
+    const picker = document.getElementById('outlookPicker');
+    if (picker && picker.style.display !== 'none' && picker.innerHTML) return true;
+  }
+  return false;
+}
+
+function liveCaptureScroll(main) {
+  const saved = { y: window.scrollY || 0, parts: [] };
+  main.querySelectorAll('[id]').forEach((el) => {
+    if (el.scrollTop > 0 && el.scrollHeight > el.clientHeight + 4) saved.parts.push([el.id, el.scrollTop]);
+  });
+  return saved;
+}
+function liveRestoreScroll(saved) {
+  const apply = () => {
+    saved.parts.forEach(([id, top]) => { const el = document.getElementById(id); if (el) el.scrollTop = top; });
+    if (saved.y) window.scrollTo(0, saved.y);
+  };
+  apply();
+  if (window.requestAnimationFrame) requestAnimationFrame(apply);
+}
+
+async function liveRefreshTick() {
+  if (liveState.running) return;
+  if (document.hidden) return; // paused while the tab is hidden
+  if (!state.user || state.user.role !== 'admin' || !state.token) return;
+  const main = document.getElementById('adminMain');
+  if (!main) return;
+  const view = state.adminView;
+  const entry = LIVE_VIEWS[view];
+  if (!entry) return;
+  if (liveState.view !== view) { liveState.view = view; liveState.sig = null; }
+  liveState.running = true;
+  try {
+    const data = await entry.probe();
+    if (data === null || data === undefined) return;
+    const sig = liveHash(data);
+    if (state.adminView !== view || liveState.view !== view) return; // navigated mid-probe
+    if (liveState.sig === null) { liveState.sig = sig; return; } // first look: baseline only
+    if (sig === liveState.sig) return; // nothing changed — leave the page exactly as it is
+    // Something changed. Never swap the section out from under the
+    // user: while they are working in it, keep the old signature so
+    // the swap is retried on the next tick once they are done.
+    if (liveUserBusy(main) || liveViewBusy(view, main)) return;
+    const saved = liveCaptureScroll(main);
+    try {
+      await entry.render(main);
+    } catch (e) {
+      console.error('live refresh render failed for ' + view, e);
+    }
+    if (state.adminView === view) liveState.sig = sig;
+    liveRestoreScroll(saved);
+  } catch (e) { /* a failed probe just tries again on the next tick */ }
+  finally { liveState.running = false; }
+}
+
+function startLiveRefresh() {
+  if (liveState.timer) return;
+  liveState.timer = setInterval(liveRefreshTick, LIVE_REFRESH_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) liveRefreshTick(); });
+  setTimeout(liveRefreshTick, 1500);
+}
+
 /* ---------- Dashboard ---------- */
 async function viewDashboard(main) {
   // Google Maps has no .remove(); dropping the reference is enough — the
@@ -1519,9 +1756,9 @@ async function viewDashboard(main) {
   };
   renderFleet(Array.isArray(locs) ? locs : []);
   await refreshDashboard();
-  // The whole dashboard refreshes itself every 23 seconds — stats, driver
+  // The whole dashboard refreshes itself every 10 seconds — stats, driver
   // cards, fleet list and map markers — so changes pop up on their own.
-  addTimer(refreshDashboard, 23000);
+  addTimer(refreshDashboard, 10000);
 }
 function dashDriverCard(d, load, rcByLoad, loc, live) {
   const truck = d.truck ? (d.truck.unitNumber || d.truck) : (d.truckUnitNumber || '—');
@@ -4469,7 +4706,7 @@ async function viewDispatch(main) {
   const thread = document.getElementById('chatMsgs');
   if (thread) thread.scrollTop = thread.scrollHeight;
   pollAdminNotifications();
-  addTimer(async () => { await refreshConvos(); await loadThread(); }, 15000);
+  addTimer(async () => { await refreshConvos(); await loadThread(); }, 10000);
 }
 
 /* ---------- Locations (live map) ---------- */
@@ -4862,6 +5099,7 @@ async function viewRateCons(main) {
     '<div class="form-row">' +
     '<div class="field"><label>Amount</label><input type="number" id="rcAmount" min="0" step="0.01" placeholder="e.g. 2400.00 — or leave blank and the system reads it"></div>' +
     '</div><p class="small muted" id="rcAmountHint" style="display:none">Detected from the RC — correct it if it\'s wrong.</p>' +
+    '<p class="small" id="rcReadSummary" style="display:none"></p>' +
     '<p class="small muted">Auto: the system reads the RC and creates the load — LXL reference, pickup and delivery city/state, driver from the RC — and the file is renamed to <code id="rcPreview"></code>. Or pick an existing load to attach it to.</p>' +
     '<div class="form-actions"><button class="btn" type="submit">Upload</button></div>' +
     '<p id="rcResult" class="small mt"></p></form>' +
@@ -4910,12 +5148,15 @@ async function viewRateCons(main) {
     // admin can correct it, and the box value is what gets saved.
     const rcAmountEl = document.getElementById('rcAmount');
     const rcAmountHint = document.getElementById('rcAmountHint');
+    const rcReadSummary = document.getElementById('rcReadSummary');
     document.getElementById('rcFile').addEventListener('change', async () => {
       if (rcAmountEl) rcAmountEl.value = '';
       if (rcAmountHint) rcAmountHint.style.display = 'none';
+      if (rcReadSummary) { rcReadSummary.style.display = 'none'; rcReadSummary.textContent = ''; }
       const fEl = document.getElementById('rcFile');
       const file = fEl && fEl.files && fEl.files[0];
       if (!file) return;
+      if (rcReadSummary) { rcReadSummary.textContent = 'Opening the document and reading it…'; rcReadSummary.style.display = ''; }
       try {
         const fd = new FormData();
         fd.append('file', file);
@@ -4924,7 +5165,24 @@ async function viewRateCons(main) {
           rcAmountEl.value = (Number(det.rateCents) / 100).toFixed(2);
           if (rcAmountHint) rcAmountHint.style.display = '';
         }
-      } catch { /* detection is best-effort — the box stays empty for manual entry */ }
+        // Show EVERYTHING the system read out of the document (owner,
+        // 2026-11-23) — load number, broker, amount, full route and
+        // dates — so the admin sees the read before uploading.
+        if (rcReadSummary && det) {
+          const place = (city, st, zip) => city ? city + ', ' + (st || '') + (zip ? ' ' + zip : '') : '';
+          const parts = [];
+          if (det.reference) parts.push('Load ' + det.reference);
+          if (det.broker) parts.push(det.broker);
+          if (det.rateCents != null) parts.push(fmtMoney(det.rateCents));
+          const route = [place(det.pickupCity, det.pickupState, det.pickupZip), place(det.deliveryCity, det.deliveryState, det.deliveryZip)].filter(Boolean).join(' → ');
+          if (route) parts.push(route);
+          if (det.pickupDate || det.deliveryDate) parts.push(fmtDateOnly(det.pickupDate) + ' → ' + fmtDateOnly(det.deliveryDate));
+          rcReadSummary.textContent = parts.length
+            ? '✓ Read from the RC: ' + parts.join(' · ')
+            : 'The system opened this file but couldn\'t read its details — type the amount in, or pick the load above.';
+          rcReadSummary.style.display = '';
+        }
+      } catch { /* detection is best-effort — the box stays empty for manual entry */ if (rcReadSummary) { rcReadSummary.textContent = 'The system couldn\'t read this file — type the amount in, or pick the load above.'; rcReadSummary.style.display = ''; } }
     });
     rcForm.addEventListener('submit', async (e) => {
       e.preventDefault();
