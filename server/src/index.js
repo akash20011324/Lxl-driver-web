@@ -5267,6 +5267,133 @@ admin.get('/rate-confirmations', (_req, res) => {
   res.json(rows.map(serializeRateCon));
 });
 
+// --- OTR Factoring (owner, 2026-11-23) ----------------------------------
+// One row per load for the portal's OTR Factoring section, rendered
+// directly under Rate Confirmations: paperwork readiness (RC / BOL /
+// POD on file) plus where the load stands with OTR Solutions.
+// The real OTR API send is NOT wired yet — OTR was asked for a Carrier
+// Integration access key on 2026-11-23 and it has not been issued, so
+// "Submit to OTR" only QUEUES the packet here (status 'queued' + a
+// bell notification) and admins move the status by hand until the API
+// sync lands. Nothing here ever fakes an external send to OTR.
+const FACTORING_STATUSES = ['not_submitted', 'queued', 'submitted', 'purchased', 'paid'];
+
+// "City, ST" out of a stored load location — handles the comma form
+// ("1550 Jackson Ferry Rd, Montgomery, AL 36606", "Montgomery, AL")
+// and the comma-less form ("Keasbey NJ 08832").
+function factoringCityState(location) {
+  const raw = String(location || '').trim();
+  if (!raw) return { city: null, state: null };
+  const stMatch = raw.match(/\b([A-Za-z]{2})\s+\d{5}(?:-\d{4})?\s*$/) || raw.match(/\b([A-Za-z]{2})\s*$/);
+  const state = stMatch ? stMatch[1].toUpperCase() : null;
+  const parts = raw.split(',').map((p) => p.trim()).filter(Boolean);
+  let city = null;
+  if (parts.length >= 2) {
+    city = parts[parts.length - 2].replace(/\s+[A-Za-z]{2}\s+\d{5}.*$/, '').trim() || null;
+  } else if (state) {
+    city = raw.replace(/\s*[A-Za-z]{2}\s*\d{5}(?:-\d{4})?\s*$/, '').trim() || null;
+  }
+  return { city, state };
+}
+
+// The rate con that belongs to a load: the row linked by loadId,
+// falling back to a reference match. A row carrying the actual file
+// wins over a file-less row; newest wins ties.
+function factoringRateConFor(load) {
+  const rows = db
+    .prepare('SELECT * FROM rate_confirmations WHERE loadId = ? OR reference = ? ORDER BY id DESC')
+    .all(load.id, load.reference);
+  if (!rows.length) return null;
+  return rows.find((r) => r.loadId === load.id && r.fileId) || rows.find((r) => r.fileId) || rows.find((r) => r.loadId === load.id) || rows[0];
+}
+
+function serializeFactoringLoad(l) {
+  const rc = factoringRateConFor(l);
+  const docs = db
+    .prepare(
+      "SELECT kind, COUNT(*) AS n FROM documents WHERE loadId = ? AND kind IN ('pickup_bol', 'delivery_bol') GROUP BY kind",
+    )
+    .all(l.id);
+  const pickup = factoringCityState(l.pickupLocation);
+  const delivery = factoringCityState(l.deliveryLocation);
+  return {
+    loadId: l.id,
+    reference: l.reference,
+    broker: rc ? (rc.broker ?? null) : null,
+    pickupCity: pickup.city,
+    pickupState: (rc && rc.pickupState) || pickup.state,
+    deliveryCity: delivery.city,
+    deliveryState: (rc && rc.deliveryState) || delivery.state,
+    rateCents: rc ? (rc.rateCents ?? null) : null,
+    driverId: l.driverId ?? null,
+    driverName: getDriverName(l.driverId),
+    loadStatus: l.status,
+    // Paperwork on file: the RC document itself, the pickup BOL
+    // (documents kind 'pickup_bol' — the "Pickup BOLs" category) and
+    // the delivery paperwork / POD (kind 'delivery_bol').
+    hasRateCon: !!(rc && rc.fileId),
+    hasBol: docs.some((d) => d.kind === 'pickup_bol' && d.n > 0),
+    hasPod: docs.some((d) => d.kind === 'delivery_bol' && d.n > 0),
+    factoringStatus: FACTORING_STATUSES.includes(l.factoringStatus) ? l.factoringStatus : 'not_submitted',
+    submittedAt: l.factoringSubmittedAt ?? null,
+    otrReference: l.factoringOtrReference ?? null,
+  };
+}
+
+admin.get('/factoring', (_req, res) => {
+  const loads = db.prepare('SELECT * FROM loads ORDER BY createdAt DESC, id DESC').all();
+  res.json(loads.map(serializeFactoringLoad));
+});
+
+// Queue a load's packet for OTR. Requires the RC file — without it
+// there is nothing to factor. Stamps the queue time and rings the
+// admin bell like every other portal event.
+admin.post('/factoring/:loadId/submit', (req, res) => {
+  const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.loadId);
+  if (!load) return err(res, 404, 'Load not found');
+  const rc = factoringRateConFor(load);
+  if (!rc || !rc.fileId)
+    return err(res, 400, 'This load has no rate confirmation file yet — add the RC before queueing it for OTR.');
+  const ts = now();
+  db.prepare("UPDATE loads SET factoringStatus = 'queued', factoringSubmittedAt = ? WHERE id = ?").run(ts, load.id);
+  notifyAdmins(
+    'factoring',
+    `${load.reference} queued for OTR factoring`,
+    `${rc.broker || 'Unknown broker'}${rc.rateCents != null ? ' · $' + (rc.rateCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : ''} — packet ready to send to OTR`,
+    'ratecons',
+    load.id,
+  );
+  const updated = db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id);
+  res.json(serializeFactoringLoad(updated));
+});
+
+// Manual status upkeep until the OTR API sync replaces it: set the
+// status and (optionally) OTR's reference for the load.
+admin.post('/factoring/:loadId/status', (req, res) => {
+  const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.loadId);
+  if (!load) return err(res, 404, 'Load not found');
+  const { status, otrReference } = req.body || {};
+  if (!FACTORING_STATUSES.includes(status))
+    return err(res, 400, 'Status must be one of: ' + FACTORING_STATUSES.join(', '));
+  const ref =
+    otrReference === undefined
+      ? (load.factoringOtrReference ?? null)
+      : String(otrReference || '').trim().slice(0, 80) || null;
+  // Resetting to not_submitted clears the queue stamp; moving forward
+  // by hand stamps it if the load was never queued here.
+  let submittedAt = load.factoringSubmittedAt ?? null;
+  if (status === 'not_submitted') submittedAt = null;
+  else if (!submittedAt) submittedAt = now();
+  db.prepare('UPDATE loads SET factoringStatus = ?, factoringSubmittedAt = ?, factoringOtrReference = ? WHERE id = ?').run(
+    status,
+    submittedAt,
+    ref,
+    load.id,
+  );
+  const updated = db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id);
+  res.json(serializeFactoringLoad(updated));
+});
+
 // Save a rate confirmation, naming the file from the load. Shared by the
 // file-upload endpoint and the Outlook endpoint. Throws an Error with
 // .status (400/404) for bad input.

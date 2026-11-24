@@ -556,6 +556,20 @@ export function openDb(dataDir) {
   if (!loadCols2.some((c) => c.name === 'bolReminderAt')) {
     db.exec('ALTER TABLE loads ADD COLUMN bolReminderAt TEXT');
   }
+  // OTR Factoring (owner, 2026-11-23): per-load factoring tracking for
+  // the portal's OTR Factoring section — where each load stands with
+  // OTR Solutions (not_submitted -> queued -> submitted -> purchased
+  // -> paid), when its packet was queued for OTR, and OTR's own
+  // reference once they assign one.
+  if (!loadCols2.some((c) => c.name === 'factoringStatus')) {
+    db.exec("ALTER TABLE loads ADD COLUMN factoringStatus TEXT NOT NULL DEFAULT 'not_submitted'");
+  }
+  if (!loadCols2.some((c) => c.name === 'factoringSubmittedAt')) {
+    db.exec('ALTER TABLE loads ADD COLUMN factoringSubmittedAt TEXT');
+  }
+  if (!loadCols2.some((c) => c.name === 'factoringOtrReference')) {
+    db.exec('ALTER TABLE loads ADD COLUMN factoringOtrReference TEXT');
+  }
   // Trailers get make/model too (cab-card auto-read fills them, the same
   // as trucks) — fresh databases still use the base schema above.
   const trailerColumns = db.prepare('PRAGMA table_info(trailers)').all();

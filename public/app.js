@@ -6,7 +6,7 @@
 // Refresh persistence (owner's ask, 2026-11-16): remember which section
 // the user was in, so refreshing the page lands back on that section
 // instead of the Dashboard. Kept per browser in localStorage.
-const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'driverDocs', 'admins', 'equipment', 'loads', 'documents', 'payroll', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons', 'maintenance', 'cashflow'];
+const ADMIN_VIEW_KEYS = ['dashboard', 'drivers', 'driverDocs', 'admins', 'equipment', 'loads', 'documents', 'payroll', 'unitDocs', 'requests', 'dispatch', 'locations', 'ratecons', 'factoring', 'maintenance', 'cashflow'];
 function savedAdminView() {
   try {
     const v = localStorage.getItem('lxl_admin_view');
@@ -786,6 +786,7 @@ const ADMIN_VIEWS = [
   ['dispatch', 'Chat'],
   ['locations', 'Tracking'],
   ['ratecons', 'Rate Cons'],
+  ['factoring', 'OTR Factoring'],
   ['maintenance', 'Maintenance'],
   ['cashflow', 'Cash Flow'],
 ];
@@ -1288,6 +1289,7 @@ async function renderAdminView(view) {
     else if (view === 'dispatch') await viewDispatch(main);
     else if (view === 'locations') await viewLocations(main);
     else if (view === 'ratecons') await viewRateCons(main);
+    else if (view === 'factoring') await viewFactoring(main);
     else if (view === 'maintenance') await viewMaintenance(main);
     else if (view === 'cashflow') await viewCashflow(main);
   } catch (e) { main.innerHTML = '<p class="empty">Could not load this view.</p>'; showError(e); }
@@ -1402,6 +1404,9 @@ async function liveProbeRateCons() {
   ]);
   return [rcs, loads];
 }
+async function liveProbeFactoring() {
+  return [await api('/api/admin/factoring').catch(() => [])];
+}
 
 /* Dashboard, Tracking (locations) and Chat (dispatch) are not in this
    map: they already refresh themselves in place (see viewDashboard,
@@ -1419,6 +1424,7 @@ const LIVE_VIEWS = {
   maintenance: { probe: liveProbeMaintenance, render: viewMaintenance },
   cashflow: { probe: liveProbeCashflow, render: viewCashflow },
   ratecons: { probe: liveProbeRateCons, render: viewRateCons },
+  factoring: { probe: liveProbeFactoring, render: viewFactoring },
 };
 
 function liveIsTextEntry(el) {
@@ -1466,6 +1472,12 @@ function liveViewBusy(view, main) {
     if (imp && imp.disabled) return true;
     const picker = document.getElementById('outlookPicker');
     if (picker && picker.style.display !== 'none' && picker.innerHTML) return true;
+  }
+  if (view === 'factoring') {
+    // The embedded OTR portal overlay is open: hold the swap off so
+    // the admin's work inside OTR is never wiped by a refresh.
+    const ov = document.getElementById('fxOtrOverlay');
+    if (ov && !ov.hidden) return true;
   }
   return false;
 }
@@ -5496,6 +5508,72 @@ async function renderDriverView(view) {
     else if (view === 'dispatch') await viewDriverDispatch(main);
     else if (view === 'settings') await viewDriverSettings(main);
   } catch (e) { main.innerHTML = '<p class="empty">Could not load this view.</p>'; showError(e); }
+}
+
+/* OTR Factoring (owner, 2026-11-23): its OWN sidebar section, directly
+   under Rate Cons. The section does exactly two things:
+   1) One gold "Create Invoice" button opens the official OTR
+      Solutions portal embedded in an overlay right on this page —
+      the admin creates and submits invoices there, on OTR's own
+      site, without leaving the portal. (A pop-up fallback button
+      sits in the overlay's title bar in case a browser refuses to
+      frame OTR's page.)
+   2) Under it, the list of factored invoices synced from OTR —
+      every load whose factoring status has moved past not_submitted,
+      with OTR's status pill, OTR's reference and the date it went
+      in. The statuses live on the server (the API sync takes over
+      once OTR issues the access key requested 2026-11-23).
+   The page keeps the money background + liquid glass it had as a
+   Rate Cons card. */
+async function viewFactoring(main) {
+  document.body.classList.add('rc-bg'); // full-page money background + glass (removed on view switch)
+  ensureRcBgLayer();
+  const factoring = await api('/api/admin/factoring').catch(() => []);
+  const FX_META = {
+    queued: { label: 'Queued', pill: 'gold' },
+    submitted: { label: 'Pending at OTR', pill: 'gold' },
+    purchased: { label: 'Approved', pill: 'blue' },
+    paid: { label: 'Paid', pill: 'green' },
+  };
+  const fxList = (Array.isArray(factoring) ? factoring : []).filter((f) => FX_META[f.factoringStatus]);
+  const fxPlace = (city, st) => city ? city + (st ? ', ' + st : '') : (st || '—');
+  const fxRows = fxList.map(f => {
+    const meta = FX_META[f.factoringStatus];
+    return '<div class="fx-row">' +
+      '<span class="rc-ref">' + esc(f.reference) + '</span>' +
+      '<span class="rc-broker">' + esc(f.broker || '—') + '</span>' +
+      '<span class="rc-route">' + esc(fxPlace(f.pickupCity, f.pickupState)) + ' → ' + esc(fxPlace(f.deliveryCity, f.deliveryState)) + '</span>' +
+      '<span class="fx-driver">' + esc(f.driverName || 'Unassigned') + '</span>' +
+      '<span class="rc-rate">' + (f.rateCents != null ? fmtMoney(f.rateCents) : '—') + '</span>' +
+      '<span class="pill' + (meta.pill ? ' ' + meta.pill : '') + '">' + meta.label + '</span>' +
+      (f.otrReference ? '<span class="fx-when">OTR ref: ' + esc(f.otrReference) + '</span>' : '') +
+      (f.submittedAt ? '<span class="fx-when">' + fmtDateOnly(f.submittedAt) + '</span>' : '') +
+      '</div>';
+  }).join('');
+  main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>OTR Factoring</h1></div>' +
+    '<p class="small muted">Synced with OTR Solutions — whatever OTR shows, shows here.</p>' +
+    '<div class="card fx-card"><div class="fx-create">' +
+    '<button type="button" class="btn btn-gold fx-create-btn" id="fxCreateBtn">Create Invoice</button>' +
+    '<p class="small muted fx-create-note">Opens the official OTR portal right here — create the invoice there and it appears in the list below automatically.</p>' +
+    '</div></div>' +
+    '<div class="card fx-card"><h2>Factored invoices — synced from OTR</h2>' +
+    (fxList.length ? '<div class="fx-rows">' + fxRows + '</div>' : '<p class="empty">No invoices yet — every invoice you submit at OTR lands here automatically with OTR’s live status.</p>') +
+    '</div>' +
+    '<div class="fx-otr-overlay" id="fxOtrOverlay" hidden>' +
+    '<div class="fx-otr-panel">' +
+    '<div class="fx-otr-head"><span class="fx-otr-title">OTR Solutions — Create Invoice</span>' +
+    '<span class="fx-otr-head-btns">' +
+    '<button type="button" class="btn btn-ghost btn-sm" id="fxOtrPopup">Open OTR portal in a pop-up window</button>' +
+    '<button type="button" class="btn btn-ghost btn-sm" id="fxOtrClose">Close</button>' +
+    '</span></div>' +
+    '<iframe class="fx-otr-frame" src="https://portal.otrsolutions.com" title="OTR Solutions portal"></iframe>' +
+    '</div></div></div>';
+  const overlay = main.querySelector('#fxOtrOverlay');
+  main.querySelector('#fxCreateBtn').addEventListener('click', () => { overlay.hidden = false; });
+  main.querySelector('#fxOtrClose').addEventListener('click', () => { overlay.hidden = true; });
+  main.querySelector('#fxOtrPopup').addEventListener('click', () => {
+    window.open('https://portal.otrsolutions.com', 'otrPortal', 'width=1200,height=800,menubar=no,toolbar=no,location=yes,status=no');
+  });
 }
 
 function detailBox(label, value, goldBorder) {
