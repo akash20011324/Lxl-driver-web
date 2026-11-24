@@ -16,6 +16,7 @@ import { seedRealFleet } from './seed-fleet.js';
 import { notifyDriver } from './push.js';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createWorker } from 'tesseract.js';
+import { PDFDocument } from 'pdf-lib';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
@@ -5400,6 +5401,83 @@ admin.post('/factoring/:loadId/status', (req, res) => {
   if (!FACTORING_STATUSES.includes(status))
     return err(res, 400, 'Status must be one of: ' + FACTORING_STATUSES.join(', '));
   res.json(serializeFactoringLoad(applyFactoringStatus(load, status, otrReference)));
+});
+
+// --- Paperwork packet (owner, 2026-11-24) --------------------------------
+// One click downloads ONE PDF holding everything OTR asks for on an
+// invoice: the load's rate confirmation, pickup BOL(s) and delivery
+// paperwork / POD, in that order. It exists because OTR's app runs
+// inside a sealed cross-origin frame on the Factoring page — its
+// "Add Paperwork" picker can only take files from the admin's own
+// computer, never from the portal — so instead of hunting the same
+// papers through Documents one by one, the admin downloads this one
+// ready file and picks it in OTR's dialog. PDF paperwork is copied
+// page-for-page; photo paperwork (JPG/PNG) becomes one fitted page
+// per picture on US Letter. A part that cannot be packed (missing
+// file on disk, unsupported type) is skipped and named in the
+// X-Packet-Skipped header; the packet fails only when nothing at
+// all could be packed.
+admin.get('/factoring/:loadId/packet', async (req, res) => {
+  const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.loadId);
+  if (!load) return err(res, 404, 'Load not found');
+  const parts = [];
+  const rc = factoringRateConFor(load);
+  if (rc && rc.fileId) {
+    const f = getFileRow(rc.fileId);
+    if (f) parts.push({ label: 'Rate confirmation', file: f });
+  }
+  const docs = db
+    .prepare(
+      "SELECT * FROM documents WHERE loadId = ? AND kind IN ('pickup_bol', 'delivery_bol') ORDER BY CASE kind WHEN 'pickup_bol' THEN 0 ELSE 1 END, id",
+    )
+    .all(load.id);
+  for (const d of docs) {
+    const f = getFileRow(d.fileId);
+    if (f) parts.push({ label: d.kind === 'pickup_bol' ? 'Pickup BOL' : 'Delivery paperwork', file: f });
+  }
+  if (!parts.length)
+    return err(res, 400, 'This load has no paperwork on file yet — add the rate confirmation and BOL first.');
+  const out = await PDFDocument.create();
+  let packed = 0;
+  const skipped = [];
+  for (const part of parts) {
+    let buf;
+    try {
+      buf = fs.readFileSync(path.join(UPLOADS_DIR, part.file.storedFilename));
+    } catch {
+      skipped.push(part.label);
+      continue;
+    }
+    const mime = String(part.file.mimeType || '').toLowerCase();
+    try {
+      if (mime === 'application/pdf' || buf.subarray(0, 4).toString('latin1') === '%PDF') {
+        const src = await PDFDocument.load(buf, { ignoreEncryption: true });
+        const pages = await out.copyPages(src, src.getPageIndices());
+        for (const p of pages) out.addPage(p);
+        packed++;
+      } else if (mime === 'image/jpeg' || mime === 'image/png') {
+        const img = mime === 'image/png' ? await out.embedPng(buf) : await out.embedJpg(buf);
+        const page = out.addPage([612, 792]); // US Letter, points
+        const margin = 36;
+        const scale = Math.min((612 - margin * 2) / img.width, (792 - margin * 2) / img.height, 1);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        page.drawImage(img, { x: (612 - w) / 2, y: (792 - h) / 2, width: w, height: h });
+        packed++;
+      } else {
+        skipped.push(part.label);
+      }
+    } catch {
+      skipped.push(part.label);
+    }
+  }
+  if (!packed)
+    return err(res, 400, "None of this load's paperwork could be packed into a PDF — open the files from Documents instead.");
+  const pdfBytes = await out.save();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'attachment; filename="' + load.reference + '-paperwork.pdf"');
+  if (skipped.length) res.setHeader('X-Packet-Skipped', skipped.join(', ').slice(0, 200));
+  res.send(Buffer.from(pdfBytes));
 });
 
 // --- OTR factoring sync (owner, 2026-11-23) -------------------------------

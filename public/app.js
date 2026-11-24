@@ -5523,7 +5523,11 @@ async function renderDriverView(view) {
       cross-origin iframe. A pop-up fallback button sits in the
       overlay's title bar. While the overlay is open, liveViewBusy
       holds the 10-second refresh so a re-render can never reload
-      the frame and wipe an in-progress invoice.
+      the frame and wipe an in-progress invoice. The frame is
+      LAZY-LOADED (src assigned on first open, while the overlay is
+      visible at full size): the app measures the frame when it
+      boots and locks into a ~24px-wide column if it boots inside
+      the still-hidden overlay.
    2) Under it, the list of factored invoices synced from OTR —
       every load whose factoring status has moved past not_submitted,
       with OTR's status pill, OTR's reference and the date it went
@@ -5556,12 +5560,39 @@ async function viewFactoring(main) {
       (f.submittedAt ? '<span class="fx-when">' + fmtDateOnly(f.submittedAt) + '</span>' : '') +
       '</div>';
   }).join('');
+  // Paperwork packets (owner, 2026-11-24): loads that still need an
+  // invoice at OTR (not submitted, or only queued here) and have
+  // paperwork on file. One click downloads the load's rate con + BOL
+  // + delivery papers as a single PDF — the one file the admin then
+  // picks in OTR's Add Paperwork dialog, which can only read files
+  // from his own computer.
+  const PK_META = {
+    not_submitted: { label: 'Not submitted', pill: '' },
+    queued: { label: 'Queued', pill: 'gold' },
+  };
+  const pkList = (Array.isArray(factoring) ? factoring : []).filter((f) => PK_META[f.factoringStatus] && (f.hasRateCon || f.hasBol || f.hasPod));
+  const pkRows = pkList.map(f => {
+    const meta = PK_META[f.factoringStatus];
+    const docs = [f.hasRateCon ? 'Rate con' : null, f.hasBol ? 'BOL' : null, f.hasPod ? 'Delivery papers' : null].filter(Boolean).join(' · ');
+    return '<div class="fx-row">' +
+      '<span class="rc-ref">' + esc(f.reference) + '</span>' +
+      '<span class="rc-broker">' + esc(f.broker || '—') + '</span>' +
+      '<span class="rc-route">' + esc(fxPlace(f.pickupCity, f.pickupState)) + ' → ' + esc(fxPlace(f.deliveryCity, f.deliveryState)) + '</span>' +
+      '<span class="rc-rate">' + (f.rateCents != null ? fmtMoney(f.rateCents) : '—') + '</span>' +
+      '<span class="pill' + (meta.pill ? ' ' + meta.pill : '') + '">' + meta.label + '</span>' +
+      '<span class="fx-when">' + esc(docs) + '</span>' +
+      '<button type="button" class="btn btn-sm fx-packet-btn" data-fx-packet="' + f.loadId + '" data-fx-ref="' + esc(f.reference) + '">Download paperwork packet</button>' +
+      '</div>';
+  }).join('');
   main.innerHTML = '<div class="rc-page"><div class="rc-head"><h1>OTR Factoring</h1></div>' +
     '<p class="small muted">Synced with OTR Solutions — whatever OTR shows, shows here.</p>' +
     '<div class="card fx-card"><div class="fx-create">' +
     '<button type="button" class="btn btn-gold fx-create-btn" id="fxCreateBtn">Create Invoice</button>' +
     '<p class="small muted fx-create-note">Opens OTR’s app right here on this page — sign in once with your OTR login, then Invoices → Add Invoice. Every invoice you submit appears in the list below automatically.</p>' +
     '</div></div>' +
+    (pkList.length ? '<div class="card fx-card"><h2>Paperwork packets — for new invoices</h2>' +
+    '<p class="small muted">OTR’s window can only take files from your computer. Download a load’s packet — rate con, BOL and delivery papers in one PDF — then pick that one file in Add Paperwork.</p>' +
+    '<div class="fx-rows">' + pkRows + '</div></div>' : '') +
     '<div class="card fx-card"><h2>Factored invoices — synced from OTR</h2>' +
     (fxList.length ? '<div class="fx-rows">' + fxRows + '</div>' : '<p class="empty">No invoices yet — every invoice you submit at OTR lands here automatically with OTR’s live status.</p>') +
     '</div>' +
@@ -5572,14 +5603,35 @@ async function viewFactoring(main) {
     '<button type="button" class="btn btn-ghost btn-sm" id="fxOtrPopup">Open OTR app in a pop-up window</button>' +
     '<button type="button" class="btn btn-ghost btn-sm" id="fxOtrClose">Close</button>' +
     '</span></div>' +
-    '<iframe class="fx-otr-frame" src="https://app.otrsolutions.com" title="OTR Solutions app" allow="clipboard-write; camera; microphone" allowfullscreen></iframe>' +
+    '<div class="fx-otr-loading" id="fxOtrLoading" hidden>Loading OTR’s app…</div>' +
+    '<iframe class="fx-otr-frame" id="fxOtrFrame" data-src="https://app.otrsolutions.com" width="100%" height="100%" title="OTR Solutions app" allow="clipboard-write; camera; microphone" allowfullscreen></iframe>' +
     '</div></div></div>';
   const overlay = main.querySelector('#fxOtrOverlay');
-  main.querySelector('#fxCreateBtn').addEventListener('click', () => { overlay.hidden = false; });
+  const frame = main.querySelector('#fxOtrFrame');
+  const loading = main.querySelector('#fxOtrLoading');
+  // Lazy-load the OTR app: the iframe renders WITHOUT a src and gets
+  // it only on the first open, while the overlay is visible at full
+  // size — the app measures the frame at boot and locks into a broken
+  // ~24px-wide column if it boots inside the hidden overlay. The src
+  // is assigned exactly once; closing and reopening never reloads it,
+  // so the admin's session and in-progress invoice survive.
+  let fxOtrStarted = false;
+  frame.addEventListener('load', () => { if (fxOtrStarted) loading.hidden = true; });
+  main.querySelector('#fxCreateBtn').addEventListener('click', () => {
+    overlay.hidden = false;
+    if (!fxOtrStarted) {
+      fxOtrStarted = true;
+      loading.hidden = false;
+      frame.src = frame.dataset.src;
+    }
+  });
   main.querySelector('#fxOtrClose').addEventListener('click', () => { overlay.hidden = true; });
   main.querySelector('#fxOtrPopup').addEventListener('click', () => {
     window.open('https://app.otrsolutions.com', 'otrPortal', 'width=1200,height=800,menubar=no,toolbar=no,location=yes,status=no,noopener');
   });
+  main.querySelectorAll('[data-fx-packet]').forEach(b => b.addEventListener('click', () => {
+    downloadFileAction('/api/admin/factoring/' + b.dataset.fxPacket + '/packet', b.dataset.fxRef + '-paperwork.pdf');
+  }));
 }
 
 function detailBox(label, value, goldBorder) {
