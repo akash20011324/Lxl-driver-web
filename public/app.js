@@ -1473,12 +1473,6 @@ function liveViewBusy(view, main) {
     const picker = document.getElementById('outlookPicker');
     if (picker && picker.style.display !== 'none' && picker.innerHTML) return true;
   }
-  if (view === 'factoring') {
-    // The embedded OTR portal overlay is open: hold the swap off so
-    // the admin's work inside OTR is never wiped by a refresh.
-    const ov = document.getElementById('fxOtrOverlay');
-    if (ov && !ov.hidden) return true;
-  }
   return false;
 }
 
@@ -5513,11 +5507,11 @@ async function renderDriverView(view) {
 /* OTR Factoring (owner, 2026-11-23): its OWN sidebar section, directly
    under Rate Cons. The section does exactly two things:
    1) One gold "Create Invoice" button opens the official OTR
-      Solutions portal embedded in an overlay right on this page —
-      the admin creates and submits invoices there, on OTR's own
-      site, without leaving the portal. (A pop-up fallback button
-      sits in the overlay's title bar in case a browser refuses to
-      frame OTR's page.)
+      Solutions portal in a small pop-up window over this page —
+      OTR refuses to render its portal inside a frame (verified live
+      2026-11-23: "portal.otrsolutions.com refused to connect"), so
+      the pop-up is the door. The admin creates and submits invoices
+      there, on OTR's own site, without leaving the portal.
    2) Under it, the list of factored invoices synced from OTR —
       every load whose factoring status has moved past not_submitted,
       with OTR's status pill, OTR's reference and the date it went
@@ -5554,25 +5548,13 @@ async function viewFactoring(main) {
     '<p class="small muted">Synced with OTR Solutions — whatever OTR shows, shows here.</p>' +
     '<div class="card fx-card"><div class="fx-create">' +
     '<button type="button" class="btn btn-gold fx-create-btn" id="fxCreateBtn">Create Invoice</button>' +
-    '<p class="small muted fx-create-note">Opens the official OTR portal right here — create the invoice there and it appears in the list below automatically.</p>' +
+    '<p class="small muted fx-create-note">Opens the official OTR portal in a small window over this page — OTR doesn’t allow its portal inside a frame. Create the invoice there and it appears in the list below automatically.</p>' +
     '</div></div>' +
     '<div class="card fx-card"><h2>Factored invoices — synced from OTR</h2>' +
     (fxList.length ? '<div class="fx-rows">' + fxRows + '</div>' : '<p class="empty">No invoices yet — every invoice you submit at OTR lands here automatically with OTR’s live status.</p>') +
-    '</div>' +
-    '<div class="fx-otr-overlay" id="fxOtrOverlay" hidden>' +
-    '<div class="fx-otr-panel">' +
-    '<div class="fx-otr-head"><span class="fx-otr-title">OTR Solutions — Create Invoice</span>' +
-    '<span class="fx-otr-head-btns">' +
-    '<button type="button" class="btn btn-ghost btn-sm" id="fxOtrPopup">Open OTR portal in a pop-up window</button>' +
-    '<button type="button" class="btn btn-ghost btn-sm" id="fxOtrClose">Close</button>' +
-    '</span></div>' +
-    '<iframe class="fx-otr-frame" src="https://portal.otrsolutions.com" title="OTR Solutions portal"></iframe>' +
-    '</div></div></div>';
-  const overlay = main.querySelector('#fxOtrOverlay');
-  main.querySelector('#fxCreateBtn').addEventListener('click', () => { overlay.hidden = false; });
-  main.querySelector('#fxOtrClose').addEventListener('click', () => { overlay.hidden = true; });
-  main.querySelector('#fxOtrPopup').addEventListener('click', () => {
-    window.open('https://portal.otrsolutions.com', 'otrPortal', 'width=1200,height=800,menubar=no,toolbar=no,location=yes,status=no');
+    '</div></div>';
+  main.querySelector('#fxCreateBtn').addEventListener('click', () => {
+    window.open('https://portal.otrsolutions.com', 'otrPortal', 'width=1200,height=800,menubar=no,toolbar=no,location=yes,status=no,noopener');
   });
 }
 

@@ -500,6 +500,25 @@ export function openDb(dataDir) {
   if (!columns.some((c) => c.name === 'sidebarOrder')) {
     db.exec('ALTER TABLE users ADD COLUMN sidebarOrder TEXT');
   }
+  // Saved sidebar orders from before OTR Factoring existed do not
+  // contain 'factoring', so the menu code parked the new page at the
+  // end of the sidebar. Insert it immediately after 'ratecons' in
+  // every saved order that is missing it, leaving the rest of each
+  // admin's arrangement exactly as they left it. Idempotent: orders
+  // already containing 'factoring' are untouched, and a saved order
+  // with no 'ratecons' in it is left alone too — the menu's default
+  // tail order already places 'factoring' right after 'ratecons'.
+  try {
+    for (const u of db.prepare("SELECT id, sidebarOrder FROM users WHERE sidebarOrder IS NOT NULL AND sidebarOrder <> ''").all()) {
+      let order = null;
+      try { order = JSON.parse(u.sidebarOrder); } catch { order = null; }
+      if (!Array.isArray(order) || order.includes('factoring')) continue;
+      const rcIdx = order.indexOf('ratecons');
+      if (rcIdx < 0) continue;
+      order.splice(rcIdx + 1, 0, 'factoring');
+      db.prepare('UPDATE users SET sidebarOrder = ? WHERE id = ?').run(JSON.stringify(order), u.id);
+    }
+  } catch { /* users table may not exist yet on a brand-new database */ }
   // Migrate databases created before email signatures: the admin's
   // Outlook signature (HTML), captured from their own sent mail and
   // appended to Documents sends so portal emails carry it just like
