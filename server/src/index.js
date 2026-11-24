@@ -3915,6 +3915,7 @@ admin.delete('/loads/:id', (req, res) => {
     db.prepare('DELETE FROM documents WHERE loadId = ?').run(load.id);
     for (const d of docs) db.prepare('DELETE FROM files WHERE id = ?').run(d.fileId);
     db.prepare('UPDATE rate_confirmations SET loadId = NULL WHERE loadId = ?').run(load.id);
+    db.prepare('DELETE FROM deadhead_legs WHERE fromLoadId = ? OR toLoadId = ?').run(load.id, load.id);
     db.prepare('DELETE FROM broker_access WHERE loadId = ?').run(load.id);
     db.prepare('UPDATE cash_entries SET loadId = NULL WHERE loadId = ?').run(load.id);
     db.prepare('DELETE FROM loads WHERE id = ?').run(load.id);
