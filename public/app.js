@@ -3137,7 +3137,9 @@ async function viewLoads(main) {
     const p0 = pickups[0];
     const dN = deliveries[deliveries.length - 1];
     const body = {
-      driverId: Number(document.getElementById('al-driver').value),
+      // Empty selection = "Unassigned" (edit mode only): send null so
+      // the server takes the load off its driver (owner, 2026-11-24).
+      driverId: document.getElementById('al-driver').value === '' ? null : Number(document.getElementById('al-driver').value),
       reference: document.getElementById('al-ref').value.trim(),
       pickupLocation: p0.location,
       pickupWarehouse: p0.warehouse,
@@ -3169,7 +3171,20 @@ async function viewLoads(main) {
     const l = list.find((x) => String(x.id) === b.dataset.editLoad);
     if (!l) return;
     state.editingLoadId = l.id;
-    document.getElementById('al-driver').value = String(l.driverId);
+    // Unassign support (owner, 2026-11-24): in edit mode the Driver
+    // dropdown gains an "Unassigned" choice, so a cancelled load can
+    // be taken off its driver and then deleted from the list. The
+    // select's `required` must go, or the browser blocks saving with
+    // Unassigned picked.
+    const driverSel = document.getElementById('al-driver');
+    if (!driverSel.querySelector('option[value=""]')) {
+      const un = document.createElement('option');
+      un.value = '';
+      un.textContent = 'Unassigned';
+      driverSel.prepend(un);
+    }
+    driverSel.required = false;
+    driverSel.value = l.driverId != null ? String(l.driverId) : '';
     document.getElementById('al-ref').value = l.reference || '';
     document.getElementById('al-pickup').value = l.pickupLocation || '';
     document.getElementById('al-pickup-wh').value = l.pickupWarehouse || '';

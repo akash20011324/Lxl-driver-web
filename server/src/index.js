@@ -3834,14 +3834,18 @@ admin.post('/loads/:id/edit', (req, res) => {
   const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.id);
   if (!load) return err(res, 404, 'Load not found');
   // Reassignment: only when the body names a different, valid driver.
-  // An absent/empty driverId leaves the assignment untouched (loads
-  // are never unassigned through edit).
-  const requestedDriverId = req.body && req.body.driverId != null && req.body.driverId !== '' ? Number(req.body.driverId) : null;
+  // An absent driverId leaves the assignment untouched. An explicitly
+  // null/empty driverId UNASSIGNS the load (owner, 2026-11-24: the
+  // Edit form's Driver dropdown gets an "Unassigned" option so a
+  // cancelled load can be taken off its driver, then deleted).
+  const hasDriverField = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'driverId');
+  const requestedDriverId = hasDriverField && req.body.driverId != null && req.body.driverId !== '' ? Number(req.body.driverId) : null;
   const reassignTo = requestedDriverId !== null && Number.isFinite(requestedDriverId) && requestedDriverId !== load.driverId ? requestedDriverId : null;
   if (reassignTo !== null) {
     const newDriver = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(reassignTo);
     if (!newDriver) return err(res, 404, 'Driver not found');
   }
+  const unassign = hasDriverField && requestedDriverId === null && load.driverId !== null;
   let { pickupLocation, pickupWarehouse, pickupNumber, deliveryLocation, deliveryWarehouse, deliveryNumber, notes } = req.body || {};
   // Multi-stop edit: the full stop list replaces the stored one and
   // the primary columns follow its first pickup / last delivery.
@@ -3902,8 +3906,14 @@ admin.post('/loads/:id/edit', (req, res) => {
   if (reassignTo !== null) {
     db.prepare('UPDATE loads SET driverId = ? WHERE id = ?').run(reassignTo, load.id);
   }
+  if (unassign) {
+    db.prepare('UPDATE loads SET driverId = NULL WHERE id = ?').run(load.id);
+  }
   const updated = db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id);
-  if (reassignTo !== null) {
+  if (unassign) {
+    // Tell the driver who lost the load (notifications-for-everything).
+    notifyDriver(db, load.driverId, 'load_unassigned', 'Load unassigned', `Load ${updated.reference}: ${updated.pickupLocation} → ${updated.deliveryLocation} was taken off your list.`).catch(() => {});
+  } else if (reassignTo !== null) {
     // Tell the new driver (fire-and-forget — never blocks the save).
     notifyDriver(db, reassignTo, 'load_assigned', 'New load assigned', `Load ${updated.reference}: ${updated.pickupLocation} → ${updated.deliveryLocation}.`).catch(() => {});
   } else if (updated.driverId && updated.status === 'active') {
