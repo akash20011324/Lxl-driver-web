@@ -5367,20 +5367,18 @@ admin.post('/factoring/:loadId/submit', (req, res) => {
   res.json(serializeFactoringLoad(updated));
 });
 
-// Manual status upkeep until the OTR API sync replaces it: set the
-// status and (optionally) OTR's reference for the load.
-admin.post('/factoring/:loadId/status', (req, res) => {
-  const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.loadId);
-  if (!load) return err(res, 404, 'Load not found');
-  const { status, otrReference } = req.body || {};
-  if (!FACTORING_STATUSES.includes(status))
-    return err(res, 400, 'Status must be one of: ' + FACTORING_STATUSES.join(', '));
+// The one place a load's factoring status is written, shared by the
+// admin status endpoint and the OTR sync endpoint below so both stamp
+// factoringSubmittedAt identically: resetting to not_submitted clears
+// the stamp; moving to any other status stamps it if the load was
+// never queued/submitted here. An undefined otrReference keeps the
+// stored one; any other value is trimmed (max 80 chars) and an empty
+// result clears it. Returns the updated load row.
+function applyFactoringStatus(load, status, otrReference) {
   const ref =
     otrReference === undefined
       ? (load.factoringOtrReference ?? null)
       : String(otrReference || '').trim().slice(0, 80) || null;
-  // Resetting to not_submitted clears the queue stamp; moving forward
-  // by hand stamps it if the load was never queued here.
   let submittedAt = load.factoringSubmittedAt ?? null;
   if (status === 'not_submitted') submittedAt = null;
   else if (!submittedAt) submittedAt = now();
@@ -5390,8 +5388,78 @@ admin.post('/factoring/:loadId/status', (req, res) => {
     ref,
     load.id,
   );
-  const updated = db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id);
-  res.json(serializeFactoringLoad(updated));
+  return db.prepare('SELECT * FROM loads WHERE id = ?').get(load.id);
+}
+
+// Manual status upkeep until the OTR API sync replaces it: set the
+// status and (optionally) OTR's reference for the load.
+admin.post('/factoring/:loadId/status', (req, res) => {
+  const load = db.prepare('SELECT * FROM loads WHERE id = ?').get(req.params.loadId);
+  if (!load) return err(res, 404, 'Load not found');
+  const { status, otrReference } = req.body || {};
+  if (!FACTORING_STATUSES.includes(status))
+    return err(res, 400, 'Status must be one of: ' + FACTORING_STATUSES.join(', '));
+  res.json(serializeFactoringLoad(applyFactoringStatus(load, status, otrReference)));
+});
+
+// --- OTR factoring sync (owner, 2026-11-23) -------------------------------
+// The standing sync job reads OTR's portal in a browser but cannot use
+// the admin API (the admin Bearer token lives in the portal page), so
+// it writes through this narrow path instead: two routes guarded by a
+// shared secret in the "x-otr-sync-secret" header, compared in
+// constant time. When OTR_SYNC_SECRET is not set on the server the
+// routes answer 503 to everything — the sync stays off until the
+// secret is configured. Sync writes deliberately raise NO admin bell:
+// the sync runs every few minutes and would spam it.
+function otrSyncGuard(req, res, next) {
+  const expected = process.env.OTR_SYNC_SECRET;
+  if (!expected) return res.status(503).json({ ok: false, error: 'sync not configured' });
+  const provided = req.get('x-otr-sync-secret');
+  if (!provided) return res.status(401).json({ ok: false });
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ ok: false });
+  next();
+}
+
+app.get('/api/factoring-sync', otrSyncGuard, (_req, res) => {
+  const loads = db.prepare('SELECT * FROM loads ORDER BY createdAt DESC, id DESC').all();
+  res.json({
+    ok: true,
+    loads: loads.map((l) => ({
+      id: l.id,
+      reference: l.reference,
+      factoringStatus: FACTORING_STATUSES.includes(l.factoringStatus) ? l.factoringStatus : 'not_submitted',
+      factoringSubmittedAt: l.factoringSubmittedAt ?? null,
+      factoringOtrReference: l.factoringOtrReference ?? null,
+    })),
+  });
+});
+
+// Body: {"updates":[{"reference":"LXL-1201115","status":"submitted",
+// "otrReference":"LXLD-60 · Inv 1201115A"}, ...]}. Each update is
+// validated and applied independently — one bad item never fails the
+// batch; its result entry says why.
+app.post('/api/factoring-sync', otrSyncGuard, (req, res) => {
+  const updates = req.body && Array.isArray(req.body.updates) ? req.body.updates : null;
+  if (!updates) return res.status(400).json({ ok: false, error: 'updates must be an array' });
+  const results = updates.map((u) => {
+    const reference = u && typeof u.reference === 'string' && u.reference.trim() ? u.reference : null;
+    if (!reference)
+      return { reference: u && u.reference !== undefined ? u.reference : null, ok: false, error: 'invalid reference' };
+    if (!FACTORING_STATUSES.includes(u.status)) return { reference, ok: false, error: 'invalid status' };
+    if (
+      u.otrReference !== undefined &&
+      u.otrReference !== null &&
+      (typeof u.otrReference !== 'string' || u.otrReference.length > 120)
+    )
+      return { reference, ok: false, error: 'invalid otrReference' };
+    const load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(reference);
+    if (!load) return { reference, ok: false, error: 'load not found' };
+    applyFactoringStatus(load, u.status, u.otrReference === null ? undefined : u.otrReference);
+    return { reference, ok: true };
+  });
+  res.json({ ok: true, results });
 });
 
 // Save a rate confirmation, naming the file from the load. Shared by the
