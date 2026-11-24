@@ -1833,7 +1833,12 @@ function shortPlace(addr) {
 }
 function fmtShortTime(iso, tz) {
   if (!iso) return '—';
-  try { return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz || 'America/Indiana/Indianapolis' }); } catch (e) { return '—'; }
+  const s = String(iso);
+  if (!/(Z|[+-]\d{2}:?\d{2})$/.test(s)) {
+    const d = new Date(s);
+    return isNaN(d) ? '—' : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  try { return new Date(s).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz || 'America/Indiana/Indianapolis' }); } catch (e) { return '—'; }
 }
 /* Google Maps loader: fetches the browser key from the server (admin-only)
    and loads the Maps JavaScript API once. Returns google.maps, or null when
@@ -2844,11 +2849,24 @@ function browserTimezone() {
   catch { return 'America/Indiana/Indianapolis'; }
 }
 
-function toLocalInput(iso) {
+function toLocalInput(iso, tz) {
   if (!iso) return '';
-  const d = new Date(iso);
+  const s = String(iso);
+  // Naive wall-clock values (the current format) fill the field as-is.
+  const naive = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(s);
+  if (naive && !/(Z|[+-]\d{2}:?\d{2})$/.test(s)) return naive[1] + 'T' + naive[2];
+  const d = new Date(s);
   if (isNaN(d)) return '';
   const p = n => String(n).padStart(2, '0');
+  // Legacy UTC values: show the wall time in the zone the load was
+  // entered in, so editing shows the time the admin originally typed.
+  if (tz) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d);
+      const g = ty => parts.find(x => x.type === ty).value;
+      return g('year') + '-' + g('month') + '-' + g('day') + 'T' + g('hour') + ':' + g('minute');
+    } catch (e) { /* fall through to browser-local */ }
+  }
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
 /* City/state from a location string's last segment:
@@ -3094,7 +3112,12 @@ async function viewLoads(main) {
     const readBlock = (b) => ({
       location: b.querySelector('.al-s-loc').value.trim(),
       warehouse: b.querySelector('.al-s-wh').value.trim() || undefined,
-      at: b.querySelector('.al-s-at').value ? new Date(b.querySelector('.al-s-at').value).toISOString() : undefined,
+      // Appointment times are facility wall-clock times (owner rule,
+      // 2026-11-23): the time typed is the time, in every timezone.
+      // Send the naive value as-is — converting through the browser's
+      // timezone shifted appointments by hours whenever the admin and
+      // the driver were in different zones.
+      at: b.querySelector('.al-s-at').value ? (b.querySelector('.al-s-at').value.length === 16 ? b.querySelector('.al-s-at').value + ':00' : b.querySelector('.al-s-at').value) : undefined,
       number: b.querySelector('.al-s-no').value.trim() || undefined,
     });
     const pickups = [...document.querySelectorAll('#al-pickups .al-stop-block')].map(readBlock);
@@ -3138,11 +3161,11 @@ async function viewLoads(main) {
     document.getElementById('al-ref').value = l.reference || '';
     document.getElementById('al-pickup').value = l.pickupLocation || '';
     document.getElementById('al-pickup-wh').value = l.pickupWarehouse || '';
-    document.getElementById('al-pickup-at').value = toLocalInput(l.pickupAt);
+    document.getElementById('al-pickup-at').value = toLocalInput(l.pickupAt, l.pickupTimezone);
     document.getElementById('al-pickup-no').value = l.pickupNumber || '';
     document.getElementById('al-delivery').value = l.deliveryLocation || '';
     document.getElementById('al-delivery-wh').value = l.deliveryWarehouse || '';
-    document.getElementById('al-delivery-at').value = toLocalInput(l.deliveryAt);
+    document.getElementById('al-delivery-at').value = toLocalInput(l.deliveryAt, l.deliveryTimezone);
     document.getElementById('al-delivery-no').value = l.deliveryNumber || '';
     document.getElementById('al-notes').value = l.notes || '';
     // Multi-stop loads: rebuild the extra stop blocks. Extra pickups

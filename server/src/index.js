@@ -146,8 +146,18 @@ function parseStops(raw) {
 // One-line summary of every stop, appended to the load notes so any
 // client (including the current driver app build) shows all stops.
 function stopsSummary(stops) {
+  const fmtAt = (at) => {
+    const str = String(at);
+    // Naive wall-clock times render as-is (parsed as UTC, shown in UTC);
+    // legacy UTC instants render in the company-base zone.
+    if (!/(Z|[+-]\d{2}:?\d{2})$/.test(str)) {
+      const d = new Date(str);
+      return isNaN(d) ? str : d.toLocaleString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+    return new Date(str).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  };
   const fmt = (kind, s, i) => kind + ' ' + (i + 1) + ': ' + (s.warehouse || s.location) + (s.warehouse ? ' (' + s.location + ')' : '')
-    + (s.at ? ' — ' + new Date(s.at).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '')
+    + (s.at ? ' — ' + fmtAt(s.at) : '')
     + (s.number ? ', #' + s.number : '');
   return 'Stops — ' + [...stops.pickups.map((s, i) => fmt('Pickup', s, i)), ...stops.deliveries.map((s, i) => fmt('Delivery', s, i))].join('; ');
 }
