@@ -9438,7 +9438,7 @@ async function findOrCreateLoadFromRc(fileBuffer, subject, routeOverride) {
 
 admin.post('/rate-confirmations/from-outlook', async (req, res) => {
   try {
-    const { loadId, messageId, attachmentId, subject, pickupCity, pickupState, pickupZip, deliveryCity, deliveryState, deliveryZip } = req.body || {};
+    const { loadId, messageId, attachmentId, subject, broker, pickupCity, pickupState, pickupZip, deliveryCity, deliveryState, deliveryZip } = req.body || {};
     if (!messageId || !attachmentId)
       return err(res, 400, 'messageId and attachmentId are required');
     const user = getUserById(req.user.id);
@@ -9458,7 +9458,7 @@ admin.post('/rate-confirmations/from-outlook', async (req, res) => {
       if (auto.duplicateRc) return res.status(201).json({ ...serializeRateCon(auto.duplicateRc), duplicate: true });
       useLoadId = auto.load.id;
     }
-    const rc = await createRateCon({ loadId: useLoadId, pickupState, deliveryState, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
+    const rc = await createRateCon({ loadId: useLoadId, broker, pickupState, deliveryState, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
     res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadUnassigned: !!auto.unassigned, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);

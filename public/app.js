@@ -5147,6 +5147,7 @@ async function viewRateCons(main) {
     '<div class="field"><label>Load</label><select name="loadId" id="rcLoad"><option value="">✨ Create the load automatically from this RC</option>' + loadOptions + '</select></div>' +
     '</div>' +
     '<div class="form-row">' +
+    '<div class="field"><label>Broker</label><input type="text" id="rcBroker" autocomplete="off" placeholder="Read from the RC — correct it if it\'s wrong"></div>' +
     '<div class="field"><label>Amount</label><input type="number" id="rcAmount" min="0" step="0.01" placeholder="e.g. 2400.00 — or leave blank and the system reads it"></div>' +
     '</div><p class="small muted" id="rcAmountHint" style="display:none">Detected from the RC — correct it if it\'s wrong.</p>' +
     '<p class="small" id="rcReadSummary" style="display:none"></p>' +
@@ -5210,6 +5211,7 @@ async function viewRateCons(main) {
     // rate on the server and pre-fill the box BEFORE uploading — the
     // admin can correct it, and the box value is what gets saved.
     const rcAmountEl = document.getElementById('rcAmount');
+    const rcBrokerEl = document.getElementById('rcBroker');
     const rcAmountHint = document.getElementById('rcAmountHint');
     const rcReadSummary = document.getElementById('rcReadSummary');
     // Route correction boxes (owner, 2026-11-25): pre-filled with what
@@ -5240,6 +5242,7 @@ async function viewRateCons(main) {
     };
     document.getElementById('rcFile').addEventListener('change', async () => {
       if (rcAmountEl) rcAmountEl.value = '';
+      if (rcBrokerEl) rcBrokerEl.value = '';
       if (rcAmountHint) rcAmountHint.style.display = 'none';
       if (rcReadSummary) { rcReadSummary.style.display = 'none'; rcReadSummary.textContent = ''; }
       rcDetected = null;
@@ -5259,6 +5262,7 @@ async function viewRateCons(main) {
         }
         if (det) {
           rcDetected = det;
+          if (rcBrokerEl && det.broker) rcBrokerEl.value = det.broker;
           for (const k of Object.keys(rcRouteEls)) if (rcRouteEls[k]) rcRouteEls[k].value = det[k] || '';
           if (rcRouteFields && (det.pickupCity || det.deliveryCity)) rcRouteFields.style.display = '';
         }
@@ -5286,8 +5290,13 @@ async function viewRateCons(main) {
       const loadId = document.getElementById('rcLoad').value;
       try {
         let res;
+        // Broker correction (owner, 2026-11-25): same changed-only
+        // rule as the route boxes — an untouched broker box sends
+        // nothing and the read stands.
+        const brokerVal = rcBrokerEl ? rcBrokerEl.value.trim() : '';
+        const brokerFix = brokerVal && (!rcDetected || brokerVal.toUpperCase() !== String(rcDetected.broker || '').trim().toUpperCase()) ? brokerVal : null;
         if (state.rcOutlook) {
-          res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId, subject: state.rcOutlook.subject, ...changedRouteFields() }) });
+          res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId, subject: state.rcOutlook.subject, ...(brokerFix ? { broker: brokerFix } : {}), ...changedRouteFields() }) });
         } else {
           const fd = new FormData(rcForm);
           const amtVal = rcAmountEl ? rcAmountEl.value.trim() : '';
@@ -5295,6 +5304,7 @@ async function viewRateCons(main) {
             const dollars = parseFloat(amtVal);
             if (Number.isFinite(dollars) && dollars >= 0) fd.set('rateCents', String(Math.round(dollars * 100)));
           }
+          if (brokerFix) fd.set('broker', brokerFix);
           const routeFix = changedRouteFields();
           for (const k of Object.keys(routeFix)) fd.set(k, routeFix[k]);
           res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
