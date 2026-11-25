@@ -5150,6 +5150,19 @@ async function viewRateCons(main) {
     '<div class="field"><label>Amount</label><input type="number" id="rcAmount" min="0" step="0.01" placeholder="e.g. 2400.00 — or leave blank and the system reads it"></div>' +
     '</div><p class="small muted" id="rcAmountHint" style="display:none">Detected from the RC — correct it if it\'s wrong.</p>' +
     '<p class="small" id="rcReadSummary" style="display:none"></p>' +
+    '<div id="rcRouteFields" style="display:none">' +
+    '<div class="form-row">' +
+    '<div class="field"><label>Pickup city</label><input type="text" id="rcPickupCity" autocomplete="off"></div>' +
+    '<div class="field"><label>Pickup state</label><input type="text" id="rcPickupState" maxlength="2" autocomplete="off"></div>' +
+    '<div class="field"><label>Pickup ZIP</label><input type="text" id="rcPickupZip" autocomplete="off"></div>' +
+    '</div>' +
+    '<div class="form-row">' +
+    '<div class="field"><label>Delivery city</label><input type="text" id="rcDeliveryCity" autocomplete="off"></div>' +
+    '<div class="field"><label>Delivery state</label><input type="text" id="rcDeliveryState" maxlength="2" autocomplete="off"></div>' +
+    '<div class="field"><label>Delivery ZIP</label><input type="text" id="rcDeliveryZip" autocomplete="off"></div>' +
+    '</div>' +
+    '<p class="small muted">Route read from the RC — correct the city/state here if it\'s wrong. Your correction is what the load gets created with.</p>' +
+    '</div>' +
     '<p class="small muted">Auto: the system reads the RC and creates the load — LXL reference, pickup and delivery city/state, driver from the RC — and the file is renamed to <code id="rcPreview"></code>. Or pick an existing load to attach it to.</p>' +
     '<div class="form-actions"><button class="btn" type="submit">Upload</button></div>' +
     '<p id="rcResult" class="small mt"></p></form>' +
@@ -5199,10 +5212,39 @@ async function viewRateCons(main) {
     const rcAmountEl = document.getElementById('rcAmount');
     const rcAmountHint = document.getElementById('rcAmountHint');
     const rcReadSummary = document.getElementById('rcReadSummary');
+    // Route correction boxes (owner, 2026-11-25): pre-filled with what
+    // the system read; only fields the admin actually changes are sent
+    // with the upload, and those win over the read when the load is
+    // created — the same "correct it if it's wrong" pattern as Amount.
+    const rcRouteFields = document.getElementById('rcRouteFields');
+    const rcRouteEls = {
+      pickupCity: document.getElementById('rcPickupCity'),
+      pickupState: document.getElementById('rcPickupState'),
+      pickupZip: document.getElementById('rcPickupZip'),
+      deliveryCity: document.getElementById('rcDeliveryCity'),
+      deliveryState: document.getElementById('rcDeliveryState'),
+      deliveryZip: document.getElementById('rcDeliveryZip'),
+    };
+    let rcDetected = null;
+    const changedRouteFields = () => {
+      const out = {};
+      if (!rcDetected) return out;
+      for (const k of Object.keys(rcRouteEls)) {
+        const el = rcRouteEls[k];
+        if (!el) continue;
+        const v = el.value.trim();
+        const was = String(rcDetected[k] || '').trim();
+        if (v && v.toUpperCase() !== was.toUpperCase()) out[k] = v;
+      }
+      return out;
+    };
     document.getElementById('rcFile').addEventListener('change', async () => {
       if (rcAmountEl) rcAmountEl.value = '';
       if (rcAmountHint) rcAmountHint.style.display = 'none';
       if (rcReadSummary) { rcReadSummary.style.display = 'none'; rcReadSummary.textContent = ''; }
+      rcDetected = null;
+      if (rcRouteFields) rcRouteFields.style.display = 'none';
+      for (const k of Object.keys(rcRouteEls)) if (rcRouteEls[k]) rcRouteEls[k].value = '';
       const fEl = document.getElementById('rcFile');
       const file = fEl && fEl.files && fEl.files[0];
       if (!file) return;
@@ -5214,6 +5256,11 @@ async function viewRateCons(main) {
         if (det && det.rateCents != null && rcAmountEl) {
           rcAmountEl.value = (Number(det.rateCents) / 100).toFixed(2);
           if (rcAmountHint) rcAmountHint.style.display = '';
+        }
+        if (det) {
+          rcDetected = det;
+          for (const k of Object.keys(rcRouteEls)) if (rcRouteEls[k]) rcRouteEls[k].value = det[k] || '';
+          if (rcRouteFields && (det.pickupCity || det.deliveryCity)) rcRouteFields.style.display = '';
         }
         // Show EVERYTHING the system read out of the document (owner,
         // 2026-11-23) — load number, broker, amount, full route and
@@ -5240,7 +5287,7 @@ async function viewRateCons(main) {
       try {
         let res;
         if (state.rcOutlook) {
-          res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId, subject: state.rcOutlook.subject }) });
+          res = await api('/api/admin/rate-confirmations/from-outlook', { method: 'POST', body: JSON.stringify({ loadId, messageId: state.rcOutlook.messageId, attachmentId: state.rcOutlook.attachmentId, subject: state.rcOutlook.subject, ...changedRouteFields() }) });
         } else {
           const fd = new FormData(rcForm);
           const amtVal = rcAmountEl ? rcAmountEl.value.trim() : '';
@@ -5248,6 +5295,8 @@ async function viewRateCons(main) {
             const dollars = parseFloat(amtVal);
             if (Number.isFinite(dollars) && dollars >= 0) fd.set('rateCents', String(Math.round(dollars * 100)));
           }
+          const routeFix = changedRouteFields();
+          for (const k of Object.keys(routeFix)) fd.set(k, routeFix[k]);
           res = await api('/api/admin/rate-confirmations', { method: 'POST', body: fd });
         }
         const saved = (res && (res.filename || (res.rateConfirmation && res.rateConfirmation.filename))) || '';

@@ -8300,7 +8300,7 @@ async function createRateCon({ loadId, reference, pickupState, deliveryState, pi
 }
 
 admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
-  const { loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents } = req.body || {};
+  const { loadId, reference, pickupState, deliveryState, pickupDate, deliveryDate, broker, rateCents, pickupCity, pickupZip, deliveryCity, deliveryZip } = req.body || {};
   try {
     let fileBuffer = null;
     let fileName = null;
@@ -8314,7 +8314,7 @@ admin.post('/rate-confirmations', upload.single('file'), async (req, res) => {
     let useLoadId = loadId || null;
     let auto = null;
     if (!useLoadId && fileBuffer) {
-      auto = await findOrCreateLoadFromRc(fileBuffer, undefined);
+      auto = await findOrCreateLoadFromRc(fileBuffer, undefined, { pickupCity, pickupState, pickupZip, deliveryCity, deliveryState, deliveryZip });
       if (auto.duplicateRc) return res.status(201).json({ ...serializeRateCon(auto.duplicateRc), duplicate: true });
       useLoadId = auto.load.id;
     }
@@ -9377,12 +9377,30 @@ function maybeRunDailyRcImport() {
 // simply attaches to it. Auto-assign rule (owner, 2026-11-19): if
 // the RC names no driver and no truck/trailer number, the load is
 // created UNASSIGNED and the admins are notified to assign it.
-async function findOrCreateLoadFromRc(fileBuffer, subject) {
+async function findOrCreateLoadFromRc(fileBuffer, subject, routeOverride) {
   const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
   const dup = db.prepare('SELECT * FROM rate_confirmations WHERE fileHash = ?').get(fileHash);
   if (dup) return { duplicateRc: dup };
   const text = await extractFileText(fileBuffer);
   const f = extractRcLoadFields(text || '', subject || '');
+  // Admin route correction (owner, 2026-11-25): the upload form's
+  // pickup/delivery city, state and ZIP boxes — filled only when the
+  // admin actually changed them from what was read — win over the
+  // parsed places when the load is created. An existing load is
+  // returned untouched above/below; this only shapes a NEW load.
+  if (routeOverride && f.places && f.places.length >= 2) {
+    const cleanCity = (v) => String(v || '').trim().slice(0, 60);
+    const cleanState = (v) => { const s = String(v || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2); return s.length === 2 ? s : ''; };
+    const cleanZip = (v) => String(v || '').trim().slice(0, 10);
+    const p = f.places[0];
+    const d = f.places[f.places.length - 1];
+    if (cleanCity(routeOverride.pickupCity)) p.city = cleanCity(routeOverride.pickupCity);
+    if (cleanState(routeOverride.pickupState)) p.state = cleanState(routeOverride.pickupState);
+    if (cleanZip(routeOverride.pickupZip)) p.zip = cleanZip(routeOverride.pickupZip);
+    if (cleanCity(routeOverride.deliveryCity)) d.city = cleanCity(routeOverride.deliveryCity);
+    if (cleanState(routeOverride.deliveryState)) d.state = cleanState(routeOverride.deliveryState);
+    if (cleanZip(routeOverride.deliveryZip)) d.zip = cleanZip(routeOverride.deliveryZip);
+  }
   const ref = f.lxlRef || (f.loadRef ? lxlLoadRef(f.loadRef) : null);
   if (!ref) throw Object.assign(new Error('No load number could be read from this rate confirmation — pick the load manually.'), { status: 400 });
   let load = db.prepare('SELECT * FROM loads WHERE reference = ?').get(ref);
@@ -9420,7 +9438,7 @@ async function findOrCreateLoadFromRc(fileBuffer, subject) {
 
 admin.post('/rate-confirmations/from-outlook', async (req, res) => {
   try {
-    const { loadId, messageId, attachmentId, subject } = req.body || {};
+    const { loadId, messageId, attachmentId, subject, pickupCity, pickupState, pickupZip, deliveryCity, deliveryState, deliveryZip } = req.body || {};
     if (!messageId || !attachmentId)
       return err(res, 400, 'messageId and attachmentId are required');
     const user = getUserById(req.user.id);
@@ -9436,11 +9454,11 @@ admin.post('/rate-confirmations/from-outlook', async (req, res) => {
     let useLoadId = loadId ? Number(loadId) : null;
     let auto = null;
     if (!useLoadId) {
-      auto = await findOrCreateLoadFromRc(fileBuffer, subject);
+      auto = await findOrCreateLoadFromRc(fileBuffer, subject, { pickupCity, pickupState, pickupZip, deliveryCity, deliveryState, deliveryZip });
       if (auto.duplicateRc) return res.status(201).json({ ...serializeRateCon(auto.duplicateRc), duplicate: true });
       useLoadId = auto.load.id;
     }
-    const rc = await createRateCon({ loadId: useLoadId, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
+    const rc = await createRateCon({ loadId: useLoadId, pickupState, deliveryState, fileBuffer, fileName: att.name || 'rate-confirmation.pdf', mimeType: att.contentType || 'application/pdf', subject });
     res.status(201).json(auto ? { ...rc, loadCreated: auto.created, loadUnassigned: !!auto.unassigned, loadReference: auto.load.reference, loadRoute: auto.load.pickupLocation + ' → ' + auto.load.deliveryLocation } : rc);
   } catch (e) {
     if (e.status) return err(res, e.status, e.message);
