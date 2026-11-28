@@ -5413,10 +5413,11 @@ admin.post('/factoring/:loadId/status', (req, res) => {
   res.json(serializeFactoringLoad(applyFactoringStatus(load, status, otrReference)));
 });
 
-// --- Paperwork packet (owner, 2026-11-24) --------------------------------
-// One click downloads ONE PDF holding everything OTR asks for on an
-// invoice: the load's rate confirmation, pickup BOL(s) and delivery
-// paperwork / POD, in that order. It exists because OTR's app runs
+// --- Paperwork packet (owner, 2026-11-24; contents rule 2026-11-28) ------
+// One click downloads ONE PDF for an OTR invoice holding ONLY the
+// load's rate confirmation and its delivery BOL, in that order.
+// OWNER RULE (2026-11-28): nothing else goes in the packet — no
+// pickup BOL, no receipts, no pictures, ever. It exists because OTR's app runs
 // inside a sealed cross-origin frame on the Factoring page — its
 // "Add Paperwork" picker can only take files from the admin's own
 // computer, never from the portal — so instead of hunting the same
@@ -5437,16 +5438,14 @@ admin.get('/factoring/:loadId/packet', async (req, res) => {
     if (f) parts.push({ label: 'Rate confirmation', file: f });
   }
   const docs = db
-    .prepare(
-      "SELECT * FROM documents WHERE loadId = ? AND kind IN ('pickup_bol', 'delivery_bol') ORDER BY CASE kind WHEN 'pickup_bol' THEN 0 ELSE 1 END, id",
-    )
+    .prepare("SELECT * FROM documents WHERE loadId = ? AND kind = 'delivery_bol' ORDER BY id")
     .all(load.id);
   for (const d of docs) {
     const f = getFileRow(d.fileId);
-    if (f) parts.push({ label: d.kind === 'pickup_bol' ? 'Pickup BOL' : 'Delivery paperwork', file: f });
+    if (f) parts.push({ label: 'Delivery BOL', file: f });
   }
   if (!parts.length)
-    return err(res, 400, 'This load has no paperwork on file yet — add the rate confirmation and BOL first.');
+    return err(res, 400, 'This load has no paperwork on file yet — add the rate confirmation and the delivery BOL first.');
   const out = await PDFDocument.create();
   let packed = 0;
   const skipped = [];

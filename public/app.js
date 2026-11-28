@@ -5669,7 +5669,7 @@ async function viewFactoring(main) {
     '<p class="small muted fx-create-note">Opens OTR’s app right here on this page — sign in once with your OTR login, then Invoices → Add Invoice. Every invoice you submit appears in the list below automatically.</p>' +
     '</div></div>' +
     (pkList.length ? '<div class="card fx-card"><h2>Paperwork packets — for new invoices</h2>' +
-    '<p class="small muted">OTR’s window can only take files from your computer. Download a load’s packet — rate con, BOL and delivery papers in one PDF — then pick that one file in Add Paperwork.</p>' +
+    '<p class="small muted">OTR’s window can only take files from your computer. Download a load’s packet — only the rate con and the delivery BOL in one PDF, nothing else — then pick that one file in Add Paperwork.</p>' +
     '<div class="fx-rows">' + pkRows + '</div></div>' : '') +
     '<div class="card fx-card"><h2>Factored invoices — synced from OTR</h2>' +
     (fxList.length ? '<div class="fx-rows">' + fxRows + '</div>' : '<p class="empty">No invoices yet — every invoice you submit at OTR lands here automatically with OTR’s live status.</p>') +
