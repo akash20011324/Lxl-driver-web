@@ -3728,7 +3728,7 @@ function payrollTripHtml(t) {
     '<span><small>Expenses</small><strong>' + payrollMoney(n.expensesCents) + '</strong></span>' +
     (n.netPayCents !== undefined ? '<span><small>Net pay</small><strong>' + payrollMoney(n.netPayCents) + '</strong></span>' : '') +
     '</div>';
-  const docBtn = (f, label) => f ? '<button class="btn btn-ghost btn-sm" type="button" data-payroll-view="' + f.fileId + '">' + esc(label) + '</button>' : '';
+  const docBtn = (f, label) => f ? '<button class="btn btn-ghost btn-sm" type="button" data-payroll-view="' + esc(f.url || ('/files/' + f.fileId)) + '" data-payroll-name="' + esc(f.filename || '') + '" data-payroll-mime="' + esc(f.mimeType || '') + '">' + esc(label) + '</button>' : '';
   let action = '';
   if (t.status === 'received' || t.status === 'rejected') action = payrollStatementFormHtml(t);
   if (t.status === 'approved')
@@ -3777,7 +3777,11 @@ function payrollStatementFormHtml(t) {
 
 function wirePayrollTrips(main) {
   main.querySelectorAll('[data-payroll-view]').forEach((b) => b.addEventListener('click', () => {
-    window.open('/files/' + b.dataset.payrollView, '_blank');
+    // /files/:id requires the Bearer token — a bare window.open lands on
+    // {"error":"Authentication required"} (owner report, 2026-11-27).
+    // Route through the shared authenticated viewer, like every other
+    // document in the portal.
+    window.viewFile(b.dataset.payrollView, b.dataset.payrollName || undefined, b.dataset.payrollMime || undefined);
   }));
   main.querySelectorAll('[data-payroll-paid]').forEach((b) => b.addEventListener('click', async () => {
     try {
