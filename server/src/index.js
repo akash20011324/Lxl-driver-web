@@ -5720,30 +5720,59 @@ function detectBroker(text, subject) {
   // letterhead — never the carrier block (that is Lubana Xpress).
   const t = cleanRateText(text).replace(/\bAttn?\s*:?\s*[A-Z][A-Za-z]+/g, ' ');
   const bad = (n) => !n || isCarrierName(n) || /OTR SOLUTIONS/i.test(n);
+  // Sentence words and document boilerplate can never be part of a
+  // company name. The suffix-anchor scan below used to walk back over
+  // ordinary sentences and invent brokers out of them — "AUTOMATICALLY
+  // DEDUCTION FOR FREIGHT", "FOR FREIGHT ASSURING FREIGHT", "THIS
+  // SHIPMENT FOR TRANSPORTATION" (owner report, 2026-11-28) — and it
+  // glued the "PM" of a time onto "JEAR Logistics, LLC". A candidate
+  // containing any of these words is a sentence fragment, not a name.
+  const SENTENCE_TOK = /^(THIS|THAT|THE|FOR|FROM|WITH|WITHOUT|AND|OR|OF|TO|IN|ON|AT|BY|PER|VIA|MUST|WILL|SHALL|NOT|ARE|WAS|HAS|HAVE|ALL|ANY|YOU|YOUR|OUR|ITS|IT|IS|IF|BE|BEEN|WHEN|UPON|AFTER|BEFORE|DURING|AUTOMATICALLY|DEDUCTION|DEDUCTIONS|SHIPMENT|SHIPMENTS|ASSURING|ASSURE|ASSURES|RECEIVES|RECEIVED|SIGNED|SIGNS|SIGN|DRIVER|DRIVERS|DISPATCHER|DISPATCHERS|HELD|LIABLE|LIABILITY|CONDITION|CONDITIONS|PACKAGED|SAFELY|NOTATION|NOTATIONS|INSTRUCTION|INSTRUCTIONS|REQUIRES|REQUIRED|CONFIRM|COMPLETED|FAILURE|FINES|CHARGES|AM|PM|DEG|DEGS|TEMP|TEMPERATURE|LBS|LB|KG|KGS|MILE|MILES|HOUR|HOURS)$/i;
+  const GENERIC_TOK = /^(LLC|INC|INC\.|LTD|LTD\.|CORP|CORP\.|CO|CO\.|TRANSPORT|TRANSPORTATION|TRANSPORTS|LOGISTICS|FREIGHT|EXPRESS|TRUCKING|GROUP|SOLUTIONS|SERVICES|COMPANY|BROKERAGE|BROKER|BROKERS|INTERNATIONAL|GLOBAL|NATIONAL|AMERICA|AMERICAN|USA|US)$/i;
+  const nameIsSentence = (name) => {
+    const toks = String(name || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    if (!toks.length) return true;
+    if (toks.some((w) => SENTENCE_TOK.test(w))) return true;
+    // A name made ONLY of generic industry words ("Freight", "Express
+    // Logistics") is a fragment too — a real name carries at least one
+    // distinctive word (Armstrong, Jear, Spot, Trinity...).
+    if (toks.every((w) => GENERIC_TOK.test(w))) return true;
+    return false;
+  };
   // 1) Labelled broker field: "Broker: Armstrong Transport Group".
   const lm = t.match(/(?:Brokerage\s*:|Broker\s*:|Booked by\s*:?|Issued by\s*:?)\s*([A-Za-z0-9][A-Za-z0-9&'.,\- ]{2,70})/i);
   if (lm) {
     const cand = cleanBrokerName(lm[1].split(/\s+(?:MC|DOT|Phone|Tel|Fax|Email|Address|Load|Date|Ref|Pro)\b/i)[0]);
-    if (!bad(cand) && /^[A-Z0-9]/.test(cand) && !/^[A-Z]{1,3}[-\s]?\d/.test(cand) && /LLC|Inc|Ltd|Corp|Co\.|Group|Transport|Logistics|Freight|Express|Trucking/i.test(cand)) return cand;
+    if (!bad(cand) && !nameIsSentence(cand) && /^[A-Z0-9]/.test(cand) && !/^[A-Z]{1,3}[-\s]?\d/.test(cand) && /LLC|Inc|Ltd|Corp|Co\.|Group|Transport|Logistics|Freight|Express|Trucking/i.test(cand)) return cand;
   }
   // 2) Subject: "... from <broker>" at the end (the D & L pattern).
   if (subject) {
     const m = String(subject).match(/\bfrom\s+(.+?)\s*$/i);
-    if (m) { const c = cleanBrokerName(m[1]); if (!bad(c)) return c; }
+    if (m) { const c = cleanBrokerName(m[1]); if (!bad(c) && !nameIsSentence(c)) return c; }
   }
   // 3) Company-like names anywhere in the document, scored: a name the
   //    email subject also mentions and the letterhead zone count most;
   //    anything inside the carrier block is ignored.
   const subjTokens = new Set(String(subject || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length >= 4));
   const cz = t.search(/Carrier\s*:/i);
+  // The pickup/delivery blocks name SHIPPERS and WAREHOUSES, not the
+  // broker — a company found inside one gets no letterhead bonus.
+  // Twin Cities Logistics' own confirmation names the shipper's
+  // warehouse ("INTER METRO FREIGHT INC WAREHOUSE", Elizabeth NJ) in
+  // its pickup block, and that used to tie or beat the real broker
+  // (owner report, 2026-11-28).
+  const stopZones = [];
+  for (const m of t.matchAll(/Pick-?Up\s*#|Delivery\s*#|Shipper\(s\)|Destinations?\(s\)|Consignee|Shipper\s*:|Receiver\s*:/gi)) stopZones.push([m.index, m.index + 500]);
+  const inStopZone = (idx) => stopZones.some(([a, b]) => idx >= a && idx < b);
   const scores = new Map();
   const consider = (raw, idx) => {
     const name = cleanBrokerName(raw);
     if (bad(name)) return;
+    if (nameIsSentence(name)) return;
     if (/^[A-Z]{1,3}[-\s]?\d/.test(name)) return; // "MC-1813953 ..." is an ID, not a name
     if (cz >= 0 && idx > cz && idx < cz + 220) return;
     let s = 1;
-    if (idx < 1600) s += 50;
+    if (idx < 1600 && !inStopZone(idx)) s += 50;
     const words = name.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length >= 4);
     if (words.some((w) => subjTokens.has(w))) s += 100;
     scores.set(name, (scores.get(name) || 0) + s);
@@ -5752,8 +5781,13 @@ function detectBroker(text, subject) {
   // candidate: walk back up to 3 name tokens from the suffix. Anchoring
   // per suffix means a rejected name (the carrier block) can never
   // swallow the real broker's name the way a left-to-right scan can.
-  const STOP_TOK = /^(MC|DOT|REF|LOAD|DATE|PRO|RATE|CONFIRMATION|CARRIER|SHIPPER|RECEIVER|CONSIGNEE|TOTAL|PHONE|TEL|FAX|EMAIL|ADDRESS|INFORMATION|DETAILS|NUMBER|BILL|SIGNED|COPY)$/i;
-  const sufRe = /(LLC|Inc\.?|Ltd\.?|Corp\.?|Co\.?|TRANSPORT\w*|LOGISTICS|FREIGHT|EXPRESS|TRUCKING|GROUP)\b/g;
+  const STOP_TOK = /^(MC|DOT|REF|LOAD|DATE|PRO|RATE|CONFIRMATION|CARRIER|SHIPPER|RECEIVER|CONSIGNEE|TOTAL|PHONE|TEL|FAX|EMAIL|ADDRESS|INFORMATION|DETAILS|NUMBER|BILL|SIGNED|COPY|SHEET|INFO|NAME|AGENT|SIGNATURE|AM|PM|BY|IT|ITS|TO|OF|THE|AN|AND|OR|FOR|FROM|WITH|WITHOUT|IN|ON|AT|AS|IS|ARE|WAS|BE|HAS|HAVE|HAD|NOT|BUT|IF|WHEN|THEN|THAN|ALL|ANY|PER|VIA|THIS|THAT|THESE|THOSE|YOU|YOUR|OUR|WE|THEY)$/i;
+  // Case-insensitive (owner, 2026-11-28): the old case-sensitive scan
+  // only anchored on ALL-CAPS names, so a title-case letterhead like
+  // "Spot Freight" never became a candidate at all and a shipper's
+  // all-caps name won by default. Sentence fragments this admits are
+  // killed by the walk-back stop words and nameIsSentence above.
+  const sufRe = /(LLC|Inc\.?|Ltd\.?|Corp\.?|Co\.?|TRANSPORT\w*|LOGISTICS|FREIGHT|EXPRESS|TRUCKING|GROUP)\b/gi;
   let sm;
   while ((sm = sufRe.exec(t))) {
     const end = sm.index + sm[0].length;
@@ -5768,13 +5802,60 @@ function detectBroker(text, subject) {
       const tok = toks[i];
       if (!/^[A-Z&][A-Za-z0-9&'.,\-]*$/.test(tok)) break;
       if (STOP_TOK.test(tok.replace(/[^A-Za-z]/g, ''))) break;
+      // Sentence and unit words are name boundaries too, not just
+      // rejects: "…50 DEG TWIN CITIES LOGISTICS" must stop the walk at
+      // DEG so the real name survives, instead of the whole candidate
+      // dying for containing DEG (owner report, 2026-11-28).
+      if (SENTENCE_TOK.test(tok.replace(/[^A-Za-z]/g, ''))) break;
       nameToks.unshift(tok);
     }
+    // A "name" immediately followed by WAREHOUSE is a facility
+    // ("INTER METRO FREIGHT INC WAREHOUSE"), never the broker.
+    if (/WAREHOUSE/i.test(t.slice(nameEnd, nameEnd + 30))) continue;
     consider(nameToks.join(' '), sm.index);
   }
+  // Winner: the top score, except that a candidate which is just a
+  // word-prefix of a fuller name ("Integrity Express" inside
+  // "Integrity Express Logistics", "Desirable Logistics" inside
+  // "Desirable Logistics Solutions LLC") loses to that fuller name
+  // when their scores are close — the short form only ever wins on
+  // occurrence noise, and a company does not truncate its own name
+  // in its own letterhead (owner report, 2026-11-28).
+  const isWordPrefix = (a, b) => {
+    const aw = a.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    const bw = b.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    return aw.length < bw.length && aw.every((w, i) => bw[i] === w);
+  };
   let best = null;
-  for (const [name, score] of scores) if (!best || score > best.score || (score === best.score && name.length > best.name.length)) best = { name, score };
-  return best ? best.name : null;
+  for (const [name, score] of scores) if (!best || score > best.score) best = { name, score };
+  if (best) {
+    const near = [...scores.entries()].filter(([, s]) => s >= best.score - 10).map(([n]) => n);
+    const fuller = near.filter((n) => !near.some((m) => m !== n && isWordPrefix(n, m)));
+    if (fuller.length && !fuller.includes(best.name)) {
+      const pick = fuller.map((n) => ({ name: n, score: scores.get(n) })).sort((a, b) => b.score - a.score || b.name.length - a.name.length)[0];
+      if (pick) best = pick;
+    }
+  }
+  if (best) return best.name;
+  // Fallback (owner, 2026-11-28): a broker whose name carries no
+  // suffix word at all ("Truckalocity") anchors nothing above. When
+  // — and only when — the suffix scan found no candidate, take the
+  // first short name-like line of the letterhead: 1–3 plain words,
+  // no digits, no label colon, no title or address words. Running
+  // this only as a fallback keeps it from ever outranking a real
+  // suffix-anchored name (or an agent's personal name in a header).
+  const headLines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 8);
+  for (const line of headLines) {
+    if (/[:@]/.test(line) || /\d/.test(line)) continue;
+    const toks = line.split(/\s+/).filter(Boolean);
+    if (toks.length < 1 || toks.length > 3) continue;
+    if (!toks.every((w) => /^[A-Za-z&][A-Za-z0-9&'.\-]*$/.test(w))) continue;
+    const cand = cleanBrokerName(line);
+    if (bad(cand) || nameIsSentence(cand)) continue;
+    if (/RATE|CONFIRMATION|TRUCKLOAD|LOAD|CARRIER|INVOICE|BILL|LADING|STREET|AVENUE|ROAD|DRIVE|BOX|SUITE/i.test(cand)) continue;
+    return cand;
+  }
+  return null;
 }
 
 async function extractRateConDetails(fileBuffer, subject) {
